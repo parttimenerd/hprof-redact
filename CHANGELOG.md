@@ -8,7 +8,7 @@ and this project adheres to [Semantic Versioning](https://semver.org/spec/v2.0.0
 ## [Unreleased]
 
 ### Added
-- Initial release of heap-dump-filter
+- Initial release of hprof-redact
 - Stream-based HPROF heap dump filtering and redaction
 - Three transformer options:
   - `zero`: Zero out primitive values and string contents

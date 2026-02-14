@@ -157,7 +157,7 @@ final class HprofSlurpRunner {
                 .build();
         HttpRequest req = HttpRequest.newBuilder(URI.create(url))
                 .timeout(Duration.ofMinutes(2))
-                .header("User-Agent", "heap-dump-filter-tests")
+                .header("User-Agent", "hprof-redact-tests")
                 .build();
 
         HttpResponse<Path> resp = client.send(req, HttpResponse.BodyHandlers.ofFile(dest));
@@ -176,22 +176,22 @@ final class HprofSlurpRunner {
         String home = System.getProperty("user.home", ".");
 
         if (os.contains("mac")) {
-            return Path.of(home, "Library", "Caches", "heap-dump-filter");
+            return Path.of(home, "Library", "Caches", "hprof-redact");
         }
 
         String xdg = System.getenv("XDG_CACHE_HOME");
         if (xdg != null && !xdg.isBlank()) {
-            return Path.of(xdg, "heap-dump-filter");
+            return Path.of(xdg, "hprof-redact");
         }
 
         if (os.contains("win")) {
             String localAppData = System.getenv("LOCALAPPDATA");
             if (localAppData != null && !localAppData.isBlank()) {
-                return Path.of(localAppData, "heap-dump-filter", "cache");
+                return Path.of(localAppData, "hprof-redact", "cache");
             }
         }
 
-        return Path.of(home, ".cache", "heap-dump-filter");
+        return Path.of(home, ".cache", "hprof-redact");
     }
 
     private static void extractZip(Path zipFile, Path destDir) throws IOException {

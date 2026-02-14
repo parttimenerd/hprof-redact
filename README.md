@@ -1,6 +1,6 @@
-# heap-dump-filter
+# hprof-redact
 
-`heap-dump-filter` is a tool for processing Java heap dumps (HPROF format) to redact sensitive data while preserving heap structure and size characteristics. This is useful for:
+`hprof-redact` is a tool for processing Java heap dumps (HPROF format) to redact sensitive data while preserving heap structure and size characteristics. This is useful for:
 
 - Sharing heap dumps for analysis without exposing sensitive string data
 - Testing and debugging production issues safely
@@ -12,7 +12,7 @@ __This is currently just an early prototype, a proof of concept. Feel free to te
 
 ### As a Standalone JAR
 
-Download the latest release from [GitHub Releases](https://github.com/parttimenerd/heap-dump-filter/releases) and run:
+Download the latest release from [GitHub Releases](https://github.com/parttimenerd/hprof-redact/releases) and run:
 
 ```bash
 java -jar hprof-redact.jar -i input.hprof -o output.hprof
@@ -186,7 +186,7 @@ This:
 ## Support, Feedback, Contributing
 
 This project is open to feature requests/suggestions, bug reports etc.
-via [GitHub](https://github.com/parttimenerd/heap-dump-filter/issues) issues.
+via [GitHub](https://github.com/parttimenerd/hprof-redact/issues) issues.
 Contribution and feedback are encouraged and always welcome.
 
 ## License

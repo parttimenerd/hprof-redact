@@ -14,7 +14,7 @@ import java.nio.file.Path;
 import java.util.concurrent.Callable;
 
 @Command(
-        name = "heap-dump-filter",
+        name = "hprof-redact",
         mixinStandardHelpOptions = true,
         description = "Stream and redact HPROF heap dumps."
 )

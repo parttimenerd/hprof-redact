@@ -1,6 +1,6 @@
 #!/usr/bin/env python3
 """
-Bump minor version and release heap-dump-filter.
+Bump minor version and release hprof-redact.
 
 This script:
 1. Reads the current version from pom.xml
@@ -77,7 +77,7 @@ class VersionBumper:
 
     def update_readme(self, old_version: str, new_version: str):
         """Update version in README.md"""
-        # Skip README update for heap-dump-filter as it doesn't have version there
+        # Skip README update for hprof-redact as it doesn't have version there
         pass
 
 
@@ -440,7 +440,7 @@ java -jar jfr-redact.jar redact-text hs_err.log
 
 def main():
     parser = argparse.ArgumentParser(
-        description='Bump version and release heap-dump-filter',
+        description='Bump version and release hprof-redact',
         formatter_class=argparse.RawDescriptionHelpFormatter,
         epilog='''
 Examples:
@@ -661,7 +661,7 @@ Note: CHANGELOG.md must have content under [Unreleased] section before releasing
 
     if do_github_release:
         print(f"\n📦 GitHub Release:")
-        print(f"  https://github.com/parttimenerd/heap-dump-filter/releases/tag/v{new_version}")
+        print(f"  https://github.com/parttimenerd/hprof-redact/releases/tag/v{new_version}")
 
 
 if __name__ == '__main__':
