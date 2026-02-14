@@ -699,12 +699,11 @@ class HprofFilterTest {
 
         void skipSubRecord(int subTag) throws IOException {
             switch (subTag) {
-                case HPROF_GC_ROOT_UNKNOWN -> skipBytes(idSize);
+                case HPROF_GC_ROOT_UNKNOWN, HPROF_GC_ROOT_STICKY_CLASS, HPROF_GC_ROOT_MONITOR_USED -> skipBytes(idSize);
                 case HPROF_GC_ROOT_JNI_GLOBAL -> skipBytes(idSize + idSize);
-                case HPROF_GC_ROOT_JNI_LOCAL, HPROF_GC_ROOT_JAVA_FRAME -> skipBytes(idSize + 4 + 4);
+                case HPROF_GC_ROOT_JNI_LOCAL, HPROF_GC_ROOT_JAVA_FRAME,
+                     HPROF_GC_ROOT_THREAD_OBJ -> skipBytes(idSize + 4 + 4);
                 case HPROF_GC_ROOT_NATIVE_STACK, HPROF_GC_ROOT_THREAD_BLOCK -> skipBytes(idSize + 4);
-                case HPROF_GC_ROOT_STICKY_CLASS, HPROF_GC_ROOT_MONITOR_USED -> skipBytes(idSize);
-                case HPROF_GC_ROOT_THREAD_OBJ -> skipBytes(idSize + 4 + 4);
                 case HPROF_GC_CLASS_DUMP -> throw new IOException("CLASS_DUMP not supported here");
                 case HPROF_GC_INSTANCE_DUMP -> throw new IOException("INSTANCE_DUMP not supported here");
                 case HPROF_GC_OBJ_ARRAY_DUMP -> {

@@ -19,16 +19,6 @@ public final class HprofClassInfo {
         this.instanceFields = new ArrayList<>(instanceFields);
     }
 
-    public HprofClassInfo(long classId, long superClassId, List<HprofType> instanceFieldTypes, boolean unnamed) {
-        this.classId = classId;
-        this.superClassId = superClassId;
-        List<FieldDef> defs = new ArrayList<>(instanceFieldTypes.size());
-        for (HprofType type : instanceFieldTypes) {
-            defs.add(new FieldDef(0L, type));
-        }
-        this.instanceFields = defs;
-    }
-
     public long classId() {
         return classId;
     }

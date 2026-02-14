@@ -9,7 +9,6 @@ import java.io.EOFException;
 import java.io.IOException;
 import java.io.InputStream;
 import java.io.OutputStream;
-import java.nio.charset.StandardCharsets;
 import java.nio.file.Path;
 import java.util.ArrayList;
 import java.util.HashMap;
@@ -166,12 +165,11 @@ public final class HprofFilter {
         while (limited.remaining() > 0) {
             int subTag = segmentIn.readU1();
             switch (subTag) {
-                case HPROF_GC_ROOT_UNKNOWN -> skipFully(segmentIn, idSize);
+                case HPROF_GC_ROOT_UNKNOWN, HPROF_GC_ROOT_STICKY_CLASS, HPROF_GC_ROOT_MONITOR_USED -> skipFully(segmentIn, idSize);
                 case HPROF_GC_ROOT_JNI_GLOBAL -> skipFully(segmentIn, idSize + idSize);
-                case HPROF_GC_ROOT_JNI_LOCAL, HPROF_GC_ROOT_JAVA_FRAME -> skipFully(segmentIn, idSize + 4 + 4);
+                case HPROF_GC_ROOT_JNI_LOCAL, HPROF_GC_ROOT_JAVA_FRAME,
+                     HPROF_GC_ROOT_THREAD_OBJ -> skipFully(segmentIn, idSize + 4 + 4);
                 case HPROF_GC_ROOT_NATIVE_STACK, HPROF_GC_ROOT_THREAD_BLOCK -> skipFully(segmentIn, idSize + 4);
-                case HPROF_GC_ROOT_STICKY_CLASS, HPROF_GC_ROOT_MONITOR_USED -> skipFully(segmentIn, idSize);
-                case HPROF_GC_ROOT_THREAD_OBJ -> skipFully(segmentIn, idSize + 4 + 4);
                 case HPROF_GC_CLASS_DUMP -> scanClassDump(segmentIn, idSize, classInfos, nameKinds);
                 case HPROF_GC_INSTANCE_DUMP -> skipInstanceDump(segmentIn, idSize);
                 case HPROF_GC_OBJ_ARRAY_DUMP -> skipObjectArrayDump(segmentIn, idSize);
@@ -191,7 +189,7 @@ public final class HprofFilter {
         long classId = in.readId();
         skipFully(in, 4);
         long superClassId = in.readId();
-        skipFully(in, idSize * 5);
+        skipFully(in, idSize * 5L);
         skipFully(in, 4); // instance size
 
         int constantPoolSize = in.readU2();
@@ -322,10 +320,10 @@ public final class HprofFilter {
                 // Root records (fixed-size payloads)
                 case HPROF_GC_ROOT_UNKNOWN -> copyBytes(segmentIn, out, idSize);
                 case HPROF_GC_ROOT_JNI_GLOBAL -> copyBytes(segmentIn, out, idSize + idSize);
-                case HPROF_GC_ROOT_JNI_LOCAL, HPROF_GC_ROOT_JAVA_FRAME -> copyBytes(segmentIn, out, idSize + 4 + 4);
+                case HPROF_GC_ROOT_JNI_LOCAL, HPROF_GC_ROOT_JAVA_FRAME,
+                     HPROF_GC_ROOT_THREAD_OBJ -> copyBytes(segmentIn, out, idSize + 4 + 4);
                 case HPROF_GC_ROOT_NATIVE_STACK, HPROF_GC_ROOT_THREAD_BLOCK -> copyBytes(segmentIn, out, idSize + 4);
                 case HPROF_GC_ROOT_STICKY_CLASS, HPROF_GC_ROOT_MONITOR_USED -> copyBytes(segmentIn, out, idSize);
-                case HPROF_GC_ROOT_THREAD_OBJ -> copyBytes(segmentIn, out, idSize + 4 + 4);
                 // Typed heap records
                 case HPROF_GC_CLASS_DUMP -> handleClassDump(segmentIn, out, transformer, idSize, classInfos, flattenedTypesCache, nameKinds);
                 case HPROF_GC_INSTANCE_DUMP -> handleInstanceDump(segmentIn, out, transformer, idSize, classInfos, flattenedTypesCache);

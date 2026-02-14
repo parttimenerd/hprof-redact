@@ -99,7 +99,7 @@ final class ModifiedUtf8 {
             int c = value.charAt(i);
             if (c >= 0x0001 && c <= 0x007F) {
                 out.write(c);
-            } else if (c == 0x0000 || c <= 0x07FF) {
+            } else if (c <= 0x07FF) {
                 out.write(0xC0 | ((c >> 6) & 0x1F));
                 out.write(0x80 | (c & 0x3F));
             } else {
