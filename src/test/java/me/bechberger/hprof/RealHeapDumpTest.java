@@ -12,6 +12,8 @@ import com.fasterxml.jackson.databind.JsonNode;
 import com.fasterxml.jackson.databind.ObjectMapper;
 import com.fasterxml.jackson.databind.node.ObjectNode;
 
+import me.bechberger.hprof.transformer.ZeroPrimitiveTransformer;
+
 import java.io.InputStream;
 import java.io.OutputStream;
 import java.lang.management.ManagementFactory;

@@ -2,8 +2,13 @@
  * Copyright (c) 2026.
  * SPDX-License-Identifier: MIT
  */
-package me.bechberger.hprof;
+package me.bechberger.hprof.transformer;
 
+import me.bechberger.hprof.HprofTransformer;
+
+/**
+ * Transformer that zeros all primitive values while preserving UTF-8 string byte lengths.
+ */
 public final class ZeroPrimitiveTransformer implements HprofTransformer {
     @Override
     public boolean transformBoolean(boolean value) {
@@ -47,7 +52,6 @@ public final class ZeroPrimitiveTransformer implements HprofTransformer {
 
     @Override
     public String transformUtf8String(String value) {
-        // String of same size but all zero, to preserve string length and thus offsets of subsequent fields
-        return "0".repeat(value.length());
+        return TransformerUtil.zeroPreservingUtf8String(value);
     }
 }

@@ -1,5 +1,7 @@
 # hprof-redact
 
+[![Build and Release](https://github.com/parttimenerd/hprof-redact/actions/workflows/build.yml/badge.svg)](https://github.com/parttimenerd/hprof-redact/actions/workflows/build.yml)
+
 `hprof-redact` is a tool for processing Java heap dumps (HPROF format) to redact sensitive data while preserving heap structure and size characteristics. This is useful for:
 
 - Sharing heap dumps for analysis without exposing sensitive string data

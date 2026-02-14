@@ -4,10 +4,7 @@
  */
 package me.bechberger.hprof;
 
-import me.bechberger.hprof.HprofDataInput;
-import me.bechberger.hprof.HprofFilter;
-import me.bechberger.hprof.HprofTransformer;
-import me.bechberger.hprof.ZeroPrimitiveTransformer;
+import me.bechberger.hprof.transformer.ZeroPrimitiveTransformer;
 import org.junit.jupiter.api.Test;
 
 import java.io.ByteArrayInputStream;

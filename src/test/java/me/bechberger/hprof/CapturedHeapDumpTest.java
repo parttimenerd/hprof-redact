@@ -7,7 +7,7 @@ package me.bechberger.hprof;
 import me.bechberger.hprof.HprofFilter;
 import me.bechberger.hprof.HprofIo;
 import me.bechberger.hprof.HprofTransformer;
-import me.bechberger.hprof.ZeroPrimitiveTransformer;
+import me.bechberger.hprof.transformer.ZeroPrimitiveTransformer;
 import com.fasterxml.jackson.databind.JsonNode;
 import com.fasterxml.jackson.databind.ObjectMapper;
 import com.fasterxml.jackson.databind.node.ObjectNode;

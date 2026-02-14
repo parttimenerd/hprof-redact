@@ -5,6 +5,9 @@
 package me.bechberger.hprof;
 
 import java.util.Locale;
+import me.bechberger.hprof.transformer.DropStringTransformer;
+import me.bechberger.hprof.transformer.ZeroPrimitiveTransformer;
+import me.bechberger.hprof.transformer.ZeroStringTransformer;
 
 enum TransformerOption {
     ZERO("zero"),
