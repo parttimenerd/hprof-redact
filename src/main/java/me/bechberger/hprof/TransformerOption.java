@@ -6,10 +6,11 @@ package me.bechberger.hprof;
 
 import java.util.Locale;
 import me.bechberger.hprof.transformer.DropStringTransformer;
+import me.bechberger.hprof.transformer.HprofTransformer;
 import me.bechberger.hprof.transformer.ZeroPrimitiveTransformer;
 import me.bechberger.hprof.transformer.ZeroStringTransformer;
 
-enum TransformerOption {
+public enum TransformerOption {
     ZERO("zero"),
     ZERO_STRINGS("zero-strings"),
     DROP_STRINGS("drop-strings");
@@ -20,7 +21,7 @@ enum TransformerOption {
         this.optionName = optionName;
     }
 
-    static TransformerOption fromOption(String raw) {
+    public static TransformerOption fromOption(String raw) {
         if (raw == null || raw.isBlank()) {
             return ZERO;
         }
@@ -33,7 +34,7 @@ enum TransformerOption {
         throw new IllegalArgumentException("Unknown transformer: " + raw);
     }
 
-    HprofTransformer create() {
+    public HprofTransformer create() {
         return switch (this) {
             case ZERO -> new ZeroPrimitiveTransformer();
             case ZERO_STRINGS -> new ZeroStringTransformer();

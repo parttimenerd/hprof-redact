@@ -15,8 +15,8 @@ import java.util.Locale;
 import java.util.zip.GZIPInputStream;
 import java.util.zip.GZIPOutputStream;
 
-public final class HprofIo {
-    private HprofIo() {}
+public final class HprofIO {
+    private HprofIO() {}
 
     public static InputStream openInputStream(Path path) throws IOException {
         InputStream in = Files.newInputStream(path);

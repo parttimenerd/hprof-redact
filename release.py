@@ -26,6 +26,7 @@ class VersionBumper:
         self.pom_xml = project_root / "pom.xml"
         self.readme = project_root / "README.md"
         self.changelog = project_root / "CHANGELOG.md"
+        self.jbang_catalog = project_root / "jbang-catalog.json"
         self.backup_dir = project_root / ".release-backup"
         self.backups_created = False
 
@@ -80,6 +81,20 @@ class VersionBumper:
         # Skip README update for hprof-redact as it doesn't have version there
         pass
 
+    def update_jbang_catalog(self, old_version: str, new_version: str):
+        """Update version in jbang-catalog.json"""
+        if not self.jbang_catalog.exists():
+            print("⚠ jbang-catalog.json not found, skipping")
+            return
+
+        content = self.jbang_catalog.read_text()
+        content = content.replace(
+            f"/download/v{old_version}/",
+            f"/download/v{new_version}/"
+        )
+        self.jbang_catalog.write_text(content)
+        print(f"✓ Updated jbang-catalog.json: {old_version} -> {new_version}")
+
 
     def show_version_diff(self, old_version: str, new_version: str):
         """Show what would change in version files"""
@@ -87,6 +102,11 @@ class VersionBumper:
         print(f"\n  pom.xml:")
         print(f"    - <version>{old_version}</version>")
         print(f"    + <version>{new_version}</version>")
+
+        if self.jbang_catalog.exists():
+            print(f"\n  jbang-catalog.json:")
+            print(f"    - /download/v{old_version}/")
+            print(f"    + /download/v{new_version}/")
 
     def show_changelog_diff(self, version: str):
         """Show what would change in CHANGELOG.md"""
@@ -325,6 +345,7 @@ java -jar jfr-redact.jar redact-text hs_err.log
             self.pom_xml,
             self.readme,
             self.changelog,
+            self.jbang_catalog,
         ]
 
         for file in files_to_backup:
@@ -348,6 +369,7 @@ java -jar jfr-redact.jar redact-text hs_err.log
             (self.backup_dir / "pom.xml", self.pom_xml),
             (self.backup_dir / "README.md", self.readme),
             (self.backup_dir / "CHANGELOG.md", self.changelog),
+            (self.backup_dir / "jbang-catalog.json", self.jbang_catalog),
         ]
 
         for backup_file, original_file in files_to_restore:
@@ -409,7 +431,7 @@ java -jar jfr-redact.jar redact-text hs_err.log
     def git_commit(self, version: str):
         """Commit version changes"""
         self.run_command(
-            ['git', 'add', 'pom.xml', 'README.md', 'CHANGELOG.md'],
+            ['git', 'add', 'pom.xml', 'README.md', 'CHANGELOG.md', 'jbang-catalog.json'],
             "Staging files"
         )
         self.run_command(
@@ -600,6 +622,7 @@ Note: CHANGELOG.md must have content under [Unreleased] section before releasing
         print("\n=== Updating version files ===")
         bumper.update_pom_xml(current_version, new_version)
         bumper.update_readme(current_version, new_version)
+        bumper.update_jbang_catalog(current_version, new_version)
         bumper.update_changelog(new_version)
 
         # Run tests

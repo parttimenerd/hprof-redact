@@ -4,9 +4,7 @@
  */
 package me.bechberger.hprof;
 
-import me.bechberger.hprof.HprofFilter;
-import me.bechberger.hprof.HprofIo;
-import me.bechberger.hprof.HprofTransformer;
+import me.bechberger.hprof.transformer.HprofTransformer;
 import me.bechberger.hprof.transformer.ZeroPrimitiveTransformer;
 import com.fasterxml.jackson.databind.JsonNode;
 import com.fasterxml.jackson.databind.ObjectMapper;
@@ -59,8 +57,8 @@ class CapturedHeapDumpTest {
         Path outputPath = Files.createTempFile("filtered-", ".hprof");
         try {
             // Apply zero transformer to the heap dump
-            try (OutputStream out = HprofIo.openOutputStream(outputPath)) {
-                HprofFilter.filter(heapDumpPath, out, new ZeroPrimitiveTransformer());
+            try (OutputStream out = HprofIO.openOutputStream(outputPath)) {
+                new HprofFilter(new ZeroPrimitiveTransformer(), null).filter(heapDumpPath, out);
             }
 
             // Verify output was created and has content
@@ -89,8 +87,8 @@ class CapturedHeapDumpTest {
         Path outputPath = Files.createTempFile("roundtrip-", ".hprof");
         try {
             // Apply identity transformer (should produce identical output)
-            try (OutputStream out = HprofIo.openOutputStream(outputPath)) {
-                HprofFilter.filter(heapDumpPath, out, new HprofTransformer() {});
+            try (OutputStream out = HprofIO.openOutputStream(outputPath)) {
+                new HprofFilter(new HprofTransformer() {}, null).filter(heapDumpPath, out);
             }
 
             // Verify output was created
@@ -137,8 +135,8 @@ class CapturedHeapDumpTest {
                 }
             };
 
-            try (OutputStream out = HprofIo.openOutputStream(outputPath)) {
-                HprofFilter.filter(heapDumpPath, out, transformer);
+            try (OutputStream out = HprofIO.openOutputStream(outputPath)) {
+                new HprofFilter(transformer, null).filter(heapDumpPath, out);
             }
 
             assertTrue(Files.exists(outputPath), "Output file should exist");
@@ -209,8 +207,8 @@ class CapturedHeapDumpTest {
                 }
             };
 
-            try (OutputStream out = HprofIo.openOutputStream(outputPath)) {
-                HprofFilter.filter(heapDumpPath, out, transformer);
+            try (OutputStream out = HprofIO.openOutputStream(outputPath)) {
+                new HprofFilter(transformer, null).filter(heapDumpPath, out);
             }
 
             assertTrue(Files.exists(outputPath), "Output file should exist");
@@ -243,9 +241,9 @@ class CapturedHeapDumpTest {
         Path preJson = null;
         Path postJson = null;
         try {
-            try (OutputStream out = HprofIo.openOutputStream(redacted)) {
+            try (OutputStream out = HprofIO.openOutputStream(redacted)) {
                 // Redacting primitives must not change instance counts/sizes.
-                HprofFilter.filter(heapDumpPath, out, new ZeroPrimitiveTransformer());
+                new HprofFilter(new ZeroPrimitiveTransformer(), null).filter(heapDumpPath, out);
             }
 
             preJson = HprofSlurpRunner.runJson(uncompressedInput);
@@ -315,8 +313,8 @@ class CapturedHeapDumpTest {
                 }
             };
 
-            try (OutputStream out = HprofIo.openOutputStream(outputPath)) {
-                HprofFilter.filter(heapDumpPath, out, transformer);
+            try (OutputStream out = HprofIO.openOutputStream(outputPath)) {
+                new HprofFilter(transformer, null).filter(heapDumpPath, out);
             }
 
             assertTrue(Files.exists(outputPath), "Output file should exist");
@@ -349,8 +347,8 @@ class CapturedHeapDumpTest {
 
         Path outputPath = Files.createTempFile(testName + "-filtered-", ".hprof");
         try {
-            try (OutputStream out = HprofIo.openOutputStream(outputPath)) {
-                HprofFilter.filter(heapDump, out, new ZeroPrimitiveTransformer());
+            try (OutputStream out = HprofIO.openOutputStream(outputPath)) {
+                new HprofFilter(new ZeroPrimitiveTransformer(), null).filter(heapDump, out);
             }
 
             assertTrue(Files.exists(outputPath), "Output should exist for " + testName);
@@ -383,7 +381,7 @@ class CapturedHeapDumpTest {
      * For uncompressed files, returns the file size directly.
      */
     private long getUncompressedSize(Path path) throws IOException {
-        try (var input = HprofIo.openInputStream(path)) {
+        try (var input = HprofIO.openInputStream(path)) {
             long size = 0;
             byte[] buffer = new byte[8192];
             int bytesRead;
@@ -402,7 +400,7 @@ class CapturedHeapDumpTest {
         if (!isGzipPath(path)) {
             return Files.readAllBytes(path);
         }
-        try (var input = HprofIo.openInputStream(path);
+        try (var input = HprofIO.openInputStream(path);
              var out = new java.io.ByteArrayOutputStream()) {
             byte[] buffer = new byte[8192];
             int read;
@@ -423,7 +421,7 @@ class CapturedHeapDumpTest {
             return heapDumpPath;
         }
         Path tmp = Files.createTempFile("uncompressed-", ".hprof");
-        try (var in = HprofIo.openInputStream(heapDumpPath);
+        try (var in = HprofIO.openInputStream(heapDumpPath);
              var out = Files.newOutputStream(tmp)) {
             in.transferTo(out);
         }

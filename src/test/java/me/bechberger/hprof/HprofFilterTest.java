@@ -4,6 +4,7 @@
  */
 package me.bechberger.hprof;
 
+import me.bechberger.hprof.transformer.HprofTransformer;
 import me.bechberger.hprof.transformer.ZeroPrimitiveTransformer;
 import org.junit.jupiter.api.Test;
 
@@ -14,10 +15,7 @@ import java.io.IOException;
 import java.nio.charset.StandardCharsets;
 import java.nio.file.Files;
 import java.nio.file.Path;
-import java.util.ArrayList;
-import java.util.HashMap;
-import java.util.List;
-import java.util.Map;
+import java.util.*;
 
 import static me.bechberger.hprof.HprofConstants.*;
 import static org.junit.jupiter.api.Assertions.assertArrayEquals;
@@ -61,6 +59,27 @@ class HprofFilterTest {
     }
 
     @Test
+    void transformerCanFilterPrimitiveArrays() throws Exception {
+        byte[] input = buildMinimalHprof(123456, new int[]{1, 2, 3}, "MyClass", "value");
+        byte[] output = runFilter(input, new HprofTransformer() {
+            @Override
+            public int transformInt(int value) {
+                return 11;
+            }
+
+            @Override
+            public void transformIntArray(int[] value) {
+                Arrays.fill(value, 99);
+            }
+        });
+
+        ParsedValues parsed = parseValues(output);
+        assertNotNull(parsed);
+        assertEquals(11, parsed.instanceValue);
+        assertArrayEquals(new int[]{99, 99, 99}, parsed.arrayValues.stream().mapToInt(Integer::intValue).toArray());
+    }
+
+    @Test
     void transformerCanRewriteUtf8Records() throws Exception {
         byte[] input = buildMinimalHprof(7, new int[]{9}, "OriginalName", "value");
         byte[] output = runFilter(input, new HprofTransformer() {
@@ -77,57 +96,13 @@ class HprofFilterTest {
         assertEquals("Redacted", utf8);
     }
 
-    @Test
-    void transformerCanRewriteSpecificNames() throws Exception {
-        byte[] input = buildHprofWithNames();
-        byte[] output = runFilter(input, new HprofTransformer() {
-            @Override
-            public String transformClassName(String value) {
-                return "C";
-            }
-
-            @Override
-            public String transformFieldName(String value) {
-                return "F";
-            }
-
-            @Override
-            public String transformMethodName(String value) {
-                return "M";
-            }
-
-            @Override
-            public String transformThreadName(String value) {
-                return "T";
-            }
-
-            @Override
-            public String transformThreadGroupName(String value) {
-                return "G";
-            }
-
-            @Override
-            public String transformThreadGroupParentName(String value) {
-                return "P";
-            }
-        });
-
-        Map<Long, String> strings = readAllUtf8(output);
-        assertEquals("C", strings.get(1L));
-        assertEquals("F", strings.get(2L));
-        assertEquals("M", strings.get(3L));
-        assertEquals("T", strings.get(4L));
-        assertEquals("G", strings.get(5L));
-        assertEquals("P", strings.get(6L));
-    }
-
 
     private static byte[] runFilter(byte[] input, HprofTransformer transformer) throws IOException {
         Path temp = Files.createTempFile("hprof-test", ".hprof");
         try {
             Files.write(temp, input);
             ByteArrayOutputStream out = new ByteArrayOutputStream();
-            HprofFilter.filter(temp, out, transformer);
+            new HprofFilter(transformer, null).filter(temp, out);
             return out.toByteArray();
         } finally {
             Files.deleteIfExists(temp);
@@ -176,33 +151,6 @@ class HprofFilterTest {
         writeUtf8Record(data, 5, "group");
         writeUtf8Record(data, 6, "parent");
         writeUtf8Record(data, 7, "Source.java");
-
-        data.flush();
-        return out.toByteArray();
-    }
-
-    private static byte[] buildHprofWithObjectArray(long[] elementIds) throws IOException {
-        ByteArrayOutputStream out = new ByteArrayOutputStream();
-        DataOutputStream data = new DataOutputStream(out);
-
-        data.write("JAVA PROFILE 1.0.2\0".getBytes(StandardCharsets.UTF_8));
-        writeU4(data, 4);
-        writeU8(data, 0);
-
-        ByteArrayOutputStream segment = new ByteArrayOutputStream();
-        DataOutputStream seg = new DataOutputStream(segment);
-        seg.writeByte(HPROF_GC_OBJ_ARRAY_DUMP);
-        writeId(seg, 0x600);
-        writeU4(seg, 0);
-        writeU4(seg, elementIds.length);
-        writeId(seg, 0x700);
-        for (long id : elementIds) {
-            writeId(seg, id);
-        }
-        seg.flush();
-
-        writeRecord(data, HPROF_HEAP_DUMP, 0, segment.toByteArray());
-        writeRecord(data, HPROF_HEAP_DUMP_END, 0, new byte[0]);
 
         data.flush();
         return out.toByteArray();
@@ -391,49 +339,6 @@ class HprofFilterTest {
             skipBytes(in, length);
         }
         return null;
-    }
-
-    private static Map<Long, String> readAllUtf8(byte[] hprof) throws IOException {
-        HprofDataInput in = new HprofDataInput(new java.io.ByteArrayInputStream(hprof));
-        int idSize = readHeader(in);
-        Map<Long, String> result = new HashMap<>();
-        while (true) {
-            int tag = in.readTag();
-            if (tag < 0) {
-                break;
-            }
-            in.readU4();
-            long length = in.readU4();
-            if (tag == HPROF_UTF8) {
-                long id = in.readId();
-                byte[] data = new byte[(int) (length - idSize)];
-                in.readFully(data);
-                result.put(id, new String(data, StandardCharsets.UTF_8));
-            } else {
-                skipBytes(in, length);
-            }
-        }
-        return result;
-    }
-
-    private static long[] readFirstObjectArray(byte[] hprof) throws IOException {
-        HprofDataInput in = new HprofDataInput(new java.io.ByteArrayInputStream(hprof));
-        int idSize = readHeader(in);
-        while (true) {
-            int tag = in.readTag();
-            if (tag < 0) {
-                break;
-            }
-            in.readU4();
-            long length = in.readU4();
-            if (tag == HPROF_HEAP_DUMP || tag == HPROF_HEAP_DUMP_SEGMENT) {
-                byte[] segment = new byte[(int) length];
-                in.readFully(segment);
-                return parseFirstObjectArray(segment, idSize);
-            }
-            skipBytes(in, length);
-        }
-        return new long[0];
     }
 
     private static long[] parseFirstObjectArray(byte[] segment, int idSize) throws IOException {

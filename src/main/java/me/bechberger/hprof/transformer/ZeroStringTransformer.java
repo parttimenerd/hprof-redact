@@ -4,7 +4,7 @@
  */
 package me.bechberger.hprof.transformer;
 
-import me.bechberger.hprof.HprofTransformer;
+import static me.bechberger.hprof.transformer.TransformerUtil.zeroPreservingUtf8String;
 
 /**
  * Transformer that replaces all UTF-8 strings with repeated '0' characters.
@@ -13,9 +13,6 @@ import me.bechberger.hprof.HprofTransformer;
 public final class ZeroStringTransformer implements HprofTransformer {
     @Override
     public String transformUtf8String(String value) {
-        if (value == null || value.isEmpty()) {
-            return value == null ? null : "";
-        }
-        return TransformerUtil.zeroCharacterString(value);
+        return zeroPreservingUtf8String(value);
     }
 }

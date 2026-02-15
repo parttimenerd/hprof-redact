@@ -5,6 +5,7 @@
 package me.bechberger.hprof;
 
 import com.sun.management.HotSpotDiagnosticMXBean;
+import me.bechberger.hprof.transformer.HprofTransformer;
 import org.junit.jupiter.api.Assumptions;
 import org.junit.jupiter.api.Test;
 
@@ -89,8 +90,8 @@ class RealHeapDumpTest {
             }
         };
 
-        try (OutputStream out = HprofIo.openOutputStream(filtered)) {
-            HprofFilter.filter(input, out, transformer);
+        try (OutputStream out = HprofIO.openOutputStream(filtered)) {
+            new HprofFilter(transformer, null).filter(input, out);
         }
 
         // 1. Verify file sizes match (only changing int values, no structural change)
@@ -116,8 +117,8 @@ class RealHeapDumpTest {
         Files.deleteIfExists(input);
         Files.deleteIfExists(filtered);
         Files.deleteIfExists(dir);
-        if (preJson != null) Files.deleteIfExists(preJson);
-        if (postJson != null) Files.deleteIfExists(postJson);
+        Files.deleteIfExists(preJson);
+        Files.deleteIfExists(postJson);
     }
 
     /**
@@ -129,7 +130,7 @@ class RealHeapDumpTest {
         Map<Long, String> utf8 = new HashMap<>();
         Map<Long, Long> classIdToNameId = new HashMap<>();
 
-        try (InputStream in = HprofIo.openInputStream(output)) {
+        try (InputStream in = HprofIO.openInputStream(output)) {
             HprofDataInput data = new HprofDataInput(in);
             idSize = readHeader(data);
             data.setIdSize(idSize);
@@ -180,7 +181,7 @@ class RealHeapDumpTest {
         final long searchClassId = tinyClassId;
         int[] result = {Integer.MIN_VALUE};
 
-        try (InputStream in = HprofIo.openInputStream(output)) {
+        try (InputStream in = HprofIO.openInputStream(output)) {
             HprofDataInput data = new HprofDataInput(in);
             readHeader(data);
             data.setIdSize(idSize);
@@ -286,8 +287,8 @@ class RealHeapDumpTest {
         createHeapDump(input);
         assertTrue(Files.exists(input));
 
-        try (OutputStream out = HprofIo.openOutputStream(output)) {
-            HprofFilter.filter(input, out, new ZeroPrimitiveTransformer());
+            try (OutputStream out = HprofIO.openOutputStream(output)) {
+                new HprofFilter(new ZeroPrimitiveTransformer(), null).filter(input, out);
         }
 
         ParsedHeap parsed = parseHeap(output);
@@ -314,7 +315,7 @@ class RealHeapDumpTest {
         Map<Long, String> utf8 = new HashMap<>();
         Map<Long, Long> classIdToNameId = new HashMap<>();
 
-        try (InputStream in = HprofIo.openInputStream(output)) {
+        try (InputStream in = HprofIO.openInputStream(output)) {
             HprofDataInput data = new HprofDataInput(in);
             idSize = readHeader(data);
             data.setIdSize(idSize);
@@ -371,7 +372,7 @@ class RealHeapDumpTest {
         Map<Long, HprofClassInfo> classInfos = new HashMap<>();
         Map<Long, List<HprofType>> flattenedTypesCache = new HashMap<>();
 
-        try (InputStream in = HprofIo.openInputStream(output)) {
+        try (InputStream in = HprofIO.openInputStream(output)) {
             HprofDataInput data = new HprofDataInput(in);
             readHeader(data);
             data.setIdSize(idSize);
@@ -401,7 +402,7 @@ class RealHeapDumpTest {
         // not captured.  Re-scan the segments looking only for those arrays.
         if ((parsed.byteArrayId != 0 && parsed.byteArray.length == 0)
                 || (parsed.charArrayId != 0 && parsed.charArray.length == 0)) {
-            try (InputStream in = HprofIo.openInputStream(output)) {
+            try (InputStream in = HprofIO.openInputStream(output)) {
                 HprofDataInput data = new HprofDataInput(in);
                 readHeader(data);
                 data.setIdSize(idSize);

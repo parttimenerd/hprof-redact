@@ -4,8 +4,6 @@
  */
 package me.bechberger.hprof.transformer;
 
-import me.bechberger.hprof.HprofTransformer;
-
 /**
  * Transformer that zeros all primitive values while preserving UTF-8 string byte lengths.
  */

@@ -1,14 +1,28 @@
 # hprof-redact
 
-[![Build and Release](https://github.com/parttimenerd/hprof-redact/actions/workflows/build.yml/badge.svg)](https://github.com/parttimenerd/hprof-redact/actions/workflows/build.yml)
+[![Build](https://github.com/parttimenerd/hprof-redact/actions/workflows/build.yml/badge.svg)](https://github.com/parttimenerd/hprof-redact/actions/workflows/build.yml)
 
-`hprof-redact` is a tool for processing Java heap dumps (HPROF format) to redact sensitive data while preserving heap structure and size characteristics. This is useful for:
+`hprof-redact` is a tool for processing Java heap dumps (HPROF format) to redact sensitive data while preserving
+heap structure and size characteristics. This is useful for:
 
 - Sharing heap dumps for analysis without exposing sensitive string data
 - Testing and debugging production issues safely
 - Compliance and privacy requirements when handling heap dumps
 
 __This is currently just an early prototype, a proof of concept. Feel free to test it and provide me with feedback.__
+
+The implementation is based on the HPROF format specified in the [OpenJDK source code](https://github.com/openjdk/jdk/blob/49e2a6b696c2063f0b4331b0a6d064852d676fcd/src/hotspot/share/services/heapDumper.cpp).
+
+Features:
+- Stream-based processing for large heap dumps
+- Configurable transformers for redacting string contents and primitive values, including arrays
+- Support for redacting field names, class names, method names, and other UTF-8 strings in the heap dump
+- Tiny JAR (< 100KB) with only [femtocli](https://github.com/parttimenerd/femtocli) as a dependency for the CLI interface
+
+Non-Features:
+- It doesn't parse every section of the heap dump, it only processes the records relevant for redacting string contents and primitive values.
+- It is therefore no general purpose heap dump parser.
+- It has no complex redaction logic like [jfr-redact](https://github.com/parttimenerd/jfr-redact) and only supports simple transformations of string contents and primitive values, but it can be extended with custom transformers.
 
 ## Installation
 
@@ -17,8 +31,10 @@ __This is currently just an early prototype, a proof of concept. Feel free to te
 Download the latest release from [GitHub Releases](https://github.com/parttimenerd/hprof-redact/releases) and run:
 
 ```bash
-java -jar hprof-redact.jar -i input.hprof -o output.hprof
+java -jar hprof-redact.jar input.hprof output.hprof
 ```
+
+Or use with [JBang](https://www.jbang.dev/): `jbang hprof-redact@parttimenerd/hprof-redact`
 
 ### Via Maven
 
@@ -37,25 +53,27 @@ Add to your `pom.xml`:
 ### Command Line
 
 ```bash
-java -jar hprof-redact.jar \
-  --input input.hprof \
-  --output output.hprof \
-  --transformer zero
+Usage: hprof-redact [-hV] [--transformer=<transformer>] [--verbose] <input>
+                    <output>
+Stream and redact HPROF heap dumps.
+      <input>                        Input HPROF path.
+      <output>                       Output HPROF path or '-' for stdout.
+  -h, --help                         Show this help message and exit.
+  -t, --transformer=<transformer>    Transformer to apply (default: zero).
+                                     Options: zero (zero primitives + string
+                                     contents), zero-strings (zero string
+                                     contents only), drop-strings (empty string
+                                     contents).
+  -v, --verbose                      Log changed field values (primitive fields
+                                     only) to stderr.
+  -V, --version                      Print version information and exit.
 ```
-
-Or short form:
-
-```bash
-java -jar hprof-redact.jar -i input.hprof -o output.hprof -t zero
-```
-
-### Options
-
-- `-i, --input` (required): Path to input HPROF heap dump file
-- `-o, --output` (required): Path to output HPROF file
-- `-t, --transformer` (optional, default: `zero`): Transformer to apply
 
 ## Transformers
+
+Note: Method names and method signatures are treated as generic UTF-8 strings because
+they cannot always be distinguished reliably in HPROF records. String transformers
+therefore apply to them as well.
 
 ### `zero` (default)
 
@@ -90,15 +108,10 @@ Removes string contents entirely, replaces with empty strings.
 ## Programmatic Usage
 
 ```java
-import me.bechberger.hprof.HprofFilter;
-import me.bechberger.hprof.ZeroPrimitiveTransformer;
-import java.nio.file.Path;
-import java.io.FileOutputStream;
-
-HprofFilter.filter(
+HprofFilter filter = new HprofFilter(new ZeroPrimitiveTransformer(), null);
+filter.filter(
     Path.of("input.hprof"),
-    new FileOutputStream("output.hprof"),
-    new ZeroPrimitiveTransformer()
+    new FileOutputStream("output.hprof")
 );
 ```
 
@@ -145,24 +158,12 @@ The test suite includes:
 
 ### Generating Test Heap Dumps
 
-Use the provided `capture_heap_dumps.py` script to generate test heap dumps:
+Use the provided `capture_heap_dumps.py` script to generate test heap dumps in the `heap_dumps/` directory. 
+It compiles and runs Java test programs that create various heap scenarios, captures heap dumps using `jmap`, and extracts histograms for validation.
 
 ```bash
 python3 capture_heap_dumps.py
 ```
-
-This script:
-- Automatically finds Java test programs in `test_programs/`
-- Compiles each test program
-- Runs it to generate heap dumps using `jmap`
-- Captures histograms for analysis
-- Stores results in `heap_dumps/`
-- Caches compilation metadata to skip unchanged files
-
-The generated heap dumps are used by the test suite to validate:
-- Correct HPROF format parsing
-- Data transformation accuracy
-- Structure preservation after redaction
 
 ### Release Process
 
@@ -182,8 +183,9 @@ This:
 
 - https://github.com/agourlay/hprof-slurp: a heap-dump analyzer written in rust
 - https://github.com/eaftan/hprof-parser: written in Java
-- https://github.com/openjdk/jdk/blob/49e2a6b696c2063f0b4331b0a6d064852d676fcd/src/hotspot/share/services/heapDumper.cpp: the official writer that also includes the format
+- [OpenJDK heapDumper.cpp](https://github.com/openjdk/jdk/blob/49e2a6b696c2063f0b4331b0a6d064852d676fcd/src/hotspot/share/services/heapDumper.cpp): the official writer that also includes the format
 - https://bugs.openjdk.org/browse/JDK-8337517: Redacted Heap Dumps, but it never got in
+- https://eclipse.dev/mat/: Eclipse Memory Analyzer Tool, a powerful heap dump analysis tool
 
 ## Support, Feedback, Contributing
 

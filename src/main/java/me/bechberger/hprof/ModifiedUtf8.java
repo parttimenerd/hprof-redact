@@ -94,6 +94,11 @@ final class ModifiedUtf8 {
             return value.getBytes(StandardCharsets.ISO_8859_1);
         }
 
+        ByteArrayOutputStream out = getByteArrayOutputStream(value);
+        return out.toByteArray();
+    }
+
+    private static ByteArrayOutputStream getByteArrayOutputStream(String value) {
         ByteArrayOutputStream out = new ByteArrayOutputStream(value.length());
         for (int i = 0; i < value.length(); i++) {
             int c = value.charAt(i);
@@ -108,6 +113,6 @@ final class ModifiedUtf8 {
                 out.write(0x80 | (c & 0x3F));
             }
         }
-        return out.toByteArray();
+        return out;
     }
 }

@@ -4,6 +4,8 @@
  */
 package me.bechberger.hprof;
 
+import me.bechberger.hprof.transformer.HprofTransformer;
+
 import java.io.ByteArrayOutputStream;
 import java.io.EOFException;
 import java.io.IOException;
@@ -11,6 +13,7 @@ import java.io.InputStream;
 import java.io.OutputStream;
 import java.nio.file.Path;
 import java.util.ArrayList;
+import java.util.Arrays;
 import java.util.HashMap;
 import java.util.List;
 import java.util.Map;
@@ -18,7 +21,13 @@ import java.util.Map;
 import static me.bechberger.hprof.HprofConstants.*;
 
 public final class HprofFilter {
-    private HprofFilter() {}
+    private final HprofTransformer transformer;
+    private final VerboseHelper verboseHelper;
+
+    public HprofFilter(HprofTransformer transformer, java.io.PrintStream verboseOut) {
+        this.transformer = transformer;
+        this.verboseHelper = verboseOut == null ? null : new VerboseHelper(verboseOut);
+    }
 
     /**
      * HPROF header:
@@ -31,17 +40,17 @@ public final class HprofFilter {
      *   u4    length (bytes of body)
      *   [u1]* body
      */
-    public static void filter(Path inputPath, OutputStream output, HprofTransformer transformer) throws IOException {
+    public void filter(Path inputPath, OutputStream output) throws IOException {
         Map<Long, HprofClassInfo> classInfos = new HashMap<>();
         Map<Long, NameKind> nameKinds = new HashMap<>();
 
-        try (InputStream input = HprofIo.openInputStream(inputPath)) {
+        try (InputStream input = HprofIO.openInputStream(inputPath)) {
             HprofDataInput in = new HprofDataInput(input);
             HprofHeader header = readHeader(in);
             scanForMetadata(in, header.idSize(), classInfos, nameKinds);
         }
 
-        try (InputStream input = HprofIo.openInputStream(inputPath)) {
+        try (InputStream input = HprofIO.openInputStream(inputPath)) {
             HprofDataInput in = new HprofDataInput(input);
             HprofDataOutput out = new HprofDataOutput(output);
             HprofHeader header = readHeader(in);
@@ -53,16 +62,16 @@ public final class HprofFilter {
             in.setIdSize(header.idSize());
             out.setIdSize(header.idSize());
 
-            Map<Long, List<HprofType>> flattenedTypesCache = new HashMap<>();
-            writeRecords(in, out, transformer, header.idSize(), classInfos, flattenedTypesCache, nameKinds);
+                    Map<Long, List<HprofType>> flattenedTypesCache = new HashMap<>();
+                    writeRecords(in, out, header.idSize(), classInfos, flattenedTypesCache, nameKinds);
             out.flush();
         }
     }
 
-    private static void writeRecords(HprofDataInput in, HprofDataOutput out, HprofTransformer transformer,
-                                     int idSize, Map<Long, HprofClassInfo> classInfos,
-                                     Map<Long, List<HprofType>> flattenedTypesCache,
-                                     Map<Long, NameKind> nameKinds) throws IOException {
+    private void writeRecords(HprofDataInput in, HprofDataOutput out,
+                              int idSize, Map<Long, HprofClassInfo> classInfos,
+                              Map<Long, List<HprofType>> flattenedTypesCache,
+                              Map<Long, NameKind> nameKinds) throws IOException {
         while (true) {
             int tag = in.readTag();
             if (tag < 0) {
@@ -72,10 +81,10 @@ public final class HprofFilter {
             long length = in.readU4();
 
             switch (tag) {
-                case HPROF_UTF8 -> handleUtf8Record(in, out, transformer, time, length, idSize, nameKinds);
+                case HPROF_UTF8 -> handleUtf8Record(in, out, time, length, idSize, nameKinds);
                 case HPROF_HEAP_DUMP, HPROF_HEAP_DUMP_SEGMENT -> {
                     writeRecordHeader(out, tag, time, length);
-                    handleHeapDumpSegment(in, out, transformer, length, idSize, classInfos, flattenedTypesCache, nameKinds);
+                    handleHeapDumpSegment(in, out, length, idSize, classInfos, flattenedTypesCache, nameKinds);
                 }
                 case HPROF_LOAD_CLASS -> handleLoadClass(in, out, time, length, idSize, nameKinds);
                 case HPROF_START_THREAD -> handleStartThread(in, out, time, length, idSize, nameKinds);
@@ -88,7 +97,7 @@ public final class HprofFilter {
         }
     }
 
-    private static HprofHeader readHeader(HprofDataInput in) throws IOException {
+    private HprofHeader readHeader(HprofDataInput in) throws IOException {
         ByteArrayOutputStream buffer = new ByteArrayOutputStream();
         while (true) {
             int b = in.readU1();
@@ -102,9 +111,9 @@ public final class HprofFilter {
         return new HprofHeader(buffer.toByteArray(), idSize, timestamp);
     }
 
-    private static void scanForMetadata(HprofDataInput in, int idSize,
-                                        Map<Long, HprofClassInfo> classInfos,
-                                        Map<Long, NameKind> nameKinds) throws IOException {
+    private void scanForMetadata(HprofDataInput in, int idSize,
+                                 Map<Long, HprofClassInfo> classInfos,
+                                 Map<Long, NameKind> nameKinds) throws IOException {
         in.setIdSize(idSize);
         while (true) {
             int tag = in.readTag();
@@ -115,7 +124,7 @@ public final class HprofFilter {
             long length = in.readU4();
 
             switch (tag) {
-                case HPROF_LOAD_CLASS -> scanLoadClass(in, idSize, nameKinds);
+                case HPROF_LOAD_CLASS -> scanLoadClass(in, nameKinds);
                 case HPROF_START_THREAD -> scanStartThread(in, idSize, nameKinds);
                 case HPROF_FRAME -> scanFrame(in, idSize, nameKinds);
                 case HPROF_HEAP_DUMP, HPROF_HEAP_DUMP_SEGMENT -> scanHeapDumpSegment(in, length, idSize, classInfos, nameKinds);
@@ -124,15 +133,18 @@ public final class HprofFilter {
         }
     }
 
-    private static void scanLoadClass(HprofDataInput in, int idSize, Map<Long, NameKind> nameKinds) throws IOException {
+    private void scanLoadClass(HprofDataInput in, Map<Long, NameKind> nameKinds) throws IOException {
         skipFully(in, 4);
-        skipFully(in, idSize);
+        long classId = in.readId();
         skipFully(in, 4);
         long nameId = in.readId();
         nameKinds.putIfAbsent(nameId, NameKind.CLASS_NAME);
+        if (verboseHelper != null) {
+            verboseHelper.recordClassNameId(classId, nameId);
+        }
     }
 
-    private static void scanStartThread(HprofDataInput in, int idSize, Map<Long, NameKind> nameKinds) throws IOException {
+    private void scanStartThread(HprofDataInput in, int idSize, Map<Long, NameKind> nameKinds) throws IOException {
         skipFully(in, 4);
         skipFully(in, idSize);
         skipFully(in, 4);
@@ -144,7 +156,7 @@ public final class HprofFilter {
         nameKinds.putIfAbsent(threadGroupParentNameId, NameKind.THREAD_GROUP_PARENT_NAME);
     }
 
-    private static void scanFrame(HprofDataInput in, int idSize, Map<Long, NameKind> nameKinds) throws IOException {
+    private void scanFrame(HprofDataInput in, int idSize, Map<Long, NameKind> nameKinds) throws IOException {
         skipFully(in, idSize); // frameId
         long methodNameId = in.readId();
         long methodSigId = in.readId();
@@ -155,9 +167,9 @@ public final class HprofFilter {
         nameKinds.putIfAbsent(sourceFileNameId, NameKind.SOURCE_FILE_NAME);
     }
 
-    private static void scanHeapDumpSegment(HprofDataInput in, long length, int idSize,
-                                            Map<Long, HprofClassInfo> classInfos,
-                                            Map<Long, NameKind> nameKinds) throws IOException {
+    private void scanHeapDumpSegment(HprofDataInput in, long length, int idSize,
+                                     Map<Long, HprofClassInfo> classInfos,
+                                     Map<Long, NameKind> nameKinds) throws IOException {
         LimitedInputStream limited = new LimitedInputStream(in.rawStream(), length);
         HprofDataInput segmentIn = new HprofDataInput(limited);
         segmentIn.setIdSize(idSize);
@@ -183,9 +195,9 @@ public final class HprofFilter {
         }
     }
 
-    private static void scanClassDump(HprofDataInput in, int idSize,
-                                      Map<Long, HprofClassInfo> classInfos,
-                                      Map<Long, NameKind> nameKinds) throws IOException {
+    private void scanClassDump(HprofDataInput in, int idSize,
+                               Map<Long, HprofClassInfo> classInfos,
+                               Map<Long, NameKind> nameKinds) throws IOException {
         long classId = in.readId();
         skipFully(in, 4);
         long superClassId = in.readId();
@@ -219,20 +231,20 @@ public final class HprofFilter {
         classInfos.put(classId, new HprofClassInfo(classId, superClassId, instanceFieldDefs));
     }
 
-    private static void skipInstanceDump(HprofDataInput in, int idSize) throws IOException {
+    private void skipInstanceDump(HprofDataInput in, int idSize) throws IOException {
         skipFully(in, idSize + 4 + idSize);
         long dataLength = in.readU4();
         skipFully(in, dataLength);
     }
 
-    private static void skipObjectArrayDump(HprofDataInput in, int idSize) throws IOException {
+    private void skipObjectArrayDump(HprofDataInput in, int idSize) throws IOException {
         skipFully(in, idSize + 4);
         long numElements = in.readU4();
         skipFully(in, idSize);
         skipFully(in, numElements * idSize);
     }
 
-    private static void skipPrimitiveArrayDump(HprofDataInput in, int idSize) throws IOException {
+    private void skipPrimitiveArrayDump(HprofDataInput in, int idSize) throws IOException {
         skipFully(in, idSize + 4);
         long numElements = in.readU4();
         HprofType elementType = HprofType.fromCode(in.readU1());
@@ -240,7 +252,7 @@ public final class HprofFilter {
         skipFully(in, numElements * elementSize);
     }
 
-    private static void writeRecordHeader(HprofDataOutput out, int tag, long time, long length) throws IOException {
+    private void writeRecordHeader(HprofDataOutput out, int tag, long time, long length) throws IOException {
         out.writeU1(tag);
         out.writeU4(time);
         out.writeU4(length);
@@ -251,9 +263,9 @@ public final class HprofFilter {
      *   id   nameId
      *   [u1]* UTF-8 bytes (no trailing zero)
      */
-    private static void handleUtf8Record(HprofDataInput in, HprofDataOutput out, HprofTransformer transformer,
-                                         long time, long length, int idSize,
-                                         Map<Long, NameKind> nameKinds) throws IOException {
+    private void handleUtf8Record(HprofDataInput in, HprofDataOutput out,
+                                  long time, long length, int idSize,
+                                  Map<Long, NameKind> nameKinds) throws IOException {
         long id = in.readId();
         long bytesLength = length - idSize;
         if (bytesLength < 0 || bytesLength > Integer.MAX_VALUE) {
@@ -276,7 +288,8 @@ public final class HprofFilter {
             return;
         }
 
-        String transformed = transformName(original, transformer, nameKinds.get(id));
+        NameKind kind = nameKinds.get(id);
+        String transformed = transformName(original, transformer, kind);
         if (transformed == null || transformed.equals(original)) {
             // Preserve original bytes (and therefore size) when not changing the string.
             out.writeU1(HPROF_UTF8);
@@ -284,31 +297,37 @@ public final class HprofFilter {
             out.writeU4(length);
             out.writeId(id);
             out.writeBytes(data);
+            if (verboseHelper != null) {
+                verboseHelper.recordNameString(kind, id, original, true);
+            }
             return;
         }
 
         byte[] outBytes = ModifiedUtf8.encode(transformed);
         long newLength = idSize + outBytes.length;
-        if (newLength > 0xFFFF_FFFFL) {
-            throw new IOException("Transformed UTF8 length too large: " + newLength);
-        }
 
         out.writeU1(HPROF_UTF8);
         out.writeU4(time);
         out.writeU4(newLength);
         out.writeId(id);
         out.writeBytes(outBytes);
+        if (verboseHelper != null) {
+            verboseHelper.recordNameString(kind, id, transformed, false);
+        }
+        if (verboseHelper != null) {
+            verboseHelper.logUtf8Change(kind, id, original, transformed);
+        }
     }
 
     /**
      * HPROF_HEAP_DUMP(_SEGMENT):
      *   [u1]* heap sub-records, each prefixed with sub-tag.
      */
-    private static void handleHeapDumpSegment(HprofDataInput in, HprofDataOutput out, HprofTransformer transformer,
-                                              long length, int idSize,
-                                              Map<Long, HprofClassInfo> classInfos,
-                                              Map<Long, List<HprofType>> flattenedTypesCache,
-                                              Map<Long, NameKind> nameKinds) throws IOException {
+    private void handleHeapDumpSegment(HprofDataInput in, HprofDataOutput out,
+                                       long length, int idSize,
+                                       Map<Long, HprofClassInfo> classInfos,
+                                       Map<Long, List<HprofType>> flattenedTypesCache,
+                                       Map<Long, NameKind> nameKinds) throws IOException {
         LimitedInputStream limited = new LimitedInputStream(in.rawStream(), length);
         HprofDataInput segmentIn = new HprofDataInput(limited);
         segmentIn.setIdSize(idSize);
@@ -325,10 +344,12 @@ public final class HprofFilter {
                 case HPROF_GC_ROOT_NATIVE_STACK, HPROF_GC_ROOT_THREAD_BLOCK -> copyBytes(segmentIn, out, idSize + 4);
                 case HPROF_GC_ROOT_STICKY_CLASS, HPROF_GC_ROOT_MONITOR_USED -> copyBytes(segmentIn, out, idSize);
                 // Typed heap records
-                case HPROF_GC_CLASS_DUMP -> handleClassDump(segmentIn, out, transformer, idSize, classInfos, flattenedTypesCache, nameKinds);
-                case HPROF_GC_INSTANCE_DUMP -> handleInstanceDump(segmentIn, out, transformer, idSize, classInfos, flattenedTypesCache);
-                case HPROF_GC_OBJ_ARRAY_DUMP -> handleObjectArrayDump(segmentIn, out, idSize);
-                case HPROF_GC_PRIM_ARRAY_DUMP -> handlePrimitiveArrayDump(segmentIn, out, transformer, idSize);
+                case HPROF_GC_CLASS_DUMP -> handleClassDump(segmentIn, out, idSize, classInfos, flattenedTypesCache,
+                    nameKinds);
+                case HPROF_GC_INSTANCE_DUMP -> handleInstanceDump(segmentIn, out, idSize, classInfos,
+                    flattenedTypesCache);
+                case HPROF_GC_OBJ_ARRAY_DUMP -> handleObjectArrayDump(segmentIn, out);
+                case HPROF_GC_PRIM_ARRAY_DUMP -> handlePrimitiveArrayDump(segmentIn, out);
                 default -> throw new IOException("Unsupported heap dump subrecord tag: 0x" + Integer.toHexString(subTag));
             }
         }
@@ -356,10 +377,10 @@ public final class HprofFilter {
      *   u2  instanceFieldCount
      *   [instanceFieldCount]* (id nameId, u1 type)
      */
-    private static void handleClassDump(HprofDataInput in, HprofDataOutput out, HprofTransformer transformer,
-                                        int idSize, Map<Long, HprofClassInfo> classInfos,
-                                        Map<Long, List<HprofType>> flattenedTypesCache,
-                                        Map<Long, NameKind> nameKinds) throws IOException {
+    private void handleClassDump(HprofDataInput in, HprofDataOutput out,
+                                 int idSize, Map<Long, HprofClassInfo> classInfos,
+                                 Map<Long, List<HprofType>> flattenedTypesCache,
+                                 Map<Long, NameKind> nameKinds) throws IOException {
         long classId = in.readId();
         long stackTraceSerial = in.readU4();
         long superClassId = in.readId();
@@ -387,17 +408,19 @@ public final class HprofFilter {
             HprofType type = HprofType.fromCode(in.readU1());
             out.writeU2(index);
             out.writeU1(type.code());
-            writeValueByType(in, out, transformer, type, idSize);
+            writeValueByType(in, out, type);
         }
 
         int staticFieldCount = in.readU2();
         out.writeU2(staticFieldCount);
+        String className = resolveClassName(classId);
         for (int i = 0; i < staticFieldCount; i++) {
             long nameId = in.readId();
             HprofType type = HprofType.fromCode(in.readU1());
             out.writeId(nameId);
             out.writeU1(type.code());
-            writeValueByType(in, out, transformer, type, idSize);
+            String fieldName = resolveName(nameId, "field#" + nameId);
+            writeFieldValueByType(in, out, type, className, fieldName, true);
             nameKinds.putIfAbsent(nameId, NameKind.FIELD_NAME);
         }
 
@@ -425,9 +448,9 @@ public final class HprofFilter {
      *   u4  dataLength
      *   [u1]* instance data
      */
-    private static void handleInstanceDump(HprofDataInput in, HprofDataOutput out, HprofTransformer transformer,
-                                           int idSize, Map<Long, HprofClassInfo> classInfos,
-                                           Map<Long, List<HprofType>> flattenedTypesCache) throws IOException {
+    private void handleInstanceDump(HprofDataInput in, HprofDataOutput out,
+                                    int idSize, Map<Long, HprofClassInfo> classInfos,
+                                    Map<Long, List<HprofType>> flattenedTypesCache) throws IOException {
         long objectId = in.readId();
         long stackTraceSerial = in.readU4();
         long classId = in.readId();
@@ -452,8 +475,25 @@ public final class HprofFilter {
             throw new IOException("Instance dump length mismatch: expected " + expected + " but was " + dataLength);
         }
 
-        for (HprofType type : flattened) {
-            writeValueByType(in, out, transformer, type, idSize);
+        if (verboseHelper == null) {
+            for (HprofType type : flattened) {
+                writeValueByType(in, out, type);
+            }
+            return;
+        }
+
+        List<HprofClassInfo.FieldDef> fieldDefs = flattenedFieldDefs(classId, classInfos);
+        if (fieldDefs == null || fieldDefs.size() != flattened.size()) {
+            for (HprofType type : flattened) {
+                writeValueByType(in, out, type);
+            }
+            return;
+        }
+
+        String className = resolveClassName(classId);
+        for (HprofClassInfo.FieldDef def : fieldDefs) {
+            String fieldName = resolveName(def.nameId(), "field#" + def.nameId());
+            writeFieldValueByType(in, out, def.type(), className, fieldName, false);
         }
     }
 
@@ -465,7 +505,7 @@ public final class HprofFilter {
      *   id  arrayClassId
      *   [id]* elementIds
      */
-    private static void handleObjectArrayDump(HprofDataInput in, HprofDataOutput out, int idSize) throws IOException {
+    private void handleObjectArrayDump(HprofDataInput in, HprofDataOutput out) throws IOException {
         long arrayId = in.readId();
         long stackTraceSerial = in.readU4();
         long numElements = in.readU4();
@@ -488,8 +528,8 @@ public final class HprofFilter {
      *   u4  stackTraceSerial
      *   id  classNameId
      */
-    private static void handleLoadClass(HprofDataInput in, HprofDataOutput out, long time, long length,
-                                        int idSize, Map<Long, NameKind> nameKinds) throws IOException {
+    private void handleLoadClass(HprofDataInput in, HprofDataOutput out, long time, long length,
+                                 int idSize, Map<Long, NameKind> nameKinds) throws IOException {
         if (length != 4 + idSize + 4 + idSize) {
             throw new IOException("Unexpected LOAD_CLASS length: " + length);
         }
@@ -517,8 +557,8 @@ public final class HprofFilter {
      *   id  threadGroupNameId
      *   id  threadGroupParentNameId
      */
-    private static void handleStartThread(HprofDataInput in, HprofDataOutput out, long time, long length,
-                                          int idSize, Map<Long, NameKind> nameKinds) throws IOException {
+    private void handleStartThread(HprofDataInput in, HprofDataOutput out, long time, long length,
+                                   int idSize, Map<Long, NameKind> nameKinds) throws IOException {
         if (length != 4 + idSize + 4 + idSize + idSize + idSize) {
             throw new IOException("Unexpected START_THREAD length: " + length);
         }
@@ -553,8 +593,8 @@ public final class HprofFilter {
      *   u4  classSerial
      *   u4  lineNumber
      */
-    private static void handleFrame(HprofDataInput in, HprofDataOutput out, long time, long length,
-                                    int idSize, Map<Long, NameKind> nameKinds) throws IOException {
+    private void handleFrame(HprofDataInput in, HprofDataOutput out, long time, long length,
+                             int idSize, Map<Long, NameKind> nameKinds) throws IOException {
         if (length != idSize + idSize + idSize + idSize + 4 + 4) {
             throw new IOException("Unexpected FRAME length: " + length);
         }
@@ -588,8 +628,7 @@ public final class HprofFilter {
      *   u1  elementType
      *   [value]* elements
      */
-    private static void handlePrimitiveArrayDump(HprofDataInput in, HprofDataOutput out, HprofTransformer transformer,
-                                                 int idSize) throws IOException {
+    private void handlePrimitiveArrayDump(HprofDataInput in, HprofDataOutput out) throws IOException {
         long arrayId = in.readId();
         long stackTraceSerial = in.readU4();
         long numElements = in.readU4();
@@ -599,14 +638,133 @@ public final class HprofFilter {
         out.writeU4(stackTraceSerial);
         out.writeU4(numElements);
         out.writeU1(elementType.code());
+        if (numElements > Integer.MAX_VALUE) {
+            throw new IOException("Primitive array too large: " + numElements);
+        }
 
-        for (long i = 0; i < numElements; i++) {
-            writeValueByType(in, out, transformer, elementType, idSize);
+        switch (elementType) {
+            case BOOLEAN -> {
+                boolean[] values = new boolean[(int) numElements];
+                for (int i = 0; i < values.length; i++) {
+                    values[i] = in.readU1() != 0;
+                }
+                boolean[] before = verboseHelper == null ? null : Arrays.copyOf(values, values.length);
+                transformer.transformBooleanArray(values);
+                if (verboseHelper != null) {
+                    verboseHelper.logArrayChanges(arrayId, "boolean", before, values);
+                }
+                for (boolean value : values) {
+                    out.writeU1(value ? 1 : 0);
+                }
+            }
+            case BYTE -> {
+                byte[] values = new byte[(int) numElements];
+                for (int i = 0; i < values.length; i++) {
+                    values[i] = (byte) in.readU1();
+                }
+                byte[] before = verboseHelper == null ? null : Arrays.copyOf(values, values.length);
+                transformer.transformByteArray(values);
+                if (verboseHelper != null) {
+                    verboseHelper.logArrayChanges(arrayId, "byte", before, values);
+                }
+                for (byte value : values) {
+                    out.writeU1(value);
+                }
+            }
+            case CHAR -> {
+                char[] values = new char[(int) numElements];
+                for (int i = 0; i < values.length; i++) {
+                    values[i] = (char) in.readU2();
+                }
+                char[] before = verboseHelper == null ? null : Arrays.copyOf(values, values.length);
+                transformer.transformCharArray(values);
+                if (verboseHelper != null) {
+                    verboseHelper.logArrayChanges(arrayId, "char", before, values);
+                }
+                for (char value : values) {
+                    out.writeU2(value);
+                }
+            }
+            case SHORT -> {
+                short[] values = new short[(int) numElements];
+                for (int i = 0; i < values.length; i++) {
+                    values[i] = (short) in.readU2();
+                }
+                short[] before = verboseHelper == null ? null : Arrays.copyOf(values, values.length);
+                transformer.transformShortArray(values);
+                if (verboseHelper != null) {
+                    verboseHelper.logArrayChanges(arrayId, "short", before, values);
+                }
+                for (short value : values) {
+                    out.writeU2(value);
+                }
+            }
+            case INT -> {
+                int[] values = new int[(int) numElements];
+                for (int i = 0; i < values.length; i++) {
+                    values[i] = (int) in.readU4();
+                }
+                int[] before = verboseHelper == null ? null : Arrays.copyOf(values, values.length);
+                transformer.transformIntArray(values);
+                if (verboseHelper != null) {
+                    verboseHelper.logArrayChanges(arrayId, "int", before, values);
+                }
+                for (int value : values) {
+                    out.writeU4(value);
+                }
+            }
+            case LONG -> {
+                long[] values = new long[(int) numElements];
+                for (int i = 0; i < values.length; i++) {
+                    values[i] = in.readU8();
+                }
+                long[] before = verboseHelper == null ? null : Arrays.copyOf(values, values.length);
+                transformer.transformLongArray(values);
+                if (verboseHelper != null) {
+                    verboseHelper.logArrayChanges(arrayId, "long", before, values);
+                }
+                for (long value : values) {
+                    out.writeU8(value);
+                }
+            }
+            case FLOAT -> {
+                float[] values = new float[(int) numElements];
+                for (int i = 0; i < values.length; i++) {
+                    values[i] = Float.intBitsToFloat((int) in.readU4());
+                }
+                float[] before = verboseHelper == null ? null : Arrays.copyOf(values, values.length);
+                transformer.transformFloatArray(values);
+                if (verboseHelper != null) {
+                    verboseHelper.logArrayChanges(arrayId, "float", before, values);
+                }
+                for (float value : values) {
+                    out.writeU4(Float.floatToRawIntBits(value));
+                }
+            }
+            case DOUBLE -> {
+                double[] values = new double[(int) numElements];
+                for (int i = 0; i < values.length; i++) {
+                    values[i] = Double.longBitsToDouble(in.readU8());
+                }
+                double[] before = verboseHelper == null ? null : Arrays.copyOf(values, values.length);
+                transformer.transformDoubleArray(values);
+                if (verboseHelper != null) {
+                    verboseHelper.logArrayChanges(arrayId, "double", before, values);
+                }
+                for (double value : values) {
+                    out.writeU8(Double.doubleToRawLongBits(value));
+                }
+            }
+            case OBJECT, ARRAY_OBJECT -> {
+                for (long i = 0; i < numElements; i++) {
+                    out.writeId(in.readId());
+                }
+            }
         }
     }
 
-    private static void writeValueByType(HprofDataInput in, HprofDataOutput out, HprofTransformer transformer,
-                                         HprofType type, int idSize) throws IOException {
+    private void writeValueByType(HprofDataInput in, HprofDataOutput out,
+                                  HprofType type) throws IOException {
         switch (type) {
             case OBJECT, ARRAY_OBJECT -> out.writeId(in.readId());
             case BOOLEAN -> {
@@ -635,7 +793,90 @@ public final class HprofFilter {
         }
     }
 
-    private static long sizeForType(HprofType type, int idSize) throws IOException {
+    private void writeFieldValueByType(HprofDataInput in, HprofDataOutput out,
+                                       HprofType type, String className, String fieldName,
+                                       boolean isStatic) throws IOException {
+        switch (type) {
+            case OBJECT, ARRAY_OBJECT -> out.writeId(in.readId());
+            case BOOLEAN -> {
+                int raw = in.readU1();
+                boolean value = raw != 0;
+                boolean transformed = transformer.transformBoolean(value);
+                out.writeU1(transformed == value ? raw : (transformed ? 1 : 0));
+                if (verboseHelper != null && transformed != value) {
+                    verboseHelper.logFieldChange(className, fieldName, String.valueOf(value),
+                            String.valueOf(transformed), isStatic);
+                }
+            }
+            case BYTE -> {
+                byte value = (byte) in.readU1();
+                byte transformed = transformer.transformByte(value);
+                out.writeU1(transformed);
+                if (verboseHelper != null && transformed != value) {
+                    verboseHelper.logFieldChange(className, fieldName, String.valueOf(value),
+                            String.valueOf(transformed), isStatic);
+                }
+            }
+            case CHAR -> {
+                char value = (char) in.readU2();
+                char transformed = transformer.transformChar(value);
+                out.writeU2(transformed);
+                if (verboseHelper != null && transformed != value) {
+                    verboseHelper.logFieldChange(className, fieldName, String.valueOf(value),
+                            String.valueOf(transformed), isStatic);
+                }
+            }
+            case SHORT -> {
+                short value = (short) in.readU2();
+                short transformed = transformer.transformShort(value);
+                out.writeU2(transformed);
+                if (verboseHelper != null && transformed != value) {
+                    verboseHelper.logFieldChange(className, fieldName, String.valueOf(value),
+                            String.valueOf(transformed), isStatic);
+                }
+            }
+            case INT -> {
+                int value = (int) in.readU4();
+                int transformed = transformer.transformInt(value);
+                out.writeU4(transformed);
+                if (verboseHelper != null && transformed != value) {
+                    verboseHelper.logFieldChange(className, fieldName, String.valueOf(value),
+                            String.valueOf(transformed), isStatic);
+                }
+            }
+            case LONG -> {
+                long value = in.readU8();
+                long transformed = transformer.transformLong(value);
+                out.writeU8(transformed);
+                if (verboseHelper != null && transformed != value) {
+                    verboseHelper.logFieldChange(className, fieldName, String.valueOf(value),
+                            String.valueOf(transformed), isStatic);
+                }
+            }
+            case FLOAT -> {
+                int bits = (int) in.readU4();
+                float value = Float.intBitsToFloat(bits);
+                float transformed = transformer.transformFloat(value);
+                out.writeU4(Float.floatToRawIntBits(transformed));
+                if (verboseHelper != null && Float.floatToRawIntBits(transformed) != bits) {
+                    verboseHelper.logFieldChange(className, fieldName, String.valueOf(value),
+                            String.valueOf(transformed), isStatic);
+                }
+            }
+            case DOUBLE -> {
+                long bits = in.readU8();
+                double value = Double.longBitsToDouble(bits);
+                double transformed = transformer.transformDouble(value);
+                out.writeU8(Double.doubleToRawLongBits(transformed));
+                if (verboseHelper != null && Double.doubleToRawLongBits(transformed) != bits) {
+                    verboseHelper.logFieldChange(className, fieldName, String.valueOf(value),
+                            String.valueOf(transformed), isStatic);
+                }
+            }
+        }
+    }
+
+    private long sizeForType(HprofType type, int idSize) {
         return switch (type) {
             case OBJECT, ARRAY_OBJECT -> idSize;
             case BOOLEAN, BYTE -> 1;
@@ -645,8 +886,8 @@ public final class HprofFilter {
         };
     }
 
-    private static List<HprofType> flattenedTypes(long classId, Map<Long, HprofClassInfo> classInfos,
-                                                  Map<Long, List<HprofType>> flattenedTypesCache) {
+    private List<HprofType> flattenedTypes(long classId, Map<Long, HprofClassInfo> classInfos,
+                                           Map<Long, List<HprofType>> flattenedTypesCache) {
         if (classId == 0) {
             return List.of();
         }
@@ -671,7 +912,42 @@ public final class HprofFilter {
         return result;
     }
 
-    private static void copyBytes(HprofDataInput in, HprofDataOutput out, long length) throws IOException {
+    private List<HprofClassInfo.FieldDef> flattenedFieldDefs(long classId,
+                                                             Map<Long, HprofClassInfo> classInfos) {
+        if (classId == 0) {
+            return List.of();
+        }
+        HprofClassInfo info = classInfos.get(classId);
+        if (info == null) {
+            return null;
+        }
+        List<HprofClassInfo.FieldDef> result = new ArrayList<>();
+        if (info.superClassId() != 0) {
+            List<HprofClassInfo.FieldDef> parent = flattenedFieldDefs(info.superClassId(), classInfos);
+            if (parent == null) {
+                return null;
+            }
+            result.addAll(parent);
+        }
+        result.addAll(info.instanceFields());
+        return result;
+    }
+
+    private String resolveClassName(long classId) {
+        if (verboseHelper == null) {
+            return "class#" + classId;
+        }
+        return verboseHelper.resolveClassName(classId);
+    }
+
+    private String resolveName(long nameId, String fallback) {
+        if (verboseHelper == null) {
+            return fallback;
+        }
+        return verboseHelper.resolveName(nameId, fallback);
+    }
+
+    private void copyBytes(HprofDataInput in, HprofDataOutput out, long length) throws IOException {
         if (length == 0) {
             return;
         }
@@ -688,27 +964,26 @@ public final class HprofFilter {
         }
     }
 
-    private static void skipFully(HprofDataInput in, long length) throws IOException {
+    private void skipFully(HprofDataInput in, long length) throws IOException {
         if (length <= 0) {
             return;
         }
         in.skipFully(length);
     }
 
-    private static void skipValueByType(HprofDataInput in, HprofType type, int idSize) throws IOException {
+    private void skipValueByType(HprofDataInput in, HprofType type, int idSize) throws IOException {
         long size = sizeForType(type, idSize);
         skipFully(in, size);
     }
 
-    private static String transformName(String original, HprofTransformer transformer, NameKind kind) {
+    private String transformName(String original, HprofTransformer transformer, NameKind kind) {
         if (kind == null) {
             return transformer.transformUtf8String(original);
         }
         return switch (kind) {
             case CLASS_NAME -> transformer.transformClassName(original);
             case FIELD_NAME -> transformer.transformFieldName(original);
-            case METHOD_NAME -> transformer.transformMethodName(original);
-            case METHOD_SIGNATURE -> transformer.transformMethodSignature(original);
+            case METHOD_NAME, METHOD_SIGNATURE -> transformer.transformUtf8String(original);
             case SOURCE_FILE_NAME -> transformer.transformSourceFileName(original);
             case THREAD_NAME -> transformer.transformThreadName(original);
             case THREAD_GROUP_NAME -> transformer.transformThreadGroupName(original);
@@ -716,7 +991,7 @@ public final class HprofFilter {
         };
     }
 
-    private enum NameKind {
+    enum NameKind {
         CLASS_NAME,
         FIELD_NAME,
         METHOD_NAME,

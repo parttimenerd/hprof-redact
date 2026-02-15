@@ -4,7 +4,6 @@
  */
 package me.bechberger.hprof;
 
-import me.bechberger.hprof.HprofIo;
 import org.junit.jupiter.api.Test;
 
 import java.io.ByteArrayInputStream;
@@ -19,7 +18,7 @@ import static org.junit.jupiter.api.Assertions.assertArrayEquals;
 import static org.junit.jupiter.api.Assertions.assertThrows;
 import static org.junit.jupiter.api.Assertions.assertTrue;
 
-class HprofIoTest {
+class HprofIOTest {
     @Test
     void detectsGzipByMagicBytes() throws Exception {
         byte[] original = "payload".getBytes();
@@ -28,7 +27,7 @@ class HprofIoTest {
             gzip.write(original);
         }
 
-        try (InputStream wrapped = HprofIo.wrapInputStream(new ByteArrayInputStream(out.toByteArray()))) {
+        try (InputStream wrapped = HprofIO.wrapInputStream(new ByteArrayInputStream(out.toByteArray()))) {
             byte[] roundTrip = wrapped.readAllBytes();
             assertArrayEquals(original, roundTrip);
         }
@@ -38,7 +37,7 @@ class HprofIoTest {
     void failsFastOnInvalidGzip() {
         byte[] invalid = new byte[]{0x1f, (byte) 0x8b, 0x00, 0x00, 0x00};
         assertThrows(IOException.class, () -> {
-            try (InputStream wrapped = HprofIo.wrapInputStream(new ByteArrayInputStream(invalid))) {
+            try (InputStream wrapped = HprofIO.wrapInputStream(new ByteArrayInputStream(invalid))) {
                 wrapped.readAllBytes();
             }
         });
@@ -48,7 +47,7 @@ class HprofIoTest {
     void gzSuffixProducesGzipOutput() throws Exception {
         Path temp = Files.createTempFile("hprof", ".hprof.gz");
         try {
-            try (var out = HprofIo.openOutputStream(temp)) {
+            try (var out = HprofIO.openOutputStream(temp)) {
                 out.write("data".getBytes());
             }
             byte[] bytes = Files.readAllBytes(temp);

@@ -20,20 +20,13 @@ public final class TransformerUtil {
      * @return a string that encodes to the same number of bytes as the original, but with all zero bytes
      */
     public static String zeroPreservingUtf8String(String value) {
+        if (value == null) {
+            return null;
+        }
         byte[] originalBytes = value.getBytes(StandardCharsets.UTF_8);
         byte[] zeros = new byte[originalBytes.length];
         // zeros array is initialized to 0x00 by default in Java
         return new String(zeros, StandardCharsets.UTF_8);
     }
 
-    /**
-     * Transform a string to repeated '0' characters while preserving character length.
-     * Note: This only preserves byte length for ASCII strings.
-     *
-     * @param value the original string value
-     * @return a string with the same character length but all '0' characters
-     */
-    public static String zeroCharacterString(String value) {
-        return "0".repeat(value.length());
-    }
 }
