@@ -35,6 +35,45 @@ class JmapHeapDumpCapture:
         self.output_dir.mkdir(parents=True, exist_ok=True)
         self.test_programs_dir.mkdir(parents=True, exist_ok=True)
 
+    def load_results(self):
+        """Load previous run results from results.json."""
+        results_file = self.output_dir / "results.json"
+        if results_file.exists():
+            try:
+                with open(results_file, 'r') as f:
+                    return json.load(f)
+            except Exception:
+                pass
+        return {'tests': {}}
+
+    def needs_heap_dump(self, name, java_file):
+        """Check if a heap dump needs to be (re)generated for a test.
+
+        Returns True if the source file has changed since the last capture
+        or if the previously captured dump file no longer exists.
+        """
+        previous = self.load_results()
+        if name not in previous.get('tests', {}):
+            return True
+
+        prev_test = previous['tests'][name]
+
+        # Must have succeeded previously
+        if prev_test.get('status') not in ('success',):
+            return True
+
+        # Source hash must match
+        current_hash = self.compute_file_hash(java_file)
+        if prev_test.get('source_hash') != current_hash:
+            return True
+
+        # Heap dump file must still exist on disk
+        prev_dump = prev_test.get('heap_dump')
+        if not prev_dump or not Path(prev_dump).exists():
+            return True
+
+        return False
+
     def check_requirements(self):
         """Check if required tools are available."""
         tools = ['javac', 'java', 'jmap']
@@ -322,6 +361,7 @@ class JmapHeapDumpCapture:
     def run_tests(self, test_configs):
         """Run all test configurations."""
         print("\n=== Running Test Programs ===")
+        previous = self.load_results()
         results = {
             'timestamp': datetime.now().isoformat(),
             'tests': {}
@@ -332,9 +372,18 @@ class JmapHeapDumpCapture:
             java_file = config['file']
             print(f"\n--- Test: {name} ---")
 
+            # Skip if source hasn't changed and heap dump still exists
+            if not self.needs_heap_dump(name, java_file):
+                print(f"Skipping {name} (source unchanged, heap dump exists) ✓")
+                results['tests'][name] = previous['tests'][name]
+                continue
+
+            source_hash = self.compute_file_hash(java_file)
+
             test_result = {
                 'name': name,
                 'file': str(java_file),
+                'source_hash': source_hash,
                 'pid': None,
                 'heap_dump': None,
                 'histogram': None,

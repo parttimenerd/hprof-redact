@@ -29,9 +29,9 @@ jobs:
         uses: actions/cache@v4
         with:
           path: heap_dumps/
-          key: heap-dumps-${{ hashFiles('test_programs/*.java', 'capture_heap_dumps.py') }}
+          key: heap-dumps-jdk${{ matrix.java-version }}-${{ hashFiles('test_programs/*.java', 'capture_heap_dumps.py') }}
           restore-keys: |
-            heap-dumps-
+            heap-dumps-jdk${{ matrix.java-version }}-
       
       - name: Generate test heap dumps
         run: python3 capture_heap_dumps.py
