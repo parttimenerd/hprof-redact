@@ -27,6 +27,7 @@ class VersionBumper:
         self.readme = project_root / "README.md"
         self.changelog = project_root / "CHANGELOG.md"
         self.jbang_catalog = project_root / "jbang-catalog.json"
+        self.main_java = project_root / "src" / "main" / "java" / "me" / "bechberger" / "hprof" / "cli" / "Main.java"
         self.backup_dir = project_root / ".release-backup"
         self.backups_created = False
 
@@ -78,8 +79,23 @@ class VersionBumper:
 
     def update_readme(self, old_version: str, new_version: str):
         """Update version in README.md"""
-        # Skip README update for hprof-redact as it doesn't have version there
-        pass
+        if not self.readme.exists():
+            print("⚠ README.md not found, skipping")
+            return
+
+        content = self.readme.read_text()
+        content, count = re.subn(
+            r'(<artifactId>hprof-redact</artifactId>\s*\n\s*<version>)([\d.]+)(</version>)',
+            rf'\g<1>{new_version}\3',
+            content,
+            count=1
+        )
+        if count == 0:
+            print("⚠ Could not find Maven dependency version in README.md, skipping")
+            return
+
+        self.readme.write_text(content)
+        print(f"✓ Updated README.md: {old_version} -> {new_version}")
 
     def update_jbang_catalog(self, old_version: str, new_version: str):
         """Update version in jbang-catalog.json"""
@@ -95,6 +111,26 @@ class VersionBumper:
         self.jbang_catalog.write_text(content)
         print(f"✓ Updated jbang-catalog.json: {old_version} -> {new_version}")
 
+    def update_main_java(self, old_version: str, new_version: str):
+        """Update CLI version in Main.java"""
+        if not self.main_java.exists():
+            print("⚠ Main.java not found, skipping")
+            return
+
+        content = self.main_java.read_text()
+        content, count = re.subn(
+            r'(\bversion\s*=\s*")([\d.]+)(")',
+            rf'\g<1>{new_version}\3',
+            content,
+            count=1
+        )
+        if count == 0:
+            print("⚠ Could not find version in Main.java, skipping")
+            return
+
+        self.main_java.write_text(content)
+        print(f"✓ Updated Main.java: {old_version} -> {new_version}")
+
 
     def show_version_diff(self, old_version: str, new_version: str):
         """Show what would change in version files"""
@@ -102,6 +138,11 @@ class VersionBumper:
         print(f"\n  pom.xml:")
         print(f"    - <version>{old_version}</version>")
         print(f"    + <version>{new_version}</version>")
+
+        if self.main_java.exists():
+            print(f"\n  src/main/java/me/bechberger/hprof/cli/Main.java:")
+            print(f"    - version = \"{old_version}\"")
+            print(f"    + version = \"{new_version}\"")
 
         if self.jbang_catalog.exists():
             print(f"\n  jbang-catalog.json:")
@@ -346,6 +387,7 @@ java -jar jfr-redact.jar redact-text hs_err.log
             self.readme,
             self.changelog,
             self.jbang_catalog,
+            self.main_java,
         ]
 
         for file in files_to_backup:
@@ -370,6 +412,7 @@ java -jar jfr-redact.jar redact-text hs_err.log
             (self.backup_dir / "README.md", self.readme),
             (self.backup_dir / "CHANGELOG.md", self.changelog),
             (self.backup_dir / "jbang-catalog.json", self.jbang_catalog),
+            (self.backup_dir / "Main.java", self.main_java),
         ]
 
         for backup_file, original_file in files_to_restore:
@@ -431,7 +474,7 @@ java -jar jfr-redact.jar redact-text hs_err.log
     def git_commit(self, version: str):
         """Commit version changes"""
         self.run_command(
-            ['git', 'add', 'pom.xml', 'README.md', 'CHANGELOG.md', 'jbang-catalog.json'],
+            ['git', 'add', 'pom.xml', 'README.md', 'CHANGELOG.md', 'jbang-catalog.json', 'src/main/java/me/bechberger/hprof/cli/Main.java'],
             "Staging files"
         )
         self.run_command(
@@ -516,6 +559,11 @@ Note: CHANGELOG.md must have content under [Unreleased] section before releasing
         help='Skip running tests'
     )
     parser.add_argument(
+        '--no-deploy',
+        action='store_true',
+        help='Skip deployment to Maven Central (deploy is default)'
+    )
+    parser.add_argument(
         '--dry-run',
         action='store_true',
         help='Show what would happen without making changes'
@@ -546,9 +594,10 @@ Note: CHANGELOG.md must have content under [Unreleased] section before releasing
 
     print(f"New version ({bump_type}): {new_version}")
 
-    # Set defaults (github-release is ON by default)
+    # Set defaults (github-release and deploy are ON by default)
     do_github_release = not args.no_github_release
     do_push = not args.no_push
+    do_deploy = not args.no_deploy
 
     # Validate changelog before proceeding (unless dry-run)
     if not args.dry_run:
@@ -570,7 +619,7 @@ Note: CHANGELOG.md must have content under [Unreleased] section before releasing
         print("  • python3 bin/sync-documentation.py")
         if do_deploy:
             print("  • mvn clean deploy -P release")
-        print(f"  • git add pom.xml Version.java README.md CHANGELOG.md jbang-catalog.json")
+        print(f"  • git add pom.xml src/main/java/me/bechberger/hprof/cli/Main.java README.md CHANGELOG.md jbang-catalog.json")
         print(f"  • git commit -m 'Bump version to {new_version}'")
         print(f"  • git tag -a v{new_version} -m 'Release {new_version}'")
         if do_push:
@@ -596,6 +645,10 @@ Note: CHANGELOG.md must have content under [Unreleased] section before releasing
 
     print(f"  {step}. Build package")
     step += 1
+
+    if do_deploy:
+        print(f"  {step}. Deploy to Maven Central")
+        step += 1
 
     print(f"  {step}. Commit and tag")
     step += 1
@@ -623,6 +676,7 @@ Note: CHANGELOG.md must have content under [Unreleased] section before releasing
         bumper.update_pom_xml(current_version, new_version)
         bumper.update_readme(current_version, new_version)
         bumper.update_jbang_catalog(current_version, new_version)
+        bumper.update_main_java(current_version, new_version)
         bumper.update_changelog(new_version)
 
         # Run tests
@@ -635,6 +689,11 @@ Note: CHANGELOG.md must have content under [Unreleased] section before releasing
         # Build package
         print("\n=== Building package ===")
         bumper.build_package()
+
+        # Deploy to Maven Central
+        if do_deploy:
+            print("\n=== Deploying to Maven Central ===")
+            bumper.deploy_release()
 
         # Git operations
         print("\n=== Git operations ===")
@@ -671,6 +730,7 @@ Note: CHANGELOG.md must have content under [Unreleased] section before releasing
     print(f"  ✓ CHANGELOG.md updated")
     print(f"  ✓ Tests passed" if not args.skip_tests else "  ⊘ Tests skipped")
     print(f"  ✓ Package built")
+    print(f"  ✓ Deployed to Maven Central" if do_deploy else "  ⊘ Deploy skipped")
     print(f"  ✓ Git commit and tag created")
     print(f"  ✓ Pushed to remote" if do_push else "  ⊘ Push skipped")
     print(f"  ✓ GitHub release created" if do_github_release else "  ⊘ GitHub release skipped")

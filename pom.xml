@@ -8,6 +8,31 @@
     <artifactId>hprof-redact</artifactId>
     <version>0.1.0</version>
 
+    <name>hprof-redact</name>
+    <url>https://github.com/parttimenerd/hprof-redact</url>
+    <description>A tool for redacting HPROF files</description>
+
+    <licenses>
+        <license>
+            <name>MIT</name>
+            <url>https://opensource.org/licenses/MIT</url>
+        </license>
+    </licenses>
+
+    <developers>
+        <developer>
+            <id>parttimenerd</id>
+            <name>Johannes Bechberger</name>
+            <email>me@mostlynerdless.de</email>
+        </developer>
+    </developers>
+
+    <scm>
+        <connection>scm:git:git@github.com:parttimenerd/hprof-redact.git</connection>
+        <developerConnection>scm:git:https://github.com/parttimenerd/hprof-redact.git</developerConnection>
+        <url>https://github.com/parttimenerd/hprof-redact</url>
+    </scm>
+
     <properties>
         <maven.compiler.source>17</maven.compiler.source>
         <maven.compiler.target>17</maven.compiler.target>

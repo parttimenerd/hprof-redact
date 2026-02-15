@@ -1,6 +1,7 @@
 # hprof-redact
 
-[![Build](https://github.com/parttimenerd/hprof-redact/actions/workflows/build.yml/badge.svg)](https://github.com/parttimenerd/hprof-redact/actions/workflows/build.yml)
+[![Build](https://github.com/parttimenerd/hprof-redact/actions/workflows/build.yml/badge.svg)](https://github.com/parttimenerd/hprof-redact/actions/workflows/build.yml) [![Maven Central Version](https://img.shields.io/maven-central/v/me.bechberger/hprof-redact)](https://search.maven.org/artifact/me.bechberger/hprof-redact)
+
 
 `hprof-redact` is a tool for processing Java heap dumps (HPROF format) to redact sensitive data while preserving
 heap structure and size characteristics. This is useful for:
@@ -44,7 +45,7 @@ Add to your `pom.xml`:
 <dependency>
     <groupId>me.bechberger</groupId>
     <artifactId>hprof-redact</artifactId>
-    <version>0.0.0</version>
+    <version>0.1.0</version>
 </dependency>
 ```
 

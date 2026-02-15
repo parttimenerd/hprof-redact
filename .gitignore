@@ -54,3 +54,4 @@ heap_dumps
 *.cpp
 *.hpp
 *.json
+!jbang-catalog.json
