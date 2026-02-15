@@ -6,7 +6,7 @@
 
     <groupId>me.bechberger</groupId>
     <artifactId>hprof-redact</artifactId>
-    <version>0.0.0</version>
+    <version>0.1.0</version>
 
     <properties>
         <maven.compiler.source>17</maven.compiler.source>

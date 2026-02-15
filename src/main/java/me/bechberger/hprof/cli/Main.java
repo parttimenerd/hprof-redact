@@ -21,7 +21,8 @@ import java.util.concurrent.Callable;
 @Command(
         name = "hprof-redact",
         mixinStandardHelpOptions = true,
-        description = "Stream and redact HPROF heap dumps."
+        description = "Stream and redact HPROF heap dumps.",
+        version = "0.1.0"
 )
 public class Main implements Callable<Integer> {
 
