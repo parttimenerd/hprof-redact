@@ -398,10 +398,10 @@ class RealHeapDumpTest {
         }
 
         // Pass 3: if the prim arrays appeared before the Payload instance in the
-        // heap segment(s), byteArrayId/charArrayId are set but the arrays were
-        // not captured.  Re-scan the segments looking only for those arrays.
-        if ((parsed.byteArrayId != 0 && parsed.byteArray.length == 0)
-                || (parsed.charArrayId != 0 && parsed.charArray.length == 0)) {
+        // heap segment(s), the arrays were not captured yet.  Re-scan the
+        // segments looking only for those arrays.
+        if (parsed.candidateArrayIds != null
+                && (parsed.byteArray.length == 0 || parsed.charArray.length == 0)) {
             try (InputStream in = HprofIO.openInputStream(output)) {
                 HprofDataInput data = new HprofDataInput(in);
                 readHeader(data);
@@ -496,6 +496,9 @@ class RealHeapDumpTest {
                     if (payloadClassId != 0 && classId == payloadClassId) {
                         List<HprofType> flattened = flattenedTypes(classId, classInfos, flattenedTypesCache);
                         long remaining = dataLength;
+                        // JDK versions may reorder fields, so collect all OBJECT
+                        // references and resolve byte/char arrays by element type later.
+                        List<Long> objectIds = new ArrayList<>();
                         for (HprofType type : flattened) {
                             switch (type) {
                                 case INT -> {
@@ -508,16 +511,15 @@ class RealHeapDumpTest {
                                 }
                                 case OBJECT -> {
                                     long id = reader.readId();
-                                    if (parsed.byteArrayId == 0) {
-                                        parsed.byteArrayId = id;
-                                    } else if (parsed.charArrayId == 0) {
-                                        parsed.charArrayId = id;
-                                    }
+                                    objectIds.add(id);
                                     remaining -= idSize;
                                 }
                                 default -> remaining -= reader.skipValue(type.code());
                             }
                         }
+                        // Store all candidate object IDs; actual assignment is
+                        // deferred to the PRIM_ARRAY_DUMP handler below.
+                        parsed.candidateArrayIds = objectIds;
                         if (remaining > 0) {
                             reader.skipBytes(remaining);
                         }
@@ -530,13 +532,23 @@ class RealHeapDumpTest {
                     reader.readU4();
                     long count = reader.readU4();
                     int elementType = reader.readU1();
-                    if (arrayId == parsed.byteArrayId && elementType == HPROF_TYPE_BYTE) {
+                    boolean isByteCandidate = parsed.candidateArrayIds != null
+                            && parsed.candidateArrayIds.contains(arrayId)
+                            && elementType == HPROF_TYPE_BYTE
+                            && parsed.byteArray.length == 0;
+                    boolean isCharCandidate = parsed.candidateArrayIds != null
+                            && parsed.candidateArrayIds.contains(arrayId)
+                            && elementType == HPROF_TYPE_CHAR
+                            && parsed.charArray.length == 0;
+                    if (isByteCandidate) {
+                        parsed.byteArrayId = arrayId;
                         byte[] bytes = new byte[(int) count];
                         for (int i = 0; i < count; i++) {
                             bytes[i] = (byte) reader.readU1();
                         }
                         parsed.byteArray = bytes;
-                    } else if (arrayId == parsed.charArrayId && elementType == HPROF_TYPE_CHAR) {
+                    } else if (isCharCandidate) {
+                        parsed.charArrayId = arrayId;
                         char[] chars = new char[(int) count];
                         for (int i = 0; i < count; i++) {
                             chars[i] = (char) reader.readU2();
@@ -566,13 +578,23 @@ class RealHeapDumpTest {
                 reader.readU4();
                 long count = reader.readU4();
                 int elementType = reader.readU1();
-                if (arrayId == parsed.byteArrayId && elementType == HPROF_TYPE_BYTE && parsed.byteArray.length == 0) {
+                boolean isByteCandidate = parsed.candidateArrayIds != null
+                        && parsed.candidateArrayIds.contains(arrayId)
+                        && elementType == HPROF_TYPE_BYTE
+                        && parsed.byteArray.length == 0;
+                boolean isCharCandidate = parsed.candidateArrayIds != null
+                        && parsed.candidateArrayIds.contains(arrayId)
+                        && elementType == HPROF_TYPE_CHAR
+                        && parsed.charArray.length == 0;
+                if (isByteCandidate) {
+                    parsed.byteArrayId = arrayId;
                     byte[] bytes = new byte[(int) count];
                     for (int i = 0; i < count; i++) {
                         bytes[i] = (byte) reader.readU1();
                     }
                     parsed.byteArray = bytes;
-                } else if (arrayId == parsed.charArrayId && elementType == HPROF_TYPE_CHAR && parsed.charArray.length == 0) {
+                } else if (isCharCandidate) {
+                    parsed.charArrayId = arrayId;
                     char[] chars = new char[(int) count];
                     for (int i = 0; i < count; i++) {
                         chars[i] = (char) reader.readU2();
@@ -629,6 +651,8 @@ class RealHeapDumpTest {
         long charArrayId;
         byte[] byteArray = new byte[0];
         char[] charArray = new char[0];
+        /** All OBJECT field IDs from the Payload instance; used to identify arrays by element type. */
+        List<Long> candidateArrayIds;
     }
 
     private static final class SegmentReader {
