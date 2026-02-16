@@ -22,7 +22,7 @@ import static org.junit.jupiter.api.Assertions.assertArrayEquals;
 import static org.junit.jupiter.api.Assertions.assertEquals;
 import static org.junit.jupiter.api.Assertions.assertNotNull;
 
-class HprofFilterTest {
+class HprofRedactTest {
     @Test
     void roundTripWithIdentityTransformer() throws Exception {
         byte[] input = buildMinimalHprof(123456, new int[]{1, 2, 3}, "MyClass", "value");
@@ -102,7 +102,7 @@ class HprofFilterTest {
         try {
             Files.write(temp, input);
             ByteArrayOutputStream out = new ByteArrayOutputStream();
-            new HprofFilter(transformer, null).filter(temp, out);
+            new HprofRedact(transformer, null).process(temp, out);
             return out.toByteArray();
         } finally {
             Files.deleteIfExists(temp);

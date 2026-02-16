@@ -21,8 +21,8 @@ final class VerboseHelper {
         classNameIds.putIfAbsent(classId, nameId);
     }
 
-    void recordNameString(HprofFilter.NameKind kind, long id, String value, boolean onlyIfAbsent) {
-        if (kind != HprofFilter.NameKind.CLASS_NAME && kind != HprofFilter.NameKind.FIELD_NAME) {
+    void recordNameString(HprofRedact.NameKind kind, long id, String value, boolean onlyIfAbsent) {
+        if (kind != HprofRedact.NameKind.CLASS_NAME && kind != HprofRedact.NameKind.FIELD_NAME) {
             return;
         }
         if (onlyIfAbsent) {
@@ -44,7 +44,7 @@ final class VerboseHelper {
         return nameStrings.getOrDefault(nameId, fallback);
     }
 
-    void logUtf8Change(HprofFilter.NameKind kind, long id, String original, String transformed) {
+    void logUtf8Change(HprofRedact.NameKind kind, long id, String original, String transformed) {
         String kindLabel = kind == null ? "UTF8" : kind.name();
         out.println(kindLabel + " id=" + id + ": " + original + " -> " + transformed);
     }

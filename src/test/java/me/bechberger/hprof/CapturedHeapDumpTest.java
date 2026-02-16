@@ -58,7 +58,7 @@ class CapturedHeapDumpTest {
         try {
             // Apply zero transformer to the heap dump
             try (OutputStream out = HprofIO.openOutputStream(outputPath)) {
-                new HprofFilter(new ZeroPrimitiveTransformer(), null).filter(heapDumpPath, out);
+                new HprofRedact(new ZeroPrimitiveTransformer(), null).process(heapDumpPath, out);
             }
 
             // Verify output was created and has content
@@ -88,7 +88,7 @@ class CapturedHeapDumpTest {
         try {
             // Apply identity transformer (should produce identical output)
             try (OutputStream out = HprofIO.openOutputStream(outputPath)) {
-                new HprofFilter(new HprofTransformer() {}, null).filter(heapDumpPath, out);
+                new HprofRedact(new HprofTransformer() {}, null).process(heapDumpPath, out);
             }
 
             // Verify output was created
@@ -136,7 +136,7 @@ class CapturedHeapDumpTest {
             };
 
             try (OutputStream out = HprofIO.openOutputStream(outputPath)) {
-                new HprofFilter(transformer, null).filter(heapDumpPath, out);
+                new HprofRedact(transformer, null).process(heapDumpPath, out);
             }
 
             assertTrue(Files.exists(outputPath), "Output file should exist");
@@ -208,7 +208,7 @@ class CapturedHeapDumpTest {
             };
 
             try (OutputStream out = HprofIO.openOutputStream(outputPath)) {
-                new HprofFilter(transformer, null).filter(heapDumpPath, out);
+                new HprofRedact(transformer, null).process(heapDumpPath, out);
             }
 
             assertTrue(Files.exists(outputPath), "Output file should exist");
@@ -243,7 +243,7 @@ class CapturedHeapDumpTest {
         try {
             try (OutputStream out = HprofIO.openOutputStream(redacted)) {
                 // Redacting primitives must not change instance counts/sizes.
-                new HprofFilter(new ZeroPrimitiveTransformer(), null).filter(heapDumpPath, out);
+                new HprofRedact(new ZeroPrimitiveTransformer(), null).process(heapDumpPath, out);
             }
 
             preJson = HprofSlurpRunner.runJson(uncompressedInput);
@@ -314,7 +314,7 @@ class CapturedHeapDumpTest {
             };
 
             try (OutputStream out = HprofIO.openOutputStream(outputPath)) {
-                new HprofFilter(transformer, null).filter(heapDumpPath, out);
+                new HprofRedact(transformer, null).process(heapDumpPath, out);
             }
 
             assertTrue(Files.exists(outputPath), "Output file should exist");
@@ -348,7 +348,7 @@ class CapturedHeapDumpTest {
         Path outputPath = Files.createTempFile(testName + "-filtered-", ".hprof");
         try {
             try (OutputStream out = HprofIO.openOutputStream(outputPath)) {
-                new HprofFilter(new ZeroPrimitiveTransformer(), null).filter(heapDump, out);
+                new HprofRedact(new ZeroPrimitiveTransformer(), null).process(heapDump, out);
             }
 
             assertTrue(Files.exists(outputPath), "Output should exist for " + testName);

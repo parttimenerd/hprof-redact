@@ -117,6 +117,11 @@ class JmapHeapDumpCapture:
         metadata = self.load_metadata()
         file_key = java_file.name
 
+        class_name = self.get_java_class_name(java_file)
+        class_file = java_file.parent / f"{class_name}.class"
+        if not class_file.exists():
+            return True
+
         current_hash = self.compute_file_hash(java_file)
 
         if file_key not in metadata['files']:
@@ -326,6 +331,26 @@ class JmapHeapDumpCapture:
             print(f"FAILED - {e}")
             return None
 
+    def cleanup_previous_outputs(self, name):
+        """Remove previous heap dumps and histograms for a test name."""
+        patterns = [
+            f"{name}_*.hprof",
+            f"{name}_*.hprof.gz",
+            f"{name}_*_histogram.txt",
+        ]
+
+        removed = 0
+        for pattern in patterns:
+            for file_path in self.output_dir.glob(pattern):
+                try:
+                    file_path.unlink()
+                    removed += 1
+                except Exception:
+                    pass
+
+        if removed > 0:
+            print(f"Removed {removed} previous dump file(s) for {name} ✓")
+
     def terminate_process(self, name):
         """Terminate a running process."""
         if name not in self.pids:
@@ -377,6 +402,8 @@ class JmapHeapDumpCapture:
                 print(f"Skipping {name} (source unchanged, heap dump exists) ✓")
                 results['tests'][name] = previous['tests'][name]
                 continue
+
+            self.cleanup_previous_outputs(name)
 
             source_hash = self.compute_file_hash(java_file)
 

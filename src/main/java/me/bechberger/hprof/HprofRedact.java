@@ -20,27 +20,41 @@ import java.util.Map;
 
 import static me.bechberger.hprof.HprofConstants.*;
 
-public final class HprofFilter {
+/**
+ * Main class for redacting heap dumps. Reads an input HPROF file, applies transformations and writes it back
+ * <p/>
+ * This is a two pass implementation: the first pass scans for metadata records to build a mapping of ID to name kind,
+ * and the second pass applies transformations to strings and primitive values based on their kind and to heap dump records
+ * based on class and field information.
+ */
+public final class HprofRedact {
     private final HprofTransformer transformer;
     private final VerboseHelper verboseHelper;
 
-    public HprofFilter(HprofTransformer transformer, java.io.PrintStream verboseOut) {
+    public HprofRedact(HprofTransformer transformer, java.io.PrintStream verboseOut) {
         this.transformer = transformer;
         this.verboseHelper = verboseOut == null ? null : new VerboseHelper(verboseOut);
     }
 
+    public HprofRedact(HprofTransformer transformer) {
+        this(transformer, null);
+    }
+
+    public static void process(Path inputPath, Path outputPath, HprofTransformer transformer) throws IOException {
+        new HprofRedact(transformer).process(inputPath, outputPath);
+    }
+
     /**
-     * HPROF header:
-     *   [u1]* "JAVA PROFILE 1.0.2\0" (null-terminated)
-     *   u4    id size
-     *   u8    timestamp (ms since epoch)
-     * Records:
-     *   u1    tag
-     *   u4    time (microseconds since header timestamp)
-     *   u4    length (bytes of body)
-     *   [u1]* body
+     * Apply the transformer to the input file and write the result to the output file.
+     * The output file will be overwritten if it already exists.
      */
-    public void filter(Path inputPath, OutputStream output) throws IOException {
+    public void process(Path inputPath, Path outputPath) throws IOException {
+        try (OutputStream output = HprofIO.openOutputStream(outputPath)) {
+            process(inputPath, output);
+        }
+    }
+
+    public void process(Path inputPath, OutputStream output) throws IOException {
         Map<Long, HprofClassInfo> classInfos = new HashMap<>();
         Map<Long, NameKind> nameKinds = new HashMap<>();
 

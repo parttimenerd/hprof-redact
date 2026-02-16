@@ -91,7 +91,7 @@ class RealHeapDumpTest {
         };
 
         try (OutputStream out = HprofIO.openOutputStream(filtered)) {
-            new HprofFilter(transformer, null).filter(input, out);
+            new HprofRedact(transformer, null).process(input, out);
         }
 
         // 1. Verify file sizes match (only changing int values, no structural change)
@@ -288,7 +288,7 @@ class RealHeapDumpTest {
         assertTrue(Files.exists(input));
 
             try (OutputStream out = HprofIO.openOutputStream(output)) {
-                new HprofFilter(new ZeroPrimitiveTransformer(), null).filter(input, out);
+                new HprofRedact(new ZeroPrimitiveTransformer(), null).process(input, out);
         }
 
         ParsedHeap parsed = parseHeap(output);
