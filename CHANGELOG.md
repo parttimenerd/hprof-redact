@@ -14,6 +14,14 @@ and this project adheres to [Semantic Versioning](https://semver.org/spec/v2.0.0
 ### Fixed
 ### Security
 
+## [0.2.0] - 2026-02-16
+
+### Added
+- Nicer facade methods to HprofRedact
+
+### Changed
+- Renamed HprofFilter to HprofRedact
+
 ## [0.1.0] - 2026-02-15
 
 ### Added

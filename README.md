@@ -45,7 +45,7 @@ Add to your `pom.xml`:
 <dependency>
     <groupId>me.bechberger</groupId>
     <artifactId>hprof-redact</artifactId>
-    <version>0.1.0</version>
+    <version>0.2.0</version>
 </dependency>
 ```
 
@@ -109,18 +109,23 @@ Removes string contents entirely, replaces with empty strings.
 ## Programmatic Usage
 
 ```java
-HprofFilter filter = new HprofFilter(new ZeroPrimitiveTransformer(), null);
-filter.filter(
-    Path.of("input.hprof"),
-    new FileOutputStream("output.hprof")
-);
+import me.bechberger.hprof.HprofRedact;
+
+void main() throws IOException {
+    HprofRedact.process(
+        Path.of("input.hprof"),
+        Path.of("output.hprof"),
+        new ZeroPrimitiveTransformer());
+}
 ```
 
 ### Custom Transformers
 
-Implement `HprofTransformer`:
+Implement [`HprofTransformer`](src/main/java/me/bechberger/hprofredact/transformer/HprofTransformer.java):
 
 ```java
+import me.bechberger.hprofredact.transformer.HprofTransformer;
+
 public class MyTransformer implements HprofTransformer {
     @Override
     public String transformUtf8String(String value) {

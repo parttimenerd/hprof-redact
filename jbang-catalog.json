@@ -2,7 +2,7 @@
   "catalogs": {},
   "aliases": {
     "jstall": {
-      "script-ref": "https://github.com/parttimenerd/hprof-redact/releases/download/v0.1.0/hprof-redact.jar"
+      "script-ref": "https://github.com/parttimenerd/hprof-redact/releases/download/v0.2.0/hprof-redact.jar"
     }
   },
   "templates": {}

@@ -8,7 +8,7 @@ import me.bechberger.femtocli.FemtoCli;
 import me.bechberger.femtocli.annotations.Command;
 import me.bechberger.femtocli.annotations.Option;
 import me.bechberger.femtocli.annotations.Parameters;
-import me.bechberger.hprof.HprofFilter;
+import me.bechberger.hprof.HprofRedact;
 import me.bechberger.hprof.HprofIO;
 import me.bechberger.hprof.TransformerOption;
 import me.bechberger.hprof.transformer.HprofTransformer;
@@ -22,7 +22,7 @@ import java.util.concurrent.Callable;
         name = "hprof-redact",
         mixinStandardHelpOptions = true,
         description = "Stream and redact HPROF heap dumps.",
-        version = "0.1.0"
+        version = "0.2.0"
 )
 public class Main implements Callable<Integer> {
 
@@ -55,15 +55,15 @@ public class Main implements Callable<Integer> {
             throw new IllegalArgumentException("stdin is not supported; input must be a file path");
         }
 
-        HprofFilter filter = new HprofFilter(transformerImpl, verbose ? System.out : null);
+        HprofRedact filter = new HprofRedact(transformerImpl, verbose ? System.out : null);
 
         if ("-".equals(output)) {
-            filter.filter(Path.of(input), System.out);
+            filter.process(Path.of(input), System.out);
             return 0;
         }
 
         try (OutputStream out = HprofIO.openOutputStream(Path.of(output))) {
-            filter.filter(Path.of(input), out);
+            filter.process(Path.of(input), out);
         }
 
         return 0;
