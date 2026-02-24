@@ -45,7 +45,7 @@ Add to your `pom.xml`:
 <dependency>
     <groupId>me.bechberger</groupId>
     <artifactId>hprof-redact</artifactId>
-    <version>0.2.0</version>
+    <version>0.2.1</version>
 </dependency>
 ```
 
