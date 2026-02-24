@@ -15,6 +15,7 @@ import me.bechberger.hprof.transformer.HprofTransformer;
 
 import java.io.IOException;
 import java.io.OutputStream;
+import java.nio.file.Files;
 import java.nio.file.Path;
 import java.util.concurrent.Callable;
 
@@ -43,6 +44,14 @@ public class Main implements Callable<Integer> {
         description = "Log changed field values.")
     private boolean verbose;
 
+    @Option(names = {"--compress"},
+            description = "Enable compression format (write only lengths for array/string data, not entries, custom format for testing only).")
+    private boolean compress;
+
+    @Option(names = {"--dry-run"},
+            description = "Process the file without writing output (useful for testing compression ratio).")
+    private boolean dryRun;
+
     public static void main(String[] args) {
         System.exit(FemtoCli.run(new Main(), args));
     }
@@ -55,18 +64,49 @@ public class Main implements Callable<Integer> {
             throw new IllegalArgumentException("stdin is not supported; input must be a file path");
         }
 
-        HprofRedact filter = new HprofRedact(transformerImpl, verbose ? System.out : null);
+        Path inputPath = Path.of(input);
+        long inputSize = Files.size(inputPath);
 
-        if ("-".equals(output)) {
-            filter.process(Path.of(input), System.out);
+        HprofRedact filter = new HprofRedact(transformerImpl, verbose ? System.out : null, compress);
+
+        if (dryRun) {
+            // Process to a null output stream (just counts bytes)
+            filter.process(inputPath, new NullOutputStream());
+            if (compress) {
+                System.err.printf("Dry run: processed %d bytes (compression would reduce to estimate)%n", inputSize);
+            }
             return 0;
         }
 
-        try (OutputStream out = HprofIO.openOutputStream(Path.of(output))) {
-            filter.process(Path.of(input), out);
+        if ("-".equals(output)) {
+            filter.process(inputPath, System.out);
+            return 0;
+        }
+
+        Path outputPath = Path.of(output);
+        try (OutputStream out = HprofIO.openOutputStream(outputPath)) {
+            filter.process(inputPath, out);
+        }
+
+        if (compress) {
+            long outputSize = Files.size(outputPath);
+            double ratio = (double) outputSize / inputSize;
+            System.err.printf("Compression ratio: %.2f%% (%d → %d bytes)%n", 
+                ratio * 100, inputSize, outputSize);
         }
 
         return 0;
+    }
+
+    private static class NullOutputStream extends OutputStream {
+        @Override
+        public void write(int b) {}
+        
+        @Override
+        public void write(byte[] b) {}
+        
+        @Override
+        public void write(byte[] b, int off, int len) {}
     }
 
     private static HprofTransformer resolveTransformer(String name) {

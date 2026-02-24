@@ -30,14 +30,20 @@ import static me.bechberger.hprof.HprofConstants.*;
 public final class HprofRedact {
     private final HprofTransformer transformer;
     private final VerboseHelper verboseHelper;
+    private final boolean compress;
 
-    public HprofRedact(HprofTransformer transformer, java.io.PrintStream verboseOut) {
+    public HprofRedact(HprofTransformer transformer, java.io.PrintStream verboseOut, boolean compress) {
         this.transformer = transformer;
         this.verboseHelper = verboseOut == null ? null : new VerboseHelper(verboseOut);
+        this.compress = compress;
+    }
+
+    public HprofRedact(HprofTransformer transformer, java.io.PrintStream verboseOut) {
+        this(transformer, verboseOut, false);
     }
 
     public HprofRedact(HprofTransformer transformer) {
-        this(transformer, null);
+        this(transformer, null, false);
     }
 
     public static void process(Path inputPath, Path outputPath, HprofTransformer transformer) throws IOException {
@@ -276,6 +282,9 @@ public final class HprofRedact {
      * HPROF_UTF8:
      *   id   nameId
      *   [u1]* UTF-8 bytes (no trailing zero)
+     * 
+     * When compress mode is enabled and the string changes, the length is written as negative,
+     * and the actual bytes are not written (only the length).
      */
     private void handleUtf8Record(HprofDataInput in, HprofDataOutput out,
                                   long time, long length, int idSize,
@@ -322,9 +331,18 @@ public final class HprofRedact {
 
         out.writeU1(HPROF_UTF8);
         out.writeU4(time);
-        out.writeU4(newLength);
-        out.writeId(id);
-        out.writeBytes(outBytes);
+        
+        if (compress) {
+            // Write -1 as marker, then write actual byte count, then id (no data)
+            out.writeU4(-1L);
+            out.writeU4(outBytes.length);
+            out.writeId(id);
+        } else {
+            out.writeU4(newLength);
+            out.writeId(id);
+            out.writeBytes(outBytes);
+        }
+        
         if (verboseHelper != null) {
             verboseHelper.recordNameString(kind, id, transformed, false);
         }
@@ -638,9 +656,9 @@ public final class HprofRedact {
      * HPROF_GC_PRIM_ARRAY_DUMP:
      *   id  arrayId
      *   u4  stackTraceSerial
-     *   u4  numElements
+     *   u4  numElements (or negative if compress mode - only length is written, no data)
      *   u1  elementType
-     *   [value]* elements
+     *   [value]* elements (skipped if numElements is negative in compress mode)
      */
     private void handlePrimitiveArrayDump(HprofDataInput in, HprofDataOutput out) throws IOException {
         long arrayId = in.readId();
@@ -650,6 +668,16 @@ public final class HprofRedact {
 
         out.writeId(arrayId);
         out.writeU4(stackTraceSerial);
+        
+        // In compress mode, write -1 as marker, then actual numElements, then skip data
+        if (compress && numElements > 0) {
+            out.writeU4(-1L);
+            out.writeU4(numElements);
+            out.writeU1(elementType.code());
+            skipPrimitiveArrayElementsCompress(in, elementType, numElements);
+            return;
+        }
+        
         out.writeU4(numElements);
         out.writeU1(elementType.code());
         if (numElements > Integer.MAX_VALUE) {
@@ -775,6 +803,16 @@ public final class HprofRedact {
                 }
             }
         }
+    }
+
+    private void skipPrimitiveArrayElementsCompress(HprofDataInput in, HprofType elementType, 
+                                                    long numElements) throws IOException {
+        if (numElements > Integer.MAX_VALUE) {
+            throw new IOException("Primitive array too large: " + numElements);
+        }
+        
+        long elementSize = sizeForType(elementType, in.getIdSize());
+        skipFully(in, numElements * elementSize);
     }
 
     private void writeValueByType(HprofDataInput in, HprofDataOutput out,

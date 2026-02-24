@@ -54,11 +54,13 @@ Add to your `pom.xml`:
 ### Command Line
 
 ```bash
-Usage: hprof-redact [-hV] [--transformer=<transformer>] [--verbose] <input>
+Usage: hprof-redact [-hV] [--compress] [--transformer=<transformer>] [--verbose] <input>
                     <output>
 Stream and redact HPROF heap dumps.
       <input>                        Input HPROF path.
       <output>                       Output HPROF path or '-' for stdout.
+  --compress                         Enable compression format (omit array and string data,
+                                     store only sizes).
   -h, --help                         Show this help message and exit.
   -t, --transformer=<transformer>    Transformer to apply (default: zero).
                                      Options: zero (zero primitives + string
@@ -69,6 +71,25 @@ Stream and redact HPROF heap dumps.
                                      only) to stderr.
   -V, --version                      Print version information and exit.
 ```
+
+### Compression Format
+
+When using the `--compress` option, the output HPROF format is modified to save space by omitting array and string data:
+
+**UTF-8 Strings (HPROF_UTF8):**
+- Standard format: `[record_tag][time][length][id][data...]`
+- Compress format: `[record_tag][time][-1][actual_length][id]` (no data)
+
+**Primitive Arrays (HPROF_GC_PRIM_ARRAY_DUMP):**
+- Standard format: `[id][stackTrace][numElements][elementType][elements...]`
+- Compress format: `[id][stackTrace][-1][actual_numElements][elementType]` (no elements)
+
+This format allows tools to:
+- Reconstruct the original heap structure and data types
+- Determine array/string sizes without parsing the content
+- Significantly reduce file size by omitting bulk data
+
+**Use case:** When you need to share heap structure information without exposing string or array contents, and downstream tools support the compressed format.
 
 ## Transformers
 

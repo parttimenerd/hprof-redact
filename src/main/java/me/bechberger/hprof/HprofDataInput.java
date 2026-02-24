@@ -28,6 +28,10 @@ final class HprofDataInput {
         this.idSize = idSize;
     }
 
+    int getIdSize() {
+        return idSize;
+    }
+
     int readTag() throws IOException {
         return in.read();
     }

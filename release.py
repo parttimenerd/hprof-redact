@@ -303,7 +303,7 @@ class VersionBumper:
         # Get changelog entry for this specific version (after it's been released in CHANGELOG.md)
         changelog_entry = self.get_version_changelog_entry(version)
         if not changelog_entry:
-            changelog_entry = f"Release {version}\n\nSee [CHANGELOG.md](https://github.com/parttimenerd/jfr-redact/blob/main/CHANGELOG.md) for details."
+            changelog_entry = f"Release {version}\n\nSee [CHANGELOG.md](https://github.com/parttimenerd/hprof-redact/blob/main/CHANGELOG.md) for details."
 
         # Format release notes
         release_notes = f"""# Release {version}
@@ -316,24 +316,26 @@ class VersionBumper:
 ```xml
 <dependency>
     <groupId>me.bechberger</groupId>
-    <artifactId>jfr-redact</artifactId>
+    <artifactId>hprof-redact</artifactId>
     <version>{version}</version>
 </dependency>
 ```
 
 ### Direct Download
 Download from the assets below:
-- `jfr-redact.jar` - Executable JAR file (requires Java 21+)
-- `jfr-redact` - Standalone binary
+- `hprof-redact.jar` - Executable JAR file (requires Java 21+)
+- `hprof-redact` - Standalone binary
 
 **Usage:**
 ```bash
 # Using the JAR directly
-java -jar jfr-redact.jar redact recording.jfr
+java -jar hprof-redact.jar input.hprof output.hprof
 
-# Redact text files
-java -jar jfr-redact.jar redact-text hs_err.log
+# Using the standalone binary
+./hprof-redact input.hprof output.hprof
 ```
+
+For more information, see [README.md](https://github.com/parttimenerd/hprof-redact/blob/main/README.md)
 """
 
         # Create release notes file
@@ -342,34 +344,37 @@ java -jar jfr-redact.jar redact-text hs_err.log
 
         try:
             # Build asset paths
-            jar_path = self.project_root / 'target' / 'jfr-redact.jar'
-            binary_path = self.project_root / 'target' / 'jfr-redact'
+            jar_path = self.project_root / 'target' / 'hprof-redact.jar'
+            binary_path = self.project_root / 'target' / 'hprof-redact'
+
+            cmd = ['gh', 'release', 'create', tag,
+                   '--title', f'Release {version}',
+                   '--notes-file', str(notes_file)]
 
             assets = []
             if jar_path.exists():
-                assets.append(str(jar_path) + '#jfr-redact.jar')
+                assets.append(str(jar_path))
+                print(f"✓ Found JAR: {jar_path}")
             else:
                 print(f"⚠ JAR not found at {jar_path}")
 
             if binary_path.exists():
-                assets.append(str(binary_path) + '#jfr-redact')
+                assets.append(str(binary_path))
+                print(f"✓ Found binary: {binary_path}")
             else:
-                print(f"⚠ jfr-redact binary not found at {binary_path}")
+                print(f"⚠ hprof-redact binary not found at {binary_path}")
 
-            if not assets:
-                print("⚠ No assets found, creating release without assets")
+            if assets:
+                cmd.extend(assets)
                 self.run_command(
-                    ['gh', 'release', 'create', tag,
-                     '--title', f'Release {version}',
-                     '--notes-file', str(notes_file)],
-                    f"Creating GitHub release {tag}"
+                    cmd,
+                    f"Creating GitHub release {tag} with {len(assets)} asset(s)"
                 )
             else:
+                print("⚠ No assets found, creating release without assets")
                 self.run_command(
-                    ['gh', 'release', 'create', tag,
-                     '--title', f'Release {version}',
-                     '--notes-file', str(notes_file)] + assets,
-                    f"Creating GitHub release {tag} with {len(assets)} asset(s)"
+                    cmd,
+                    f"Creating GitHub release {tag}"
                 )
         finally:
             # Clean up notes file
@@ -626,7 +631,7 @@ Note: CHANGELOG.md must have content under [Unreleased] section before releasing
             print("  • git push")
             print("  • git push --tags")
         if do_github_release:
-            print(f"  • gh release create v{new_version} (with CHANGELOG entry + jfr-redact.jar)")
+            print(f"  • gh release create v{new_version} (with CHANGELOG entry + hprof-redact.jar)")
 
         print("\n✓ No changes made (dry run)")
         return
