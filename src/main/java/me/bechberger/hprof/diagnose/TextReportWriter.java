@@ -23,6 +23,7 @@ public final class TextReportWriter {
     // -------------------------------------------------------------------------
 
     public static void write(DiagnosticReport report, PrintWriter out) {
+        writeDiagnosticSummary(report, out);
         writeProblems(report.problems(), out);
         writeFileSummary(report.fileSummary(), out);
         writeRecordHistogram(report.recordHistogram(), out);
@@ -41,6 +42,70 @@ public final class TextReportWriter {
 
     // -------------------------------------------------------------------------
     // Sections
+
+    private static void writeDiagnosticSummary(DiagnosticReport report, PrintWriter out) {
+        DiagnosticReport.FileSummary fs = report.fileSummary();
+        DiagnosticReport.SizeAttribution sa = report.sizeAttribution();
+
+        long fileSizeBytes = fs.fileSizeBytes();
+        long heapEstimate = sa.estimatedHeapSizeWithCompressedOops();
+        long totalInstances = sa.objectIdOverheadBytes() > 0 ? sa.objectIdOverheadBytes() / 25 : 0;
+        long totalInstanceBytes = sa.heapObjectInstanceBytes();
+        long gap = fileSizeBytes - heapEstimate;
+        long framingTotal = sa.objectIdOverheadBytes();
+        long refExpansion = sa.compressedRefExpansionBytes();
+        long metadataBytes = sa.utf8StringBytes() + sa.loadClassBytes()
+                + sa.classDumpBytes() + sa.framesTracesThreadsBytes()
+                + sa.heapSummaryAndOtherBytes() + sa.segmentFramingBytes()
+                + sa.heapDumpEndBytes() + sa.unknownOrUnparseableBytes();
+
+        // Compressed oops inference: idSize=8 and heap < 32 GB (default threshold) → coops ON
+        boolean coopsInferred = fs.idSize() == 8 && heapEstimate > 0 && heapEstimate < 32L * 1024 * 1024 * 1024;
+        String coopsStr = fs.idSize() == 8
+                ? (coopsInferred ? "ON (heap < 32 GB)" : "likely OFF (heap ≥ 32 GB)")
+                : "N/A (idSize=4)";
+        int headerSize = coopsInferred ? 12 : (fs.idSize() == 8 ? 16 : 8);
+        int netFramingPerObj = 25 - headerSize;
+
+        out.println("=== Diagnostic Summary ===");
+        out.printf("File:              %s%n", fs.filePath());
+        out.printf("File size:         %s  (%s bytes)%n", formatBytesHuman(fileSizeBytes), formatBytes(fileSizeBytes));
+        out.printf("Heap estimate:     %s  (%s bytes)%n", formatBytesHuman(heapEstimate), formatBytes(heapEstimate));
+        if (gap > 0) {
+            out.printf("File/heap gap:     %s  (%s×)%n", formatBytesHuman(gap),
+                    String.format(Locale.ROOT, "%.1f", (double) fileSizeBytes / Math.max(heapEstimate, 1)));
+        }
+        out.println();
+        out.printf("Total instances:   %s%n", formatBytes(totalInstances));
+        if (totalInstances > 0) {
+            long avg = totalInstanceBytes / totalInstances;
+            out.printf("Avg instance size: %s bytes payload (excl. object header)%n", formatBytes(avg));
+        }
+        out.printf("ID size:           %d bytes%n", fs.idSize());
+        out.printf("Compressed oops:   %s  → %d bytes/obj net file-only overhead (25 − %d header)%n",
+                coopsStr, netFramingPerObj, headerSize);
+        out.println();
+
+        // Gap breakdown
+        if (gap > 0) {
+            out.println("Gap breakdown:");
+            printGapRow(out, "instance framing  (25 B/obj on disk)",  framingTotal, gap);
+            printGapRow(out, "obj-array ref expansion  (4 B/elem)",    refExpansion, gap);
+            long heapObjectBytes = totalInstanceBytes
+                    + sa.heapObjectObjArrayBytes() + sa.heapObjectPrimArrayBytes();
+            long otherHeapGap = Math.max(0, gap - framingTotal - refExpansion - metadataBytes);
+            if (otherHeapGap > 0) {
+                printGapRow(out, "other heap objects", otherHeapGap, gap);
+            }
+            printGapRow(out, "metadata (utf8, classes, frames, GC roots, framing)", metadataBytes, gap);
+            long unexplained = gap - framingTotal - refExpansion - metadataBytes - otherHeapGap;
+            if (Math.abs(unexplained) > 1024) {
+                printGapRow(out, "unexplained / rounding", unexplained, gap);
+            }
+        }
+        out.println();
+    }
+
     // -------------------------------------------------------------------------
 
     private static void writeProblems(List<DiagnosticReport.Problem> problems, PrintWriter out) {
@@ -342,7 +407,12 @@ public final class TextReportWriter {
     // Formatting helpers
     // -------------------------------------------------------------------------
 
-    /** Returns a comma-separated decimal string, e.g. {@code "12,345,678"}. */
+    private static void printGapRow(PrintWriter out, String label, long bytes, long totalGap) {
+        double pct = totalGap > 0 ? 100.0 * bytes / totalGap : 0.0;
+        out.printf("  %-52s %10s  (%s%%)%n", label, formatBytesHuman(bytes),
+                String.format(Locale.ROOT, "%5.1f", pct));
+    }
+
     static String formatBytes(long value) {
         return String.format(Locale.ROOT, "%,d", value);
     }
