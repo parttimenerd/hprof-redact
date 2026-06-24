@@ -43,16 +43,12 @@ public class DiagnoseCommand implements Callable<Integer> {
     private int topN;
 
     @Option(names = {"--object-align"}, defaultValue = "8",
-            description = "JVM object alignment in bytes for MAT heap size estimation (default: ${DEFAULT-VALUE}).")
+            description = "JVM object alignment in bytes for heap size estimation (default: ${DEFAULT-VALUE}).")
     private int objectAlign;
 
-    @Option(names = {"--assume-compressed-oops"},
-            description = "Force heap size estimate to use refSize=4 (compressed oops).")
-    private boolean assumeCompressedOops;
-
-    @Option(names = {"--no-compressed-oops"},
-            description = "Force heap size estimate to use refSize=idSize (uncompressed oops).")
-    private boolean noCompressedOops;
+    @Option(names = {"--compact-headers"},
+            description = "Use compact object header size (8 bytes, JDK 25+ JEP 519) for framing overhead calculation.")
+    private boolean compactHeaders;
 
     @Option(names = {"--histogram"},
             description = "Emit full per-class histogram with framing overhead column (all classes, sorted by on-disk bytes).")
@@ -67,8 +63,7 @@ public class DiagnoseCommand implements Callable<Integer> {
         opts.objectAlign = objectAlign;
         opts.detectDuplicateIds = detectDuplicateIds;
         opts.histogram = histogram;
-        opts.assumeCompressedOops = assumeCompressedOops;
-        opts.noCompressedOops = noCompressedOops;
+        opts.compactHeaders = compactHeaders;
 
         DiagnosticReport report = HprofDiagnose.diagnose(inputPath, opts);
 

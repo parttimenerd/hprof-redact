@@ -59,12 +59,20 @@ public final class TextReportWriter {
                 + sa.heapSummaryAndOtherBytes() + sa.segmentFramingBytes()
                 + sa.heapDumpEndBytes() + sa.unknownOrUnparseableBytes();
 
-        // Compressed oops inference: idSize=8 and heap < 32 GB (default threshold) → coops ON
+        // Header size inference: compact headers (JDK 25+) > coops OFF (heap ≥ 32 GB) > coops ON (default)
         boolean coopsInferred = fs.idSize() == 8 && heapEstimate > 0 && heapEstimate < 32L * 1024 * 1024 * 1024;
-        String coopsStr = fs.idSize() == 8
-                ? (coopsInferred ? "ON (heap < 32 GB)" : "likely OFF (heap ≥ 32 GB)")
-                : "N/A (idSize=4)";
-        int headerSize = coopsInferred ? 12 : (fs.idSize() == 8 ? 16 : 8);
+        String coopsStr;
+        int headerSize;
+        if (fs.compactHeaders()) {
+            coopsStr = "compact headers (JDK 25+, JEP 519)";
+            headerSize = 8;
+        } else if (fs.idSize() == 8) {
+            coopsStr = coopsInferred ? "ON (heap < 32 GB)" : "likely OFF (heap ≥ 32 GB)";
+            headerSize = coopsInferred ? 12 : 16;
+        } else {
+            coopsStr = "N/A (idSize=4)";
+            headerSize = 8;
+        }
         int netFramingPerObj = 25 - headerSize;
 
         out.println("=== Diagnostic Summary ===");

@@ -66,7 +66,8 @@ public record DiagnosticReport(
             long fileSizeBytes,
             String headerMagic,
             int idSize,
-            long timestampMs
+            long timestampMs,
+            boolean compactHeaders
     ) {}
 
     /**

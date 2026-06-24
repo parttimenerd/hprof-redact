@@ -1232,16 +1232,16 @@ class HprofDiagnoseExamplesTest {
         }
 
         @Test
-        void noCompressedOopsGives9BytesPerObject() throws Exception {
+        void compactHeadersGives17BytesPerObject() throws Exception {
             HprofDiagnose.Options opts = new HprofDiagnose.Options();
             opts.histogram = true;
-            opts.noCompressedOops = true;
+            opts.compactHeaders = true;
             DiagnosticReport r = HprofDiagnose.diagnose(tempFile, opts);
             assertNotNull(r.classHistogram());
             for (var e : r.classHistogram()) {
                 if (e.instanceCount() > 0) {
-                    assertEquals(e.instanceCount() * 9, e.totalFramingBytes(),
-                            "totalFramingBytes must equal instanceCount × 9 (coops OFF)");
+                    assertEquals(e.instanceCount() * 17, e.totalFramingBytes(),
+                            "totalFramingBytes must equal instanceCount × 17 (compact headers)");
                 }
             }
         }

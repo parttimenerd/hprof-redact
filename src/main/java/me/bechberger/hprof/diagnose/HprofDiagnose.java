@@ -32,8 +32,7 @@ public final class HprofDiagnose {
         public int objectAlign = 8;
         public boolean detectDuplicateIds = false;
         public boolean histogram = false;
-        public boolean assumeCompressedOops = false;
-        public boolean noCompressedOops = false;
+        public boolean compactHeaders = false;
     }
 
     public static DiagnosticReport diagnose(Path inputPath, Options options) throws IOException {
@@ -230,7 +229,8 @@ public final class HprofDiagnose {
                 fileSizeBytes,
                 headerMagicPass1,
                 idSizePass1,
-                timestampMsPass1
+                timestampMsPass1,
+                options.compactHeaders
         );
 
         List<DiagnosticReport.RecordStat> recordStats = new ArrayList<>();
@@ -286,8 +286,16 @@ public final class HprofDiagnose {
                 .collect(Collectors.toList());
 
         // Header size for net framing overhead: 25 bytes HPROF framing minus the runtime object header
-        // (not stored in the file). Default: coops ON → header = 12 bytes → net = 13 bytes/object.
-        int headerSize = options.noCompressedOops ? 16 : 12;
+        // (not stored in the file). Infer coops from idSize + heap size (< 32 GB → coops ON, header=12).
+        // compact headers (JDK 25+, JEP 519) use header=8, enabled via --compact-headers.
+        int headerSize;
+        if (options.compactHeaders) {
+            headerSize = 8;
+        } else if (idSizePass1 == 8 && state.heapEstimateCompressed >= 32L * 1024 * 1024 * 1024) {
+            headerSize = 16; // coops OFF: heap >= 32 GB
+        } else {
+            headerSize = 12; // coops ON: default for heap < 32 GB
+        }
         final int framingPerObject = 25 - headerSize;
 
         List<DiagnosticReport.ClassHistogramEntry> histogramList = null;
