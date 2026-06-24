@@ -13,7 +13,7 @@ import java.util.List;
  * HPROF file rather than truncating it. If the same path was already written
  * by a previous run (or a manual jmap dump), the file becomes a concatenation
  * of two complete HPROF streams. Eclipse MAT parses only the first stream and
- * reports ~half the on-disk size as "heap size" — exactly the customer anomaly.
+ * reports ~half the on-disk size as "heap size".
  *
  * This program demonstrates the mechanism in two ways:
  *   Mode 1 (default): uses HotSpotDiagnosticMXBean to write the first dump,

@@ -477,54 +477,38 @@ Largest record: 50,000 bytes  (sample: "AAAAAAAA...")
 
 ---
 
-## Most likely cause for the reported customer case
+## Interpreting the size ratio: what each range suggests
 
-The original customer complaint (from SAP's internal workzone) described:
+When you observe `file_size / MAT_heap_size ≈ R`, the following heuristics apply. Run `hprof-redact diagnose` to get the exact breakdown.
 
-- **JVM:** SapMachine 21 (SAP's OpenJDK 21 distribution, HotSpot-based)
-- **On-disk file size:** 36.8 GB
-- **MAT reported heap size:** 19.9 GB (with **"Keep unreachable objects" enabled**)
-- **Unexplained gap:** ~16.9 GB (~1.85× ratio)
-
-Working through the scenarios:
-
-| Scenario | Fits the evidence? | Reasoning |
+| Ratio R | Most likely explanation | How to confirm with `diagnose` |
 |---|---|---|
-| **1 — Concatenated dump** | **YES — strongest fit** | 1.85× is consistent with two successive dumps of a heap that grew slightly between dumps (the second dump is a bit larger than the first, e.g. 19.9 GB + 16.9 GB ≈ 36.8 GB). With "unreachable objects" enabled MAT reports the full first stream. |
-| 3 — Unreachable objects | No — excluded by MAT option | MAT's 19.9 GB already includes unreachable objects (that option was on). If unreachable objects were the cause, enabling the option would have increased the reported size, not revealed a gap. |
-| 2 — UTF-8 bloat | Contributes but insufficient | UTF-8 is typically 2–5% of a JVM dump. Even at 5% of 36.8 GB that's only ~1.8 GB — far less than the 16.9 GB gap. |
-| 8 — GZip confusion | No | The gap is 16.9 GB absolute; GZip confusion would give a ratio of 3–6× on the entire file, not the fractional 1.85× observed. |
-| 6 — Segment mismatch | Possible but unlikely | Would require a systematic bug in SapMachine's HPROF writer across all 36 GB of segments — no such bug is known. |
-| 9 — Class overhead | Contributes minimally | Class metadata for a large app might add 1–3 GB, but not 16.9 GB. |
+| **1.05–1.10×** | Normal overhead (UTF-8, class dumps, GC roots, framing). No anomaly. | Size attribution shows no dominant non-heap category. |
+| **1.10–1.30×** | Slightly elevated UTF-8/class metadata, or live=false dump with moderate unreachable objects. | Check UTF-8 analysis for `[UNUSUALLY LARGE]` flag; compare `prim_arrays` on-disk vs. MAT formula. |
+| **~1.5–2.5× and gap ≈ half the file** | **Concatenated dump** (two successive OOM dumps appended to the same file). The second stream is as large as the first. This is the most common cause of a near-2× gap in production. | `Duplicate Headers` warning + `UNKNOWN(0x4a)` in record histogram + `Trailing Bytes` warning. |
+| **2×+ with "Keep unreachable objects" already on** | Still concatenated. Unreachable objects cannot explain it if MAT already counted them. The ~2× gap remains entirely from the second stream being invisible. | Same as above — duplicate header at offset ≈ half the file size. |
+| **3–7× compared to a `live=true` dump** | Unreachable objects dominate. The JVM had not GC'd recently before the dump. A `live=true` re-dump would be far smaller. | Cannot be distinguished from a live dump by `diagnose` alone; take a `jmap -dump:live` separately. |
+| **>10× or gap >> half the file** | GZip confusion (comparing compressed on-disk size against MAT's decompressed heap figure), extreme UTF-8 bloat, or a file that is mostly class metadata with very few heap objects. | Check file extension (`.hprof.gz` vs `.hprof`). Run `gzip -l` to get decompressed size. Check `utf8_strings` and `class_dumps` rows in attribution. |
 
-### Why concatenated dump is almost certain
+### Why a ~1.85× ratio with "Keep unreachable objects" enabled strongly implies a concatenated dump
 
-The arithmetic is telling. If the heap was **~19 GB** at the time of the first OOM dump, and the JVM continued running (or was restarted) and produced a second dump of a **~17 GB** heap (heap shrank slightly after restart, or GC ran between dumps), the resulting file would be approximately:
+If MAT's reported heap size already includes unreachable objects (option enabled) and the file is still ~1.85× larger, then:
 
-```
-19.9 GB (first dump) + 16.9 GB (second dump) ≈ 36.8 GB on disk
-MAT reports: 19.9 GB (first stream only)
-```
+- **Unreachable objects are not the cause** — they are already counted.
+- **UTF-8 and class overhead** typically add ≤10% — insufficient to explain a 40–50% gap.
+- **The arithmetic fits exactly**: if the first stream is X bytes and a second stream of ≈0.85X bytes was appended, the file is ≈1.85X bytes while MAT reports only X bytes.
 
-This matches the observed numbers exactly. The slight asymmetry (heaps not equal) is exactly what you would expect from a restart — the JVM starts fresh, allocates less before the second OOM, and produces a somewhat smaller second dump.
+The HotSpot HPROF writer (used by OpenJDK and distributions based on it) opens `-XX:HeapDumpPath` with `O_CREAT | O_APPEND`. If the target file already exists from a previous run or a previous OOM in the same JVM lifetime, the new dump is appended without truncation.
 
-SapMachine 21 uses the standard HotSpot HPROF writer, which has the same append-mode behaviour as upstream OpenJDK: `-XX:+HeapDumpOnOutOfMemoryError` opens the file with `O_WRONLY | O_CREAT | O_APPEND` on Linux. If the `-XX:HeapDumpPath` target already existed from a previous run or a previous OOM in the same JVM lifetime, the new dump is appended without truncation.
+**Signals to look for in `diagnose` output:**
+1. `Duplicate Headers` — `WARNING: Additional HPROF header found at decompressed offset ~<half-file-size>`.
+2. Record histogram — `UNKNOWN(0x4a)` entry (byte `'J'` from `"JAVA PROFILE"` of the second stream parsed as an unknown record tag).
+3. `Trailing Bytes` — the second stream's content past its own `HEAP_DUMP_END` reported as garbage.
 
-### How to confirm
-
-Run `hprof-redact diagnose` on the 36.8 GB file and look for:
-
-1. **`Duplicate Headers` section** — should show `WARNING: Additional HPROF header found at decompressed offset ~20,xxx,xxx,xxx` (roughly 19.9 GB into the file).
-2. **`UNKNOWN(0x4a)` in the Record Histogram** — the byte `'J'` from `"JAVA PROFILE"` of the second stream treated as an unknown record tag.
-3. **`Trailing Bytes` warning** — the second stream's content past the first HEAP_DUMP_END gets reported as trailing garbage.
-
-If all three are present, the diagnosis is confirmed: two successive OOM dumps were appended to the same file.
-
-### Recommended remediation
-
-1. **Immediate:** Delete or rename the accumulated dump file between JVM restarts.
-2. **Long-term:** Configure `-XX:HeapDumpPath` to use a timestamped directory rather than a fixed filename, e.g. `-XX:HeapDumpPath=/dumps/` (the JVM will create `java_pid<N>.hprof` inside it, never overwriting an existing file). Alternatively, use a startup script that renames any existing dump before starting the JVM.
-3. **Detection:** Run `hprof-redact diagnose` as part of the incident response workflow before opening the dump in MAT. A 30-second scan will immediately flag the concatenation and save the analyst from debugging a phantom 17 GB of heap.
+**Recommended remediation:**
+- Delete or rename the dump file between JVM restarts.
+- Point `-XX:HeapDumpPath` at a *directory* instead of a fixed filename; the JVM will create `java_pid<N>.hprof` inside it, never colliding with a previous file.
+- Run `hprof-redact diagnose` as the first step in any dump analysis workflow — it flags a concatenation in seconds.
 
 ---
 
@@ -590,7 +574,7 @@ All programs are in `test_programs/`:
 |---|---|
 | `ScenarioProducer.java` | Real JVM dumps: concatenated (S1), UTF-8 bloat (S2), unreachable objects (S3), baseline (S4) |
 | `SyntheticScenarios.java` | Synthetic HPROF: truncated (S5), segment mismatch (S6), duplicate IDs (S7), gzip (S8), class overhead (S9), UTF-8 dominant (S10) |
-| `OomDoubleHeapDump.java` | Concatenated dump via MXBean + stream-copy (the original customer scenario) |
+| `OomDoubleHeapDump.java` | Concatenated dump via MXBean + stream-copy |
 
 ```bash
 # Generate all scenario files
