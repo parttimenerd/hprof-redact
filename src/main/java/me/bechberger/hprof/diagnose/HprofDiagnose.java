@@ -51,7 +51,18 @@ public final class HprofDiagnose {
             headerMagicPass1 = header.magic();
             timestampMsPass1 = header.timestamp();
             in.setIdSize(header.idSize());
-            scanForMetadata(in, header.idSize(), utf8Strings, referencedNameIds, classNames, classNameIds);
+            try {
+                scanForMetadata(in, header.idSize(), utf8Strings, referencedNameIds, classNameIds);
+            } catch (IOException | RuntimeException e) {
+                // Tolerate parse errors in pass 1 (e.g. concatenated/corrupt dump).
+                // We proceed with whatever metadata was collected before the error.
+            }
+        }
+        // Resolve classId -> className outside the try block so it always runs,
+        // even if scanForMetadata aborted early on a corrupt/concatenated dump.
+        for (Map.Entry<Long, Long> e : classNameIds.entrySet()) {
+            String name = utf8Strings.get(e.getValue());
+            if (name != null) classNames.put(e.getKey(), name);
         }
 
         // ---- Pass 2: full diagnostic pass ----
@@ -300,7 +311,6 @@ public final class HprofDiagnose {
             HprofDataInput in, int idSize,
             Map<Long, String> utf8Strings,
             Set<Long> referencedNameIds,
-            Map<Long, String> classNames,
             Map<Long, Long> classNameIds) throws IOException {
 
         while (true) {
@@ -359,13 +369,6 @@ public final class HprofDiagnose {
             }
         }
 
-        // Resolve classId -> className via nameId
-        for (Map.Entry<Long, Long> e : classNameIds.entrySet()) {
-            String name = utf8Strings.get(e.getValue());
-            if (name != null) {
-                classNames.put(e.getKey(), name);
-            }
-        }
     }
 
     private static void scanHeapDumpSegmentForMeta(
