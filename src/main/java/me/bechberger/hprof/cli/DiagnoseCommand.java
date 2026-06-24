@@ -21,7 +21,7 @@ import java.util.concurrent.Callable;
 @Command(
     name = "diagnose",
     mixinStandardHelpOptions = true,
-    description = "Analyze an HPROF heap dump and report size attribution, anomalies, and MAT-vs-disk discrepancies."
+    description = "Analyze an HPROF heap dump and report size attribution, anomalies, and disk-vs-runtime size discrepancies."
 )
 public class DiagnoseCommand implements Callable<Integer> {
 
@@ -47,12 +47,16 @@ public class DiagnoseCommand implements Callable<Integer> {
     private int objectAlign;
 
     @Option(names = {"--assume-compressed-oops"},
-            description = "Force MAT heap size estimate to use refSize=4 (compressed oops).")
+            description = "Force heap size estimate to use refSize=4 (compressed oops).")
     private boolean assumeCompressedOops;
 
     @Option(names = {"--no-compressed-oops"},
-            description = "Force MAT heap size estimate to use refSize=idSize (uncompressed oops).")
+            description = "Force heap size estimate to use refSize=idSize (uncompressed oops).")
     private boolean noCompressedOops;
+
+    @Option(names = {"--histogram"},
+            description = "Emit full per-class histogram with framing overhead column (all classes, sorted by on-disk bytes).")
+    private boolean histogram;
 
     @Override
     public Integer call() throws IOException {
@@ -62,6 +66,9 @@ public class DiagnoseCommand implements Callable<Integer> {
         opts.topN = topN;
         opts.objectAlign = objectAlign;
         opts.detectDuplicateIds = detectDuplicateIds;
+        opts.histogram = histogram;
+        opts.assumeCompressedOops = assumeCompressedOops;
+        opts.noCompressedOops = noCompressedOops;
 
         DiagnosticReport report = HprofDiagnose.diagnose(inputPath, opts);
 

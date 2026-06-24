@@ -32,6 +32,7 @@ public record DiagnosticReport(
         Utf8Analysis utf8Analysis,
         List<TopClass> topClasses,
         List<TopArray> topArrays,
+        List<ClassHistogramEntry> classHistogram,
         List<SegmentIssue> segmentIssues,
         List<HeaderOccurrence> duplicateHeaders,
         TrailingBytes trailingBytes,
@@ -267,6 +268,27 @@ public record DiagnosticReport(
             long diskBytes,
             long estimatedHeapSizeWithCompressedOops,
             long estimatedHeapSizeWithoutCompressedOops
+    ) {}
+
+    /**
+     * Per-class entry in the full class histogram (produced when {@code --histogram} is requested).
+     *
+     * @param classId                          HPROF object ID of the class
+     * @param className                        resolved class name, or {@code "class#<id>"} if unknown
+     * @param instanceCount                    number of HPROF_GC_INSTANCE_DUMP records for this class
+     * @param totalInstanceBytes               sum of dataLength fields (on-disk payload bytes)
+     * @param totalFramingBytes                {@code instanceCount × (25 − headerSize)} — net file-only
+     *                                         overhead: 13 bytes/obj with compressed oops ON,
+     *                                         9 bytes/obj with compressed oops OFF
+     * @param estimatedHeapWithCompressedOops  estimated runtime heap assuming refSize = 4
+     */
+    public record ClassHistogramEntry(
+            long classId,
+            String className,
+            long instanceCount,
+            long totalInstanceBytes,
+            long totalFramingBytes,
+            long estimatedHeapWithCompressedOops
     ) {}
 
     /**

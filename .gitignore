@@ -55,3 +55,8 @@ heap_dumps
 *.hpp
 *.json
 !jbang-catalog.json
+# Tool artifacts
+.playwright-mcp/
+docs/superpowers/
+test_programs/*.class
+mat

@@ -31,6 +31,7 @@ public final class TextReportWriter {
         writeUtf8Analysis(report.utf8Analysis(), report.fileSummary().fileSizeBytes(), out);
         writeTopClasses(report.topClasses(), out);
         writeTopArrays(report.topArrays(), out);
+        writeClassHistogram(report.classHistogram(), out);
         writeSegmentIssues(report.segmentIssues(), out);
         writeDuplicateHeaders(report.duplicateHeaders(), out);
         writeTrailingBytes(report.trailingBytes(), out);
@@ -239,6 +240,25 @@ public final class TextReportWriter {
                     formatBytes(a.numElements()),
                     formatBytes(a.diskBytes()),
                     formatBytes(a.estimatedHeapSizeWithCompressedOops()));
+        }
+        out.println();
+    }
+
+    private static void writeClassHistogram(
+            List<DiagnosticReport.ClassHistogramEntry> entries, PrintWriter out) {
+        if (entries == null) return;
+        out.printf("--- Class Histogram (%,d classes) ---%n", entries.size());
+        out.printf(" %3s  %-50s %12s   %16s   %16s   %16s%n",
+                "#", "Class Name", "Instances", "On-Disk Bytes", "Framing Overhead", "Est. Heap (cOops)");
+        int rank = 1;
+        for (DiagnosticReport.ClassHistogramEntry e : entries) {
+            out.printf(" %3d  %-50s %12s   %16s   %16s   %16s%n",
+                    rank++,
+                    e.className(),
+                    formatBytes(e.instanceCount()),
+                    formatBytes(e.totalInstanceBytes()),
+                    formatBytes(e.totalFramingBytes()),
+                    formatBytes(e.estimatedHeapWithCompressedOops()));
         }
         out.println();
     }

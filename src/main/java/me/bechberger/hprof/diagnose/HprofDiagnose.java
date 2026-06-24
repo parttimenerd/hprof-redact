@@ -31,6 +31,9 @@ public final class HprofDiagnose {
         public int topN = 20;
         public int objectAlign = 8;
         public boolean detectDuplicateIds = false;
+        public boolean histogram = false;
+        public boolean assumeCompressedOops = false;
+        public boolean noCompressedOops = false;
     }
 
     public static DiagnosticReport diagnose(Path inputPath, Options options) throws IOException {
@@ -282,6 +285,25 @@ public final class HprofDiagnose {
                 })
                 .collect(Collectors.toList());
 
+        // Header size for net framing overhead: 25 bytes HPROF framing minus the runtime object header
+        // (not stored in the file). Default: coops ON → header = 12 bytes → net = 13 bytes/object.
+        int headerSize = options.noCompressedOops ? 16 : 12;
+        final int framingPerObject = 25 - headerSize;
+
+        List<DiagnosticReport.ClassHistogramEntry> histogramList = null;
+        if (options.histogram && idSizePass1 == 8) {
+            histogramList = classStats.entrySet().stream()
+                    .sorted((a, b) -> Long.compare(b.getValue()[1], a.getValue()[1]))
+                    .map(e -> {
+                        long cid = e.getKey();
+                        long[] s = e.getValue();
+                        String name = classNames.getOrDefault(cid, "class#" + cid);
+                        return new DiagnosticReport.ClassHistogramEntry(
+                                cid, name, s[0], s[1], s[0] * framingPerObject, s[2]);
+                    })
+                    .collect(Collectors.toList());
+        }
+
         List<DiagnosticReport.TopArray> topArraysList = topArrays.topEntries().stream()
                 .map(TopNTracker.Entry::value)
                 .collect(Collectors.toList());
@@ -319,6 +341,7 @@ public final class HprofDiagnose {
                 utf8Analysis,
                 topClassesList,
                 topArraysList,
+                histogramList,
                 segmentIssues,
                 allHeaders,
                 trailingBytesRecord,

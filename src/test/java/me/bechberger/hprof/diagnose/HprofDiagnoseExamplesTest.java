@@ -1162,6 +1162,180 @@ class HprofDiagnoseExamplesTest {
         }
     }
 
+    @Nested
+    static class ClassHistogramTest {
+
+        private static DiagnosticReport reportWithHistogram;
+        private static DiagnosticReport reportWithoutHistogram;
+        private static Path tempFile;
+
+        @BeforeAll
+        static void buildAndDiagnose() throws Exception {
+            byte[] hprof = buildHprof();
+            tempFile = Files.createTempFile("histogram-test", ".hprof");
+            Files.write(tempFile, hprof);
+
+            HprofDiagnose.Options optsOn = new HprofDiagnose.Options();
+            optsOn.histogram = true;
+            reportWithHistogram = HprofDiagnose.diagnose(tempFile, optsOn);
+
+            HprofDiagnose.Options optsOff = new HprofDiagnose.Options();
+            optsOff.histogram = false;
+            reportWithoutHistogram = HprofDiagnose.diagnose(tempFile, optsOff);
+        }
+
+        @AfterAll
+        static void cleanup() throws Exception {
+            if (tempFile != null) Files.deleteIfExists(tempFile);
+        }
+
+        @Test
+        void histogramNullWhenNotRequested() {
+            assertNull(reportWithoutHistogram.classHistogram(),
+                    "classHistogram must be null when --histogram is not set");
+        }
+
+        @Test
+        void histogramNonNullAndNonEmptyWhenRequested() {
+            assertNotNull(reportWithHistogram.classHistogram(), "classHistogram must not be null");
+            assertFalse(reportWithHistogram.classHistogram().isEmpty(), "classHistogram must not be empty");
+        }
+
+        @Test
+        void histogramContainsMyClass() {
+            assertNotNull(reportWithHistogram.classHistogram());
+            assertTrue(
+                    reportWithHistogram.classHistogram().stream().anyMatch(e -> e.className().contains("MyClass")),
+                    "histogram must contain 'MyClass'");
+        }
+
+        @Test
+        void framingOverheadIs13BytesPerObjectWithDefaultCompressedOops() {
+            // Default: coops ON → headerSize=12 → net framing = 25 - 12 = 13 bytes/object
+            assertNotNull(reportWithHistogram.classHistogram());
+            for (var e : reportWithHistogram.classHistogram()) {
+                if (e.instanceCount() > 0) {
+                    assertEquals(e.instanceCount() * 13, e.totalFramingBytes(),
+                            "totalFramingBytes must equal instanceCount × 13 (coops ON default)");
+                }
+            }
+        }
+
+        @Test
+        void histogramSortedDescendingByOnDiskBytes() {
+            assertNotNull(reportWithHistogram.classHistogram());
+            var hist = reportWithHistogram.classHistogram();
+            for (int i = 0; i + 1 < hist.size(); i++) {
+                assertTrue(hist.get(i).totalInstanceBytes() >= hist.get(i + 1).totalInstanceBytes(),
+                        "histogram must be sorted descending by totalInstanceBytes");
+            }
+        }
+
+        @Test
+        void noCompressedOopsGives9BytesPerObject() throws Exception {
+            HprofDiagnose.Options opts = new HprofDiagnose.Options();
+            opts.histogram = true;
+            opts.noCompressedOops = true;
+            DiagnosticReport r = HprofDiagnose.diagnose(tempFile, opts);
+            assertNotNull(r.classHistogram());
+            for (var e : r.classHistogram()) {
+                if (e.instanceCount() > 0) {
+                    assertEquals(e.instanceCount() * 9, e.totalFramingBytes(),
+                            "totalFramingBytes must equal instanceCount × 9 (coops OFF)");
+                }
+            }
+        }
+
+        // Two INSTANCE_DUMP records for MyClass (classId=0x100), each with 8 bytes of field data
+
+        private static final int ID_SIZE = 8;
+
+        private static byte[] buildHprof() throws IOException {
+            ByteArrayOutputStream out = new ByteArrayOutputStream();
+            DataOutputStream data = new DataOutputStream(out);
+
+            data.write("JAVA PROFILE 1.0.2\0".getBytes(StandardCharsets.UTF_8));
+            writeU4(data, ID_SIZE);
+            writeU8(data, 1000L);
+
+            writeUtf8Record(data, 0x01L, "MyClass");
+            writeLoadClassRecord(data, 1, 0x100L, 0, 0x01L);
+
+            ByteArrayOutputStream seg = new ByteArrayOutputStream();
+            DataOutputStream s = new DataOutputStream(seg);
+            writeClassDump(s, 0x100L, 8);
+            writeInstanceDump(s, 0x200L, 0x100L, new byte[8]);
+            writeInstanceDump(s, 0x201L, 0x100L, new byte[8]);
+            writeRecord(data, HPROF_HEAP_DUMP_SEGMENT, 0, seg.toByteArray());
+            writeRecord(data, HPROF_HEAP_DUMP_END, 0, new byte[0]);
+            data.flush();
+            return out.toByteArray();
+        }
+
+        private static void writeClassDump(DataOutputStream s, long classId, int instanceSize) throws IOException {
+            s.writeByte(HPROF_GC_CLASS_DUMP);
+            writeId(s, classId);
+            writeU4(s, 0);
+            writeId(s, 0L); writeId(s, 0L); writeId(s, 0L); writeId(s, 0L); writeId(s, 0L); writeId(s, 0L);
+            writeU4(s, instanceSize);
+            writeU2(s, 0); writeU2(s, 0); writeU2(s, 0);
+        }
+
+        private static void writeInstanceDump(DataOutputStream s, long objectId, long classId, byte[] payload)
+                throws IOException {
+            s.writeByte(HPROF_GC_INSTANCE_DUMP);
+            writeId(s, objectId);
+            writeU4(s, 0);
+            writeId(s, classId);
+            writeU4(s, payload.length);
+            s.write(payload);
+        }
+
+        private static void writeUtf8Record(DataOutputStream data, long nameId, String text) throws IOException {
+            ByteArrayOutputStream p = new ByteArrayOutputStream();
+            DataOutputStream pd = new DataOutputStream(p);
+            writeId(pd, nameId);
+            pd.write(text.getBytes(StandardCharsets.UTF_8));
+            pd.flush();
+            writeRecord(data, HPROF_UTF8, 0, p.toByteArray());
+        }
+
+        private static void writeLoadClassRecord(DataOutputStream data, int serial, long classId,
+                                                  int stackSerial, long nameId) throws IOException {
+            ByteArrayOutputStream p = new ByteArrayOutputStream();
+            DataOutputStream pd = new DataOutputStream(p);
+            writeU4(pd, serial);
+            writeId(pd, classId);
+            writeU4(pd, stackSerial);
+            writeId(pd, nameId);
+            pd.flush();
+            writeRecord(data, HPROF_LOAD_CLASS, 0, p.toByteArray());
+        }
+
+        private static void writeRecord(DataOutputStream out, int tag, int time, byte[] payload) throws IOException {
+            out.writeByte(tag);
+            writeU4(out, time);
+            writeU4(out, payload.length);
+            out.write(payload);
+        }
+
+        private static void writeId(DataOutputStream out, long value) throws IOException {
+            out.writeLong(value); // idSize=8
+        }
+
+        private static void writeU2(DataOutputStream out, int value) throws IOException {
+            out.writeShort(value & 0xFFFF);
+        }
+
+        private static void writeU4(DataOutputStream out, long value) throws IOException {
+            out.writeInt((int) value);
+        }
+
+        private static void writeU8(DataOutputStream out, long value) throws IOException {
+            out.writeLong(value);
+        }
+    }
+
     // =========================================================================
     // Shared helper predicates (static, accessible to all nested classes)
     // =========================================================================
