@@ -173,17 +173,34 @@ public final class HprofDiagnose {
                             HprofDataInput segmentIn = new HprofDataInput(limited);
                             segmentIn.setIdSize(header.idSize());
 
-                            parseHeapDumpPayload(segmentIn, limited, header.idSize(), options.objectAlign,
-                                    state, subrecordHistogram);
+                            IOException segmentException = null;
+                            try {
+                                parseHeapDumpPayload(segmentIn, limited, header.idSize(), options.objectAlign,
+                                        state, subrecordHistogram);
+                            } catch (IOException e) {
+                                segmentException = e;
+                            }
 
                             long remaining = limited.remaining();
                             if (remaining != 0) {
                                 long consumed = length - remaining;
+                                String description = segmentException != null
+                                        ? "Segment consumed " + consumed + " bytes but declared " + length
+                                          + " (parse error at offset " + consumed + ": " + segmentException.getMessage() + ")"
+                                        : "Segment consumed " + consumed + " bytes but declared " + length;
                                 segmentIssues.add(new DiagnosticReport.SegmentIssue(
-                                        segmentStart, length, consumed,
-                                        "Segment consumed " + consumed + " bytes but declared " + length));
-                                // drain remaining bytes
-                                segmentIn.skipFully(remaining);
+                                        segmentStart, length, consumed, description));
+                                // drain remaining bytes so the outer stream stays aligned
+                                try {
+                                    in.skipFully(remaining);
+                                } catch (IOException ignored) {
+                                    // best-effort drain; if we can't skip, stop parsing
+                                    throw ignored;
+                                }
+                            } else if (segmentException != null) {
+                                // All declared bytes consumed but with a parse error inside —
+                                // re-throw so the outer handler records trailing bytes.
+                                throw segmentException;
                             }
                         }
 
