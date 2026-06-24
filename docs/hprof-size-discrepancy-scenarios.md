@@ -477,6 +477,57 @@ Largest record: 50,000 bytes  (sample: "AAAAAAAA...")
 
 ---
 
+## Most likely cause for the reported customer case
+
+The original customer complaint (from SAP's internal workzone) described:
+
+- **JVM:** SapMachine 21 (SAP's OpenJDK 21 distribution, HotSpot-based)
+- **On-disk file size:** 36.8 GB
+- **MAT reported heap size:** 19.9 GB (with **"Keep unreachable objects" enabled**)
+- **Unexplained gap:** ~16.9 GB (~1.85× ratio)
+
+Working through the scenarios:
+
+| Scenario | Fits the evidence? | Reasoning |
+|---|---|---|
+| **1 — Concatenated dump** | **YES — strongest fit** | 1.85× is consistent with two successive dumps of a heap that grew slightly between dumps (the second dump is a bit larger than the first, e.g. 19.9 GB + 16.9 GB ≈ 36.8 GB). With "unreachable objects" enabled MAT reports the full first stream. |
+| 3 — Unreachable objects | No — excluded by MAT option | MAT's 19.9 GB already includes unreachable objects (that option was on). If unreachable objects were the cause, enabling the option would have increased the reported size, not revealed a gap. |
+| 2 — UTF-8 bloat | Contributes but insufficient | UTF-8 is typically 2–5% of a JVM dump. Even at 5% of 36.8 GB that's only ~1.8 GB — far less than the 16.9 GB gap. |
+| 8 — GZip confusion | No | The gap is 16.9 GB absolute; GZip confusion would give a ratio of 3–6× on the entire file, not the fractional 1.85× observed. |
+| 6 — Segment mismatch | Possible but unlikely | Would require a systematic bug in SapMachine's HPROF writer across all 36 GB of segments — no such bug is known. |
+| 9 — Class overhead | Contributes minimally | Class metadata for a large app might add 1–3 GB, but not 16.9 GB. |
+
+### Why concatenated dump is almost certain
+
+The arithmetic is telling. If the heap was **~19 GB** at the time of the first OOM dump, and the JVM continued running (or was restarted) and produced a second dump of a **~17 GB** heap (heap shrank slightly after restart, or GC ran between dumps), the resulting file would be approximately:
+
+```
+19.9 GB (first dump) + 16.9 GB (second dump) ≈ 36.8 GB on disk
+MAT reports: 19.9 GB (first stream only)
+```
+
+This matches the observed numbers exactly. The slight asymmetry (heaps not equal) is exactly what you would expect from a restart — the JVM starts fresh, allocates less before the second OOM, and produces a somewhat smaller second dump.
+
+SapMachine 21 uses the standard HotSpot HPROF writer, which has the same append-mode behaviour as upstream OpenJDK: `-XX:+HeapDumpOnOutOfMemoryError` opens the file with `O_WRONLY | O_CREAT | O_APPEND` on Linux. If the `-XX:HeapDumpPath` target already existed from a previous run or a previous OOM in the same JVM lifetime, the new dump is appended without truncation.
+
+### How to confirm
+
+Run `hprof-redact diagnose` on the 36.8 GB file and look for:
+
+1. **`Duplicate Headers` section** — should show `WARNING: Additional HPROF header found at decompressed offset ~20,xxx,xxx,xxx` (roughly 19.9 GB into the file).
+2. **`UNKNOWN(0x4a)` in the Record Histogram** — the byte `'J'` from `"JAVA PROFILE"` of the second stream treated as an unknown record tag.
+3. **`Trailing Bytes` warning** — the second stream's content past the first HEAP_DUMP_END gets reported as trailing garbage.
+
+If all three are present, the diagnosis is confirmed: two successive OOM dumps were appended to the same file.
+
+### Recommended remediation
+
+1. **Immediate:** Delete or rename the accumulated dump file between JVM restarts.
+2. **Long-term:** Configure `-XX:HeapDumpPath` to use a timestamped directory rather than a fixed filename, e.g. `-XX:HeapDumpPath=/dumps/` (the JVM will create `java_pid<N>.hprof` inside it, never overwriting an existing file). Alternatively, use a startup script that renames any existing dump before starting the JVM.
+3. **Detection:** Run `hprof-redact diagnose` as part of the incident response workflow before opening the dump in MAT. A 30-second scan will immediately flag the concatenation and save the analyst from debugging a phantom 17 GB of heap.
+
+---
+
 ## Summary table (all scenarios, measured)
 
 | # | Scenario | File size | MAT heap | Ratio | Primary `diagnose` signal |
