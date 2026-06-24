@@ -23,7 +23,8 @@ import java.util.concurrent.Callable;
         name = "hprof-redact",
         mixinStandardHelpOptions = true,
         description = "Stream and redact HPROF heap dumps.",
-        version = "0.2.1"
+        version = "0.2.1",
+        subcommands = {DiagnoseCommand.class}
 )
 public class Main implements Callable<Integer> {
 
