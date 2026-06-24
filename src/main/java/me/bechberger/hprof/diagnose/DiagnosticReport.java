@@ -125,24 +125,23 @@ public record DiagnosticReport(
      * @param unknownOrUnparseableBytes     bytes that could not be attributed to any known record type
      * @param estimatedHeapSizeWithCompressedOops estimated runtime heap size assuming reference size = 4 bytes
      * @param estimatedHeapSizeWithoutCompressedOops estimated runtime heap size assuming reference size = idSize bytes
-     * @param objectIdOverheadBytes         fixed per-instance framing bytes in INSTANCE_DUMP subrecords
-     *                                      not counted in the heap size estimate: for each instance,
-     *                                      the subrecord header is: {@code 1 (subtag) + idSize (objectId) +
-     *                                      4 (stackTrace) + idSize (classId) + 4 (dataLength field)
-     *                                      = 1 + 2×idSize + 8} bytes. With idSize=8 this is exactly
-     *                                      25 bytes per object — not counted in the estimate, which uses
-     *                                      only the {@code dataLength} payload. At 500 million
-     *                                      objects ≈ 12.5 GB of overhead not in the estimate.
-     *                                      Note: this is a disk-vs-estimate overhead. Reference fields
-     *                                      within the payload are also written as idSize=8 bytes
-     *                                      (decompressed) even when the JVM used compressed oops,
-     *                                      but since the estimator reads the raw dataLength too, this
-     *                                      does NOT widen the disk/heap gap — it does mean the estimate
-     *                                      may exceed the actual runtime heap for ref-heavy workloads.
-     * @param compressedRefExpansionBytes   bytes in OBJ_ARRAY_DUMP on disk not counted in the heap
-     *                                      size estimate: when idSize=8 but the JVM uses compressed
-     *                                      oops (refSize=4), each array element is stored as 8 bytes
-     *                                      on disk but the estimator uses refSize=4 (4 bytes per element).
+     * @param objectIdOverheadBytes         fixed per-instance framing bytes in INSTANCE_DUMP subrecords:
+     *                                      for each instance, the subrecord header is:
+     *                                      {@code 1 (subtag) + idSize (objectId) + 4 (stackTrace) +
+     *                                      idSize (classId) + 4 (dataLength field) = 1 + 2×idSize + 8} bytes.
+     *                                      With idSize=8 this is exactly 25 bytes per object.
+     *                                      The runtime object header (mark word + klass pointer) is NOT stored
+     *                                      in the file, so the net file-only overhead per object is
+     *                                      25 - header_size: 13 bytes with compressed oops ON (heap &lt; 32 GB),
+     *                                      9 bytes with compressed oops OFF (heap &ge; 32 GB),
+     *                                      17 bytes with compact object headers (JDK 25+, JEP 519).
+     *                                      At 500 million objects with compressed oops ON:
+     *                                      500M × 25 = 12.5 GB in the file, 500M × 12 = 6 GB object headers
+     *                                      at runtime, net file-only contribution ≈ 500M × 13 = 6.5 GB.
+     * @param compressedRefExpansionBytes   extra bytes in OBJ_ARRAY_DUMP on disk vs. at runtime:
+     *                                      when idSize=8 but the JVM uses compressed oops (refSize=4),
+     *                                      each array element is stored as 8 bytes in the file but
+     *                                      occupies 4 bytes at runtime.
      *                                      Overhead = {@code numElements × (idSize − 4)} per array.
      */
     public record SizeAttribution(

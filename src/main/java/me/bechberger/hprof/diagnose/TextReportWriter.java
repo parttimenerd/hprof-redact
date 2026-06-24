@@ -144,29 +144,34 @@ public final class TextReportWriter {
         out.printf("%-45s %s%n", "TOTAL est. heap (compressed oops):", formatBytes(s.estimatedHeapSizeWithCompressedOops()));
         out.printf("%-45s %s%n", "TOTAL est. heap (full refs):", formatBytes(s.estimatedHeapSizeWithoutCompressedOops()));
         out.println();
-        out.println("  NOTE: The heap size estimate counts only heap_objects.* categories.");
-        out.println("  Objects not reachable from GC roots are excluded from heap analysis tools'");
-        out.println("  default view but included here if \"Keep unreachable objects\" was enabled.");
-        out.println("  The estimated instance size = INSTANCE_DUMP dataLength (includes 8-byte ref");
-        out.println("  fields even when the JVM used compressed oops at runtime). This means");
-        out.println("  the heap size estimate may exceed the runtime heap for ref-heavy workloads.");
-        out.println("  The file/heap gap comes from subrecord framing + OBJ_ARRAY ref expansion.");
+        out.println("  NOTE: Why the file is larger than the runtime heap:");
+        out.println("  Each INSTANCE_DUMP subrecord stores 25 bytes of framing (subtag + objectId +");
+        out.println("  stackTrace + classId + dataLength) that has no counterpart in the runtime object");
+        out.println("  payload. The runtime object header (mark+klass, 12 bytes with compressed oops)");
+        out.println("  is NOT stored in the file, so the net file-only overhead per object is");
+        out.println("  25 - header_size (13 bytes for compressed oops ON, 9 bytes for coops OFF).");
+        out.println("  For OBJ_ARRAY, each element is written as 8 bytes in the file but occupies");
+        out.println("  4 bytes at runtime with compressed oops, adding 4 bytes/element overhead.");
         out.println();
 
         // Object-ID and compressed-reference overhead breakdown (shown only when non-zero)
         long instanceOverhead = s.objectIdOverheadBytes();
         long refExpansion = s.compressedRefExpansionBytes();
         if (instanceOverhead > 0 || refExpansion > 0) {
-            out.println("  Overhead in file but not in heap size estimate (explains file > est. heap gap):");
+            out.println("  Overhead in file vs. runtime heap (explains file > runtime heap size):");
             if (instanceOverhead > 0) {
-                out.printf("    instance subrecord framing  (25 bytes per object, idSize=8): %s bytes%n",
-                        formatBytes(instanceOverhead));
+                out.println("    Per-instance HPROF framing: 25 bytes on disk, but the runtime object header");
+                out.println("    (not stored in the file) must be subtracted to get net file-only overhead:");
+                out.println("      compressed oops ON  (heap < 32 GB, default): 25 - 12 = 13 bytes/object");
+                out.println("      compressed oops OFF (heap >= 32 GB):          25 - 16 =  9 bytes/object");
+                out.println("      compact headers     (JDK 25+, JEP 519):       25 -  8 = 17 bytes/object");
+                out.printf("    Total framing bytes in file: %s%n", formatBytes(instanceOverhead));
             }
             if (refExpansion > 0) {
-                out.printf("    OBJ_ARRAY ref expansion (4 bytes/element, idSize=8 vs estimator refSize=4): %s bytes%n",
+                out.printf("    OBJ_ARRAY ref expansion (4 bytes/element, idSize=8 vs runtime refSize=4): %s bytes%n",
                         formatBytes(refExpansion));
             }
-            out.printf("    combined: %s bytes%n", formatBytes(instanceOverhead + refExpansion));
+            out.printf("    combined framing + ref expansion: %s bytes%n", formatBytes(instanceOverhead + refExpansion));
             out.println();
         }
     }
