@@ -125,13 +125,24 @@ public record DiagnosticReport(
      * @param unknownOrUnparseableBytes     bytes that could not be attributed to any known record type
      * @param matHeapSizeWithCompressedOops estimated MAT heap size assuming reference size = 4 bytes
      * @param matHeapSizeWithoutCompressedOops estimated MAT heap size assuming reference size = idSize bytes
-     * @param objectIdOverheadBytes         bytes consumed by HPROF subrecord headers that MAT does not count:
-     *                                      for each INSTANCE_DUMP: {@code 1 (subtag) + 2×idSize + 8} minus
-     *                                      {@code dataLength}. With idSize=8 this is 25 bytes per object.
-     *                                      At 500 million objects ≈ 12.5 GB overhead not visible in MAT.
-     * @param compressedRefExpansionBytes   bytes consumed by reference expansion in OBJ_ARRAY_DUMP when
-     *                                      idSize=8 but the JVM uses compressed oops (refSize=4): each
-     *                                      element is stored as 8 bytes on disk but MAT counts only 4.
+     * @param objectIdOverheadBytes         fixed per-instance framing bytes in INSTANCE_DUMP subrecords
+     *                                      that MAT does not count: for each instance, the subrecord
+     *                                      header is: {@code 1 (subtag) + idSize (objectId) +
+     *                                      4 (stackTrace) + idSize (classId) + 4 (dataLength field)
+     *                                      = 1 + 2×idSize + 8} bytes. With idSize=8 this is exactly
+     *                                      25 bytes per object — all invisible to MAT, which counts
+     *                                      only the {@code dataLength} payload. At 500 million
+     *                                      objects ≈ 12.5 GB of overhead not visible in MAT.
+     *                                      Note: this is a disk-vs-MAT overhead. Reference fields
+     *                                      within the payload are also written as idSize=8 bytes
+     *                                      (decompressed) even when the JVM used compressed oops,
+     *                                      but since MAT reads the raw dataLength too, this does
+     *                                      NOT widen the disk/MAT gap — it does mean MAT may exceed
+     *                                      the actual runtime heap for ref-heavy workloads.
+     * @param compressedRefExpansionBytes   bytes in OBJ_ARRAY_DUMP on disk that MAT does not count:
+     *                                      when idSize=8 but the JVM uses compressed oops (refSize=4),
+     *                                      each array element is stored as 8 bytes on disk but MAT's
+     *                                      formula uses refSize=4 (4 bytes per element).
      *                                      Overhead = {@code numElements × (idSize − 4)} per array.
      */
     public record SizeAttribution(

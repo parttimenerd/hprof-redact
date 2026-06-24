@@ -144,22 +144,26 @@ public final class TextReportWriter {
         out.printf("%-45s %s%n", "TOTAL MAT heap (compressed):", formatBytes(s.matHeapSizeWithCompressedOops()));
         out.printf("%-45s %s%n", "TOTAL MAT heap (uncompressed):", formatBytes(s.matHeapSizeWithoutCompressedOops()));
         out.println();
-        out.println("  NOTE: MAT's \"heap size\" figure counts only heap_objects.* categories.");
+        out.println("  NOTE: MAT's \"heap size\" counts only heap_objects.* categories.");
         out.println("  Objects not reachable from GC roots are excluded from MAT's default");
         out.println("  view but included here if \"Keep unreachable objects\" was enabled.");
+        out.println("  MAT's instance size = INSTANCE_DUMP dataLength (includes 8-byte ref");
+        out.println("  fields even when the JVM used compressed oops at runtime). This means");
+        out.println("  MAT may report MORE than the runtime heap for ref-heavy workloads.");
+        out.println("  The disk/MAT gap comes from subrecord framing + OBJ_ARRAY ref expansion.");
         out.println();
 
         // Object-ID and compressed-reference overhead breakdown (shown only when non-zero)
         long instanceOverhead = s.objectIdOverheadBytes();
         long refExpansion = s.compressedRefExpansionBytes();
         if (instanceOverhead > 0 || refExpansion > 0) {
-            out.println("  Overhead not counted by MAT:");
+            out.println("  Overhead in file but not in MAT heap (explains disk > MAT gap):");
             if (instanceOverhead > 0) {
-                out.printf("    instance subrecord framing  (25 bytes per object when idSize=8): %s bytes%n",
+                out.printf("    instance subrecord framing  (25 bytes per object, idSize=8): %s bytes%n",
                         formatBytes(instanceOverhead));
             }
             if (refExpansion > 0) {
-                out.printf("    obj-array ref expansion (4 extra bytes/element, idSize=8 vs oops=4): %s bytes%n",
+                out.printf("    OBJ_ARRAY ref expansion (4 bytes/element, idSize=8 vs MAT refSize=4): %s bytes%n",
                         formatBytes(refExpansion));
             }
             out.printf("    combined: %s bytes%n", formatBytes(instanceOverhead + refExpansion));
