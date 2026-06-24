@@ -8,6 +8,15 @@ and this project adheres to [Semantic Versioning](https://semver.org/spec/v2.0.0
 ## [Unreleased]
 
 ### Added
+### Changed
+### Deprecated
+### Removed
+### Fixed
+### Security
+
+## [0.3.0] - 2026-06-24
+
+### Added
 - New `diagnose` subcommand: single-pass HPROF analysis reporting file metadata,
   record/subrecord histograms, size attribution, UTF-8 analysis, top-N classes and
   arrays, segment issues, duplicate headers, trailing bytes, and optional duplicate
