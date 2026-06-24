@@ -6,19 +6,23 @@ import java.util.zip.GZIPOutputStream;
 
 /**
  * Produces synthetic HPROF files that demonstrate specific anomalies without
- * requiring a live JVM dump. All files use idSize=4.
+ * requiring a live JVM dump.
  *
  * Usage:
  *   javac SyntheticScenarios.java
  *   java SyntheticScenarios <output-dir>
  *
  * Writes:
- *   scenario-5-truncated.hprof         — file cut off mid-segment
- *   scenario-6-segment-mismatch.hprof  — declared segment length > consumed bytes
- *   scenario-7-duplicate-ids.hprof     — same objectId in two INSTANCE_DUMP records
- *   scenario-8-gzip.hprof.gz           — gzip-compressed clean dump
- *   scenario-9-class-overhead.hprof    — 500 class dumps, few instances
- *   scenario-10-utf8-dominant.hprof    — UTF-8 bytes dominate the file
+ *   scenario-5-truncated.hprof              — file cut off mid-segment (idSize=4)
+ *   scenario-6-segment-mismatch.hprof       — declared segment length > consumed bytes (idSize=4)
+ *   scenario-7-duplicate-ids.hprof          — same objectId in two INSTANCE_DUMP records (idSize=4)
+ *   scenario-8-gzip.hprof.gz               — gzip-compressed clean dump (idSize=4)
+ *   scenario-9-class-overhead.hprof        — 500 class dumps, few instances (idSize=4)
+ *   scenario-10-utf8-dominant.hprof        — UTF-8 bytes dominate the file (idSize=4)
+ *   scenario-11-object-id-overhead.hprof   — many small instances, idSize=8 to demonstrate
+ *                                            per-object framing overhead not counted by MAT
+ *   scenario-12-ref-expansion.hprof        — large object array, idSize=8, demonstrates
+ *                                            reference-expansion overhead vs compressed oops
  */
 public class SyntheticScenarios {
 
@@ -54,6 +58,8 @@ public class SyntheticScenarios {
         scenario8_gzip(outDir);
         scenario9_classOverhead(outDir);
         scenario10_utf8Dominant(outDir);
+        scenario11_objectIdOverhead(outDir);
+        scenario12_refExpansion(outDir);
     }
 
     // ------------------------------------------------------------------
@@ -248,6 +254,111 @@ public class SyntheticScenarios {
         Files.write(outPath, out.toByteArray());
     }
 
+    // ------------------------------------------------------------------
+    // Scenario 11: Object-ID framing overhead (idSize=8)
+    //
+    // Uses idSize=8 and 100,000 tiny instances (0-byte payload).
+    // Each INSTANCE_DUMP subrecord is 1 + 8 + 4 + 8 + 4 = 25 bytes on disk
+    // but MAT counts only 0 bytes of heap data (empty payload).
+    // The entire file is pure framing overhead from Eclipse MAT's perspective.
+    // ------------------------------------------------------------------
+    static void scenario11_objectIdOverhead(Path outDir) throws Exception {
+        System.out.println("[Scenario 11] Object-ID framing overhead (idSize=8) ...");
+
+        int instanceCount = 100_000;
+        ByteArrayOutputStream out = new ByteArrayOutputStream();
+        DataOutputStream d = new DataOutputStream(out);
+
+        // idSize=8 header
+        d.write("JAVA PROFILE 1.0.2\0".getBytes(java.nio.charset.StandardCharsets.UTF_8));
+        writeU4(d, 8);   // idSize = 8
+        writeU8(d, System.currentTimeMillis());
+
+        writeUtf8_8(d, 1L, "EmptyNode");
+        writeLoadClass_8(d, 1, 0x100L, 1L);
+
+        ByteArrayOutputStream seg = new ByteArrayOutputStream();
+        DataOutputStream s = new DataOutputStream(seg);
+        writeClassDump_8(s, 0x100L, 0); // instanceSize=0: no fields
+        for (int i = 0; i < instanceCount; i++) {
+            writeInstanceDump_8(s, 0x1000L + i, 0x100L, new byte[0]);
+        }
+        s.flush();
+
+        writeRecord(d, HPROF_HEAP_DUMP_SEGMENT, seg.toByteArray());
+        writeRecord(d, HPROF_HEAP_DUMP_END, new byte[0]);
+        d.flush();
+
+        long total = out.size();
+        // Per-object framing overhead: 25 bytes (subtag + objectId + stack + classId + dataLen field)
+        long framingOverhead = (long) instanceCount * (1 + 8 + 4 + 8 + 4);
+        System.out.printf("  instances: %,d  total: %.2f KB%n", instanceCount, total / 1e3);
+        System.out.printf("  framing overhead: %,d bytes (%.1f%% of file, MAT sees 0 bytes of heap)%n%n",
+            framingOverhead, 100.0 * framingOverhead / total);
+
+        Path outPath = outDir.resolve("scenario-11-object-id-overhead.hprof");
+        Files.write(outPath, out.toByteArray());
+    }
+
+    // ------------------------------------------------------------------
+    // Scenario 12: Reference expansion in OBJ_ARRAY_DUMP (idSize=8)
+    //
+    // Uses idSize=8 and one large object array with 50,000 elements.
+    // On-disk each element reference is 8 bytes; MAT (compressed oops) counts only 4.
+    // The file/MAT ratio for the array is ~2×.
+    // ------------------------------------------------------------------
+    static void scenario12_refExpansion(Path outDir) throws Exception {
+        System.out.println("[Scenario 12] Reference expansion in OBJ_ARRAY_DUMP (idSize=8) ...");
+
+        int numRefs = 50_000;
+        ByteArrayOutputStream out = new ByteArrayOutputStream();
+        DataOutputStream d = new DataOutputStream(out);
+
+        d.write("JAVA PROFILE 1.0.2\0".getBytes(java.nio.charset.StandardCharsets.UTF_8));
+        writeU4(d, 8);
+        writeU8(d, System.currentTimeMillis());
+
+        writeUtf8_8(d, 1L, "Object");
+        writeLoadClass_8(d, 1, 0x100L, 1L);
+        writeUtf8_8(d, 2L, "[Ljava/lang/Object;");
+        writeLoadClass_8(d, 2, 0x200L, 2L);
+
+        ByteArrayOutputStream seg = new ByteArrayOutputStream();
+        DataOutputStream s = new DataOutputStream(seg);
+        writeClassDump_8(s, 0x100L, 0);
+        writeClassDump_8(s, 0x200L, 0);
+
+        // Write numRefs small instances that the array will reference
+        for (int i = 0; i < numRefs; i++) {
+            writeInstanceDump_8(s, 0x1000L + i, 0x100L, new byte[0]);
+        }
+
+        // One large OBJ_ARRAY_DUMP with all those IDs
+        s.writeByte(HPROF_GC_OBJ_ARRAY_DUMP);
+        writeId8(s, 0x9000L);         // arrayId
+        writeU4(s, 0);                 // stackTrace
+        writeU4(s, numRefs);           // numElements
+        writeId8(s, 0x200L);           // arrayClassId
+        for (int i = 0; i < numRefs; i++) {
+            writeId8(s, 0x1000L + i);  // each element: 8 bytes on disk
+        }
+
+        s.flush();
+        writeRecord(d, HPROF_HEAP_DUMP_SEGMENT, seg.toByteArray());
+        writeRecord(d, HPROF_HEAP_DUMP_END, new byte[0]);
+        d.flush();
+
+        long total = out.size();
+        long arrayDiskBytes = 1 + 8 + 4 + 4 + 8 + (long) numRefs * 8; // subtag + ids + counts
+        long refExpansion   = (long) numRefs * 4; // (8 - 4) bytes per element
+        System.out.printf("  elements: %,d  array disk: %,d bytes  ref-expansion: %,d bytes%n",
+            numRefs, arrayDiskBytes, refExpansion);
+        System.out.printf("  total: %.2f KB%n%n", total / 1e3);
+
+        Path outPath = outDir.resolve("scenario-12-ref-expansion.hprof");
+        Files.write(outPath, out.toByteArray());
+    }
+
     // ===================================================================
     // Builders
     // ===================================================================
@@ -387,5 +498,55 @@ public class SyntheticScenarios {
 
     static void writeU8(DataOutputStream d, long v) throws IOException {
         d.writeLong(v);
+    }
+
+    // ===================================================================
+    // idSize=8 helpers (used by scenarios 11 and 12)
+    // ===================================================================
+
+    static void writeId8(DataOutputStream d, long id) throws IOException {
+        d.writeLong(id);
+    }
+
+    static void writeUtf8_8(DataOutputStream d, long nameId, String value) throws IOException {
+        byte[] bytes = value.getBytes(java.nio.charset.StandardCharsets.UTF_8);
+        ByteArrayOutputStream p = new ByteArrayOutputStream();
+        DataOutputStream pd = new DataOutputStream(p);
+        writeId8(pd, nameId);
+        pd.write(bytes);
+        pd.flush();
+        writeRecord(d, HPROF_UTF8, p.toByteArray());
+    }
+
+    static void writeLoadClass_8(DataOutputStream d, int serial, long classId, long nameId) throws IOException {
+        ByteArrayOutputStream p = new ByteArrayOutputStream();
+        DataOutputStream pd = new DataOutputStream(p);
+        writeU4(pd, serial);
+        writeId8(pd, classId);
+        writeU4(pd, 0);
+        writeId8(pd, nameId);
+        pd.flush();
+        writeRecord(d, HPROF_LOAD_CLASS, p.toByteArray());
+    }
+
+    static void writeClassDump_8(DataOutputStream s, long classId, int instanceSize) throws IOException {
+        s.writeByte(HPROF_GC_CLASS_DUMP);
+        writeId8(s, classId);
+        writeU4(s, 0);
+        writeId8(s, 0); writeId8(s, 0); writeId8(s, 0);
+        writeId8(s, 0); writeId8(s, 0); writeId8(s, 0);
+        writeU4(s, instanceSize);
+        writeU2(s, 0); // constantPoolSize
+        writeU2(s, 0); // staticFieldCount
+        writeU2(s, 0); // instanceFieldCount
+    }
+
+    static void writeInstanceDump_8(DataOutputStream s, long objectId, long classId, byte[] payload) throws IOException {
+        s.writeByte(HPROF_GC_INSTANCE_DUMP);
+        writeId8(s, objectId);
+        writeU4(s, 0);
+        writeId8(s, classId);
+        writeU4(s, payload.length);
+        s.write(payload);
     }
 }

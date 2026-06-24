@@ -125,6 +125,14 @@ public record DiagnosticReport(
      * @param unknownOrUnparseableBytes     bytes that could not be attributed to any known record type
      * @param matHeapSizeWithCompressedOops estimated MAT heap size assuming reference size = 4 bytes
      * @param matHeapSizeWithoutCompressedOops estimated MAT heap size assuming reference size = idSize bytes
+     * @param objectIdOverheadBytes         bytes consumed by HPROF subrecord headers that MAT does not count:
+     *                                      for each INSTANCE_DUMP: {@code 1 (subtag) + 2×idSize + 8} minus
+     *                                      {@code dataLength}. With idSize=8 this is 25 bytes per object.
+     *                                      At 500 million objects ≈ 12.5 GB overhead not visible in MAT.
+     * @param compressedRefExpansionBytes   bytes consumed by reference expansion in OBJ_ARRAY_DUMP when
+     *                                      idSize=8 but the JVM uses compressed oops (refSize=4): each
+     *                                      element is stored as 8 bytes on disk but MAT counts only 4.
+     *                                      Overhead = {@code numElements × (idSize − 4)} per array.
      */
     public record SizeAttribution(
             long heapObjectInstanceBytes,
@@ -140,7 +148,9 @@ public record DiagnosticReport(
             long heapDumpEndBytes,
             long unknownOrUnparseableBytes,
             long matHeapSizeWithCompressedOops,
-            long matHeapSizeWithoutCompressedOops
+            long matHeapSizeWithoutCompressedOops,
+            long objectIdOverheadBytes,
+            long compressedRefExpansionBytes
     ) {}
 
     /**

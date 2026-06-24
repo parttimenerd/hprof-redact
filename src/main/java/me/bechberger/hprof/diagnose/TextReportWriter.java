@@ -148,6 +148,23 @@ public final class TextReportWriter {
         out.println("  Objects not reachable from GC roots are excluded from MAT's default");
         out.println("  view but included here if \"Keep unreachable objects\" was enabled.");
         out.println();
+
+        // Object-ID and compressed-reference overhead breakdown (shown only when non-zero)
+        long instanceOverhead = s.objectIdOverheadBytes();
+        long refExpansion = s.compressedRefExpansionBytes();
+        if (instanceOverhead > 0 || refExpansion > 0) {
+            out.println("  Overhead not counted by MAT:");
+            if (instanceOverhead > 0) {
+                out.printf("    instance subrecord framing  (25 bytes per object when idSize=8): %s bytes%n",
+                        formatBytes(instanceOverhead));
+            }
+            if (refExpansion > 0) {
+                out.printf("    obj-array ref expansion (4 extra bytes/element, idSize=8 vs oops=4): %s bytes%n",
+                        formatBytes(refExpansion));
+            }
+            out.printf("    combined: %s bytes%n", formatBytes(instanceOverhead + refExpansion));
+            out.println();
+        }
     }
 
     private static void printAttrRow(PrintWriter out, String label,

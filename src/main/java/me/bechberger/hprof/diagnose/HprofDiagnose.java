@@ -256,7 +256,9 @@ public final class HprofDiagnose {
                 state.heapDumpEndBytes,
                 state.unknownOrUnparseableBytes,
                 state.matCompressed,
-                state.matUncompressed
+                state.matUncompressed,
+                state.objectIdOverheadBytes,
+                state.compressedRefExpansionBytes
         );
 
         DiagnosticReport.Utf8Analysis utf8Analysis = new DiagnosticReport.Utf8Analysis(
@@ -468,6 +470,40 @@ public final class HprofDiagnose {
             }
         }
 
+        // 9. OBJECT_ID_OVERHEAD (INFO) — only when idSize=8 and the overhead is non-trivial
+        if (fileSummary.idSize() == 8 && hasHeapObjects) {
+            long totalOverhead = sa.objectIdOverheadBytes() + sa.compressedRefExpansionBytes();
+            if (fileSizeBytes > 0 && totalOverhead > fileSizeBytes * 0.05) {
+                // Each instance contributes exactly (1 + 2*idSize + 8) = 25 bytes of overhead.
+                long instanceCount = sa.objectIdOverheadBytes() / (1 + 8 * 2 + 8);                long matHeap = Math.max(sa.matHeapSizeWithCompressedOops(), 1);
+                problems.add(new DiagnosticReport.Problem(
+                        DiagnosticReport.Problem.Severity.INFO,
+                        "OBJECT_ID_OVERHEAD",
+                        String.format(java.util.Locale.ROOT,
+                                "HPROF record framing overhead: %,d bytes not counted by MAT",
+                                totalOverhead),
+                        String.format(java.util.Locale.ROOT,
+                                "With idSize=8, each INSTANCE_DUMP subrecord has 25 bytes of framing"
+                                + " (subtag + objectId + stackTrace + classId + dataLength field) that Eclipse"
+                                + " MAT does not include in its heap-size calculation — it counts only the"
+                                + " instance data payload. This file has ~%,d instance subrecords contributing"
+                                + " %,d bytes of framing overhead. Additionally, OBJ_ARRAY_DUMP stores each"
+                                + " element reference as 8 bytes on disk when the JVM uses compressed oops (4"
+                                + " bytes at runtime), adding %,d bytes of reference-expansion overhead across"
+                                + " all object arrays. Together these account for %,d bytes of the gap between"
+                                + " the on-disk file size (%,d bytes) and MAT's reported heap size (%,d bytes)."
+                                + " For a heap with hundreds of millions of small objects this overhead"
+                                + " routinely adds several gigabytes.",
+                                instanceCount,
+                                sa.objectIdOverheadBytes(),
+                                sa.compressedRefExpansionBytes(),
+                                totalOverhead,
+                                fileSizeBytes,
+                                matHeap)
+                ));
+            }
+        }
+
         return problems;
     }
 
@@ -672,6 +708,11 @@ public final class HprofDiagnose {
                     subRecordPayload = (long) idSize * 2 + 8 + dataLength;
                     state.heapObjectInstanceBytes += subRecordPayload;
 
+                    // Overhead not counted by MAT: subtag(1) + objectId(idSize) + stackTrace(4)
+                    // + classId(idSize) + dataLength(4) = 1 + 2*idSize + 8 bytes of framing.
+                    // MAT only counts dataLength.
+                    state.objectIdOverheadBytes += 1 + (long) idSize * 2 + 8;
+
                     long[] cstats = state.classStats.computeIfAbsent(classId, k -> new long[4]);
                     cstats[0]++;
                     cstats[1] += dataLength;
@@ -693,6 +734,13 @@ public final class HprofDiagnose {
 
                     subRecordPayload = (long) idSize * 2 + 4 + 4 + numElements * idSize;
                     state.heapObjectObjArrayBytes += subRecordPayload;
+
+                    // When idSize=8 but the JVM uses compressed oops, each reference element is
+                    // stored as 8 bytes on disk, but MAT counts only 4 bytes per reference.
+                    // Overhead = numElements * (idSize - 4) bytes.
+                    if (idSize > 4) {
+                        state.compressedRefExpansionBytes += numElements * (idSize - 4);
+                    }
 
                     long matComp = MatShallowSizeEstimator.objArrayMatSize(numElements, idSize, 4, objectAlign);
                     long matUncomp = MatShallowSizeEstimator.objArrayMatSize(numElements, idSize, idSize, objectAlign);
@@ -872,6 +920,8 @@ public final class HprofDiagnose {
         long unknownOrUnparseableBytes;
         long matCompressed;
         long matUncompressed;
+        long objectIdOverheadBytes;
+        long compressedRefExpansionBytes;
 
         long utf8TotalBytes;
         long utf8RecordCount;
