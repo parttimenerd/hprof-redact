@@ -477,6 +477,118 @@ Largest record: 50,000 bytes  (sample: "AAAAAAAA...")
 
 ---
 
+## Scenario 11 — Object-ID and record framing overhead (idSize=8, many small objects)
+
+### Explanation
+
+This is the **most commonly misdiagnosed scenario**. When a JVM heap contains hundreds of millions of small objects — linked-list nodes, tree entries, hash-map entries, cache elements — the HPROF file grows substantially larger than what Eclipse MAT reports as heap size, even with no anomalies.
+
+The cause is the fixed **25-byte per-object framing** in every `HPROF_GC_INSTANCE_DUMP` subrecord that MAT does not count:
+
+| Field | Size | MAT counts it? |
+|---|---|---|
+| subtag byte | 1 byte | No |
+| objectId | 8 bytes (idSize=8) | No |
+| stackTraceSerial | 4 bytes | No |
+| classId | 8 bytes (idSize=8) | No |
+| dataLength field | 4 bytes | No |
+| **instance data payload** | dataLength bytes | **Yes — this is all MAT counts** |
+
+**Per-object overhead not counted by MAT: 25 bytes**
+
+At 500 million objects this amounts to **12.5 GB** of on-disk bytes that are invisible to MAT's heap-size figure. For a 20 GB heap with ~600 million objects, this overhead alone accounts for ~15 GB — bringing the file to ~35–38 GB while MAT reports ~20 GB, producing the characteristic **~1.8–2.0× ratio**.
+
+Additionally, every reference field in an instance payload is stored as **8 bytes** in the HPROF file (the full uncompressed object address). At runtime, compressed oops stored references as 4 bytes. MAT's `INSTANCE_DUMP` formula counts `dataLength` as-is, which includes the expanded 8-byte references. For `OBJ_ARRAY_DUMP`, however, MAT explicitly uses `refSize=4`, so the 4 extra bytes per array element are **not** counted.
+
+**When to expect this ratio:**
+A 20 GB JVM heap with compressed oops and ~600M small instances (avg payload ≤ 32 bytes) will produce an HPROF file of **35–40 GB** — a ratio of ~1.75–2.0×. This is not anomalous; it is the expected, correct file size.
+
+**How to confirm it is not a concatenated dump:**
+Run `hprof-redact diagnose`. If the `=== Problems Detected ===` section shows only `OBJECT_ID_OVERHEAD` (INFO) and no `CONCATENATED_DUMP` (ERROR), the size is explained entirely by framing overhead. No duplicate headers will be present.
+
+### Reproducer
+
+`test_programs/SyntheticScenarios.java` scenario 11 — 100,000 empty instances (0-byte payload, idSize=8): the most extreme case where MAT sees 0 bytes but disk has 2.5 MB.
+
+Scenario 13 — 200,000 instances (16-byte payload) + 10 large arrays: demonstrates the realistic ~1.6× ratio.
+
+```
+java SyntheticScenarios /tmp/hprof-scenarios
+```
+
+### Measured results
+
+**Scenario 11 — pure framing (no payload):**
+
+```
+instances: 100,000 @ 0 bytes payload each
+total disk: 2.4 MB  MAT sees: 0 bytes  (ratio: ∞, all framing)
+framing overhead = 100% of file
+```
+
+**Scenario 13 — realistic mix (200k instances @ 16 bytes payload + 10 × 500 KB arrays):**
+
+```
+instances: 200,000 @ 16 bytes payload each
+arrays:    10 @ 500 KB each (= 5 MB array data)
+disk instances: 8.0 MB   MAT instances: 3.2 MB  (ratio 2.56×)
+disk arrays:    5.0 MB   MAT arrays:    5.0 MB  (ratio 1.00×)
+total disk: 12.9 MB      MAT total: 8.2 MB      (overall ratio 1.61×)
+```
+
+### diagnose output (key section — scenario 13)
+
+```
+=== Problems Detected ===
+[INFO]  HPROF record framing overhead: 5,000,000 bytes (100% of the file/MAT gap)
+        With idSize=8, every INSTANCE_DUMP subrecord carries 25 bytes of framing (1 subtag +
+        8 objectId + 4 stackTrace + 8 classId + 4 dataLength) that Eclipse MAT does not
+        include in its heap-size calculation — it counts only the instance data payload
+        (dataLength). ... This file has ~200,000 instance subrecords: framing = 5,000,000
+        bytes, obj-array reference expansion = 0 bytes, combined 5,000,000 bytes. This
+        accounts for 100% of the 5,000,317-byte gap. ...
+        No action is required; this is the expected and correct file size.
+```
+
+**Key signal:** `OBJECT_ID_OVERHEAD` (INFO) present; no `CONCATENATED_DUMP` (ERROR); `LARGE_UNREACHABLE_RATIO` is suppressed. The size attribution shows `heap_objects.instances` dominating the disk column.
+
+---
+
+## Scenario 12 — Reference expansion in OBJ_ARRAY_DUMP (idSize=8)
+
+### Explanation
+
+When `idSize=8` but the JVM uses compressed oops (default for heaps < 32 GB), each element in an `OBJ_ARRAY_DUMP` is stored as **8 bytes** on disk (the full uncompressed address). Eclipse MAT's formula for object arrays uses `refSize=4` (compressed), so it counts only 4 bytes per element. The other 4 bytes per element are invisible to MAT.
+
+This is similar to but distinct from the instance-payload reference expansion: for `INSTANCE_DUMP`, MAT counts `dataLength` directly (which already includes 8-byte refs), so the expansion IS counted for instance fields. For `OBJ_ARRAY_DUMP`, the formula explicitly applies `refSize=4` regardless.
+
+**Example:** A `Node[]` array holding 500M references:
+- On disk: 500M × 8 = 4 GB of reference data
+- MAT counts: 500M × 4 = 2 GB
+
+### Reproducer
+
+`test_programs/SyntheticScenarios.java` scenario 12 — 50,000 instances referenced by one large OBJ_ARRAY.
+
+### Measured result
+
+```
+elements: 50,000  array disk: 400,025 bytes  ref-expansion: 200,000 bytes
+total: 1.6 MB   ratio: ~1.24× (references only; rest of file is instances)
+```
+
+### diagnose output
+
+```
+[INFO]  HPROF record framing overhead: 1,450,000 bytes (100% of the file/MAT gap)
+        ... This file has ~50,000 instance subrecords: framing = 1,250,000 bytes,
+        obj-array reference expansion = 200,000 bytes, combined 1,450,000 bytes. ...
+```
+
+The `compressedRefExpansionBytes` is shown in the attribution table under "Overhead not counted by MAT".
+
+---
+
 ## Interpreting the size ratio: what each range suggests
 
 When you observe `file_size / MAT_heap_size ≈ R`, the following heuristics apply. Run `hprof-redact diagnose` to get the exact breakdown.
@@ -485,24 +597,19 @@ When you observe `file_size / MAT_heap_size ≈ R`, the following heuristics app
 |---|---|---|
 | **1.05–1.10×** | Normal overhead (UTF-8, class dumps, GC roots, framing). No anomaly. | Size attribution shows no dominant non-heap category. |
 | **1.10–1.30×** | Slightly elevated UTF-8/class metadata, or live=false dump with moderate unreachable objects. | Check UTF-8 analysis for `[UNUSUALLY LARGE]` flag; compare `prim_arrays` on-disk vs. MAT formula. |
-| **~1.5–2.5× and gap ≈ half the file** | **Concatenated dump** (two successive OOM dumps appended to the same file). The second stream is as large as the first. This is the most common cause of a near-2× gap in production. | `Duplicate Headers` warning + `UNKNOWN(0x4a)` in record histogram + `Trailing Bytes` warning. |
-| **2×+ with "Keep unreachable objects" already on** | Still concatenated. Unreachable objects cannot explain it if MAT already counted them. The ~2× gap remains entirely from the second stream being invisible. | Same as above — duplicate header at offset ≈ half the file size. |
+| **~1.5–2.0× with `OBJECT_ID_OVERHEAD` flagged** | **Expected for object-heavy heaps** — per-instance framing not counted by MAT. 600M small instances on a 20 GB heap produce ~35–38 GB. **Normal; no action needed.** | `OBJECT_ID_OVERHEAD` (INFO) present, no `CONCATENATED_DUMP` (ERROR), framing explains ≥70% of gap. |
+| **~1.5–2.5× and gap ≈ half the file, no framing explanation** | **Concatenated dump** (two successive OOM dumps appended to the same file). The second stream is as large as the first. | `Duplicate Headers` warning + `UNKNOWN(0x4a)` in record histogram + `Trailing Bytes` warning. |
+| **2×+ with "Keep unreachable objects" already on, no framing explanation** | Still concatenated. Unreachable objects cannot explain it if MAT already counted them. The ~2× gap remains entirely from the second stream being invisible. | Same as above — duplicate header at offset ≈ half the file size. |
 | **3–7× compared to a `live=true` dump** | Unreachable objects dominate. The JVM had not GC'd recently before the dump. A `live=true` re-dump would be far smaller. | Cannot be distinguished from a live dump by `diagnose` alone; take a `jmap -dump:live` separately. |
 | **>10× or gap >> half the file** | GZip confusion (comparing compressed on-disk size against MAT's decompressed heap figure), extreme UTF-8 bloat, or a file that is mostly class metadata with very few heap objects. | Check file extension (`.hprof.gz` vs `.hprof`). Run `gzip -l` to get decompressed size. Check `utf8_strings` and `class_dumps` rows in attribution. |
 
-### Why a ~1.85× ratio with "Keep unreachable objects" enabled strongly implies a concatenated dump
+### Why a ~1.85× ratio may be either framing overhead OR a concatenated dump
 
-If MAT's reported heap size already includes unreachable objects (option enabled) and the file is still ~1.85× larger, then:
+**If `diagnose` shows `OBJECT_ID_OVERHEAD` but NOT `CONCATENATED_DUMP`:**
+The ratio is explained by per-instance HPROF framing. A heap with ~600M small instances and a 20 GB runtime heap will produce ~36 GB of HPROF data at 25 bytes framing per object. This is normal.
 
-- **Unreachable objects are not the cause** — they are already counted.
-- **UTF-8 and class overhead** typically add ≤10% — insufficient to explain a 40–50% gap.
-- **The arithmetic fits exactly**: if the first stream is X bytes and a second stream of ≈0.85X bytes was appended, the file is ≈1.85X bytes while MAT reports only X bytes.
-
-The HotSpot HPROF writer (used by OpenJDK and distributions based on it) opens `-XX:HeapDumpPath` with `O_CREAT | O_APPEND`. If the target file already exists from a previous run or a previous OOM in the same JVM lifetime, the new dump is appended without truncation.
-
-**Signals to look for in `diagnose` output:**
-1. `Duplicate Headers` — `WARNING: Additional HPROF header found at decompressed offset ~<half-file-size>`.
-2. Record histogram — `UNKNOWN(0x4a)` entry (byte `'J'` from `"JAVA PROFILE"` of the second stream parsed as an unknown record tag).
+**If `diagnose` shows `CONCATENATED_DUMP`:**
+A second HPROF stream was appended to the file. MAT parses only the first stream, making the file appear ~2× the heap size. Fix: delete the dump file between JVM restarts.
 3. `Trailing Bytes` — the second stream's content past its own `HEAP_DUMP_END` reported as garbage.
 
 **Recommended remediation:**

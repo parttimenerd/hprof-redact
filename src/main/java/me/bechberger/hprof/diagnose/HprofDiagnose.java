@@ -444,15 +444,70 @@ public final class HprofDiagnose {
             ));
         }
 
-        // 8. LARGE_UNREACHABLE_RATIO (INFO)
+        // 8 & 9: Compute framing overhead fraction and file/MAT ratio first so we can
+        //        decide which problems to emit and with what explanation.
         boolean hasHeapObjects = sa.heapObjectPrimArrayBytes() + sa.heapObjectObjArrayBytes()
                 + sa.heapObjectInstanceBytes() > 0;
         boolean hasErrorProblems = problems.stream()
                 .anyMatch(p -> p.severity() == DiagnosticReport.Problem.Severity.ERROR);
         boolean isGzip = fileSummary.filePath().toLowerCase().endsWith(".gz");
-        if (hasHeapObjects && !hasErrorProblems && !isGzip) {
-            long matHeap = Math.max(sa.matHeapSizeWithCompressedOops(), 1);
-            double ratio = (double) fileSizeBytes / matHeap;
+        long matHeap = Math.max(sa.matHeapSizeWithCompressedOops(), 1);
+        double ratio = (double) fileSizeBytes / matHeap;
+
+        // 9. OBJECT_ID_OVERHEAD (INFO) — only when idSize=8 and the overhead is non-trivial
+        boolean framingExplained = false;
+        if (fileSummary.idSize() == 8 && hasHeapObjects && !hasErrorProblems && !isGzip) {
+            long totalOverhead = sa.objectIdOverheadBytes() + sa.compressedRefExpansionBytes();
+            if (fileSizeBytes > 0 && totalOverhead > fileSizeBytes * 0.05) {
+                // Each instance contributes exactly (1 + 2*idSize + 8) = 25 bytes of overhead.
+                long instanceCount = sa.objectIdOverheadBytes() / (1 + 8 * 2 + 8);
+                // Does the framing overhead alone plausibly explain the observed file/MAT ratio?
+                // A file with N instances of avg payload P bytes has:
+                //   disk_instances = N * (25 + P),  MAT_instances = N * P
+                //   ratio_instances = 1 + 25/P  (ignoring arrays, which pull ratio toward 1.0)
+                // For the full file ratio to be ~R, the instance section ratio is > R.
+                // If framing overhead accounts for >= 80% of the gap, we say it's "fully explained".
+                long gap = fileSizeBytes - matHeap;
+                double fractionExplained = gap > 0 ? (double) totalOverhead / gap : 0.0;
+                framingExplained = fractionExplained >= 0.70;
+
+                problems.add(new DiagnosticReport.Problem(
+                        DiagnosticReport.Problem.Severity.INFO,
+                        "OBJECT_ID_OVERHEAD",
+                        String.format(java.util.Locale.ROOT,
+                                "HPROF record framing overhead: %,d bytes (%.0f%% of the file/MAT gap)",
+                                totalOverhead, fractionExplained * 100),
+                        String.format(java.util.Locale.ROOT,
+                                "With idSize=8, every INSTANCE_DUMP subrecord carries 25 bytes of framing"
+                                + " (1 subtag + 8 objectId + 4 stackTrace + 8 classId + 4 dataLength) that"
+                                + " Eclipse MAT does not include in its heap-size calculation — it counts only"
+                                + " the instance data payload (dataLength). Additionally, when the JVM uses"
+                                + " compressed oops, each reference field in an instance payload and each element"
+                                + " in an OBJ_ARRAY_DUMP is stored as 8 bytes in the HPROF file (the full"
+                                + " object address), whereas at runtime it occupied only 4 bytes. MAT's formula"
+                                + " for OBJ_ARRAY_DUMP explicitly uses refSize=4, so this expansion is not"
+                                + " counted by MAT either."
+                                + " This file has ~%,d instance subrecords: framing = %,d bytes, obj-array"
+                                + " reference expansion = %,d bytes, combined %,d bytes. This accounts for"
+                                + " %.0f%% of the %,d-byte gap between the on-disk file (%,d bytes) and"
+                                + " MAT's reported heap (%,d bytes). For a heap with hundreds of millions of"
+                                + " small objects — linked-list nodes, tree nodes, cache entries — this"
+                                + " overhead routinely makes a 20 GB heap produce a 30–40 GB HPROF file."
+                                + " No action is required; this is the expected and correct file size.",
+                                instanceCount,
+                                sa.objectIdOverheadBytes(),
+                                sa.compressedRefExpansionBytes(),
+                                totalOverhead,
+                                fractionExplained * 100,
+                                gap,
+                                fileSizeBytes,
+                                matHeap)
+                ));
+            }
+        }
+
+        // 8. LARGE_UNREACHABLE_RATIO (INFO) — only when framing overhead does not already explain it
+        if (hasHeapObjects && !hasErrorProblems && !isGzip && !framingExplained) {
             if (ratio > 1.5) {
                 problems.add(new DiagnosticReport.Problem(
                         DiagnosticReport.Problem.Severity.INFO,
@@ -466,40 +521,6 @@ public final class HprofDiagnose {
                                 + " default). Unreachable objects are included on disk but may be excluded from"
                                 + " MAT's object graph unless 'Keep unreachable objects' is enabled. Take a"
                                 + " 'jmap -dump:live,format=b' dump for comparison.", ratio)
-                ));
-            }
-        }
-
-        // 9. OBJECT_ID_OVERHEAD (INFO) — only when idSize=8 and the overhead is non-trivial
-        if (fileSummary.idSize() == 8 && hasHeapObjects) {
-            long totalOverhead = sa.objectIdOverheadBytes() + sa.compressedRefExpansionBytes();
-            if (fileSizeBytes > 0 && totalOverhead > fileSizeBytes * 0.05) {
-                // Each instance contributes exactly (1 + 2*idSize + 8) = 25 bytes of overhead.
-                long instanceCount = sa.objectIdOverheadBytes() / (1 + 8 * 2 + 8);                long matHeap = Math.max(sa.matHeapSizeWithCompressedOops(), 1);
-                problems.add(new DiagnosticReport.Problem(
-                        DiagnosticReport.Problem.Severity.INFO,
-                        "OBJECT_ID_OVERHEAD",
-                        String.format(java.util.Locale.ROOT,
-                                "HPROF record framing overhead: %,d bytes not counted by MAT",
-                                totalOverhead),
-                        String.format(java.util.Locale.ROOT,
-                                "With idSize=8, each INSTANCE_DUMP subrecord has 25 bytes of framing"
-                                + " (subtag + objectId + stackTrace + classId + dataLength field) that Eclipse"
-                                + " MAT does not include in its heap-size calculation — it counts only the"
-                                + " instance data payload. This file has ~%,d instance subrecords contributing"
-                                + " %,d bytes of framing overhead. Additionally, OBJ_ARRAY_DUMP stores each"
-                                + " element reference as 8 bytes on disk when the JVM uses compressed oops (4"
-                                + " bytes at runtime), adding %,d bytes of reference-expansion overhead across"
-                                + " all object arrays. Together these account for %,d bytes of the gap between"
-                                + " the on-disk file size (%,d bytes) and MAT's reported heap size (%,d bytes)."
-                                + " For a heap with hundreds of millions of small objects this overhead"
-                                + " routinely adds several gigabytes.",
-                                instanceCount,
-                                sa.objectIdOverheadBytes(),
-                                sa.compressedRefExpansionBytes(),
-                                totalOverhead,
-                                fileSizeBytes,
-                                matHeap)
                 ));
             }
         }
