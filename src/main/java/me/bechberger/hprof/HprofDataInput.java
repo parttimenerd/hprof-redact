@@ -9,34 +9,34 @@ import java.io.EOFException;
 import java.io.IOException;
 import java.io.InputStream;
 
-final class HprofDataInput {
+public final class HprofDataInput {
     private final InputStream raw;
     private final DataInputStream in;
     private int idSize;
 
-    HprofDataInput(InputStream in) {
+    public HprofDataInput(InputStream in) {
         this.raw = in;
         this.in = new DataInputStream(in);
         this.idSize = 4;
     }
 
-    InputStream rawStream() {
+    public InputStream rawStream() {
         return raw;
     }
 
-    void setIdSize(int idSize) {
+    public void setIdSize(int idSize) {
         this.idSize = idSize;
     }
 
-    int getIdSize() {
+    public int getIdSize() {
         return idSize;
     }
 
-    int readTag() throws IOException {
+    public int readTag() throws IOException {
         return in.read();
     }
 
-    int readU1() throws IOException {
+    public int readU1() throws IOException {
         int value = in.read();
         if (value < 0) {
             throw new EOFException("Unexpected end of stream");
@@ -44,19 +44,19 @@ final class HprofDataInput {
         return value;
     }
 
-    int readU2() throws IOException {
+    public int readU2() throws IOException {
         return in.readUnsignedShort();
     }
 
-    long readU4() throws IOException {
+    public long readU4() throws IOException {
         return Integer.toUnsignedLong(in.readInt());
     }
 
-    long readU8() throws IOException {
+    public long readU8() throws IOException {
         return in.readLong();
     }
 
-    long readId() throws IOException {
+    public long readId() throws IOException {
         if (idSize == 4) {
             return readU4();
         }
@@ -66,15 +66,15 @@ final class HprofDataInput {
         throw new IOException("Unsupported id size: " + idSize);
     }
 
-    void readFully(byte[] buffer) throws IOException {
+    public void readFully(byte[] buffer) throws IOException {
         in.readFully(buffer);
     }
 
-    void readFully(byte[] buffer, int offset, int length) throws IOException {
+    public void readFully(byte[] buffer, int offset, int length) throws IOException {
         in.readFully(buffer, offset, length);
     }
 
-    void skipFully(long length) throws IOException {
+    public void skipFully(long length) throws IOException {
         long remaining = length;
         while (remaining > 0) {
             long skipped = in.skip(remaining);

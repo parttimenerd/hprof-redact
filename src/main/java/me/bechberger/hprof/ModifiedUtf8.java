@@ -14,10 +14,10 @@ import java.nio.charset.StandardCharsets;
  * use HotSpot's modified UTF-8 encoding rules (same as DataInputStream.readUTF,
  * but without the 2-byte length prefix).
  */
-final class ModifiedUtf8 {
+public final class ModifiedUtf8 {
     private ModifiedUtf8() {}
 
-    static String decode(byte[] bytes) {
+    public static String decode(byte[] bytes) {
         // Fast path: ASCII (and no NUL)
         boolean ascii = true;
         for (byte b : bytes) {
@@ -80,7 +80,7 @@ final class ModifiedUtf8 {
         return sb.toString();
     }
 
-    static byte[] encode(String value) {
+    public static byte[] encode(String value) {
         // Most symbols are ASCII.
         boolean ascii = true;
         for (int i = 0; i < value.length(); i++) {
