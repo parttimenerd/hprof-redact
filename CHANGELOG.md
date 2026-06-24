@@ -8,6 +8,23 @@ and this project adheres to [Semantic Versioning](https://semver.org/spec/v2.0.0
 ## [Unreleased]
 
 ### Added
+- New `diagnose` subcommand: single-pass HPROF analysis reporting size attribution,
+  anomaly detection, record/subrecord histograms, UTF-8 analysis, top-N classes and
+  arrays, segment issues, duplicate headers, trailing bytes, and optional duplicate
+  object-ID scan
+- `diagnose --json` flag for machine-readable output
+- Size attribution breakdown: on-disk bytes by category (instances, arrays, class dumps,
+  GC roots, UTF-8 strings, metadata, framing overhead) plus estimated Eclipse MAT heap
+  size with and without compressed oops
+- HPROF framing-overhead tracking: with `idSize=8`, each `INSTANCE_DUMP` subrecord
+  carries 25 bytes of framing not counted by Eclipse MAT; the report shows how much of
+  the disk/MAT gap this explains so large but structurally normal files are not
+  misidentified as concatenated dumps
+- Problem detection with severity levels (ERROR / WARNING / INFO): concatenated dumps,
+  corrupt segments, abnormally large UTF-8 sections, duplicate object IDs, and
+  per-instance framing overhead as the primary cause of disk/MAT size ratios ~1.5–2.0×
+- Synthetic HPROF test scenarios covering all documented size-discrepancy cases
+
 ### Changed
 ### Deprecated
 ### Removed

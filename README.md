@@ -53,6 +53,10 @@ Add to your `pom.xml`:
 
 ### Command Line
 
+`hprof-redact` has two subcommands: **`redact`** (the default) and **`diagnose`**.
+
+#### Redact
+
 ```bash
 Usage: hprof-redact [-hV] [--compress] [--transformer=<transformer>] [--verbose] <input>
                     <output>
@@ -71,6 +75,54 @@ Stream and redact HPROF heap dumps.
                                      only) to stderr.
   -V, --version                      Print version information and exit.
 ```
+
+#### Diagnose
+
+```bash
+Usage: hprof-redact diagnose [-hV] [-o=<output>] [--json]
+                             [--detect-duplicate-ids] [--top-n=<topN>] [--object-align=<objectAlign>]
+                             [--assume-compressed-oops] [--no-compressed-oops] <input>
+Analyze an HPROF heap dump and report size attribution, anomalies, and MAT-vs-disk discrepancies.
+      <input>                     Input HPROF path (plain or .gz).
+      --assume-compressed-oops    Force MAT heap size estimate to use refSize=4
+                                  (compressed oops).
+      --detect-duplicate-ids      Track duplicate object IDs (uses ~16 bytes per
+                                  object; may OOM on large dumps).
+  -h, --help                      Show this help message and exit.
+      --json                      Output report as JSON.
+      --no-compressed-oops        Force MAT heap size estimate to use
+                                  refSize=idSize (uncompressed oops).
+  -o, --output=<output>           Write report to file instead of stdout.
+      --object-align=<objectAlign>
+                                  JVM object alignment in bytes for MAT heap
+                                  size estimation (default: 8).
+      --top-n=<topN>              Number of top classes/arrays to report
+                                  (default: 20).
+  -V, --version                   Print version information and exit.
+```
+
+The `diagnose` command performs a single-pass analysis of an HPROF file and produces a
+human-readable (or JSON) report covering:
+
+- **Problems detected** — ranked by severity (ERROR / WARNING / INFO), including anomalies
+  such as concatenated dumps, corrupt segments, duplicate object IDs, and abnormally large
+  UTF-8 sections
+- **File summary** — magic string, identifier size, capture timestamp
+- **Record and subrecord histograms** — count and byte totals per tag
+- **Size attribution** — on-disk bytes broken down by category (instances, arrays, class
+  dumps, GC roots, UTF-8 strings, metadata, framing overhead), plus estimated Eclipse MAT
+  heap size with and without compressed oops
+- **HPROF framing overhead** — with `idSize=8`, each `INSTANCE_DUMP` subrecord carries
+  25 bytes of framing (object ID, class ID, stack-trace serial) that Eclipse MAT does not
+  include in its heap-size figure. At 500 million objects this accounts for ~12.5 GB.
+  The report shows how much of the disk/MAT gap is explained by this expected overhead so
+  you can distinguish normal large files from structural anomalies.
+- **UTF-8 string analysis** — total size, referenced vs. unreferenced bytes, largest record
+- **Top-N classes and arrays** — by on-disk instance bytes and element count
+- **Segment issues** — segments whose declared length differs from consumed bytes
+- **Duplicate HPROF headers** — detects concatenated dumps
+- **Trailing bytes** — bytes after the last parseable record
+- **Duplicate object IDs** — optional scan (enable with `--detect-duplicate-ids`)
 
 ### Compression Format
 
