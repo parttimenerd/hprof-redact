@@ -15,8 +15,8 @@ and this project adheres to [Semantic Versioning](https://semver.org/spec/v2.0.0
 - `diagnose --json` flag for machine-readable output
 - `diagnose --histogram` flag: full per-class histogram sorted by on-disk bytes,
   with instance count, total on-disk bytes, framing overhead, and estimated runtime heap
-- `diagnose --assume-compressed-oops` / `--no-compressed-oops` flags now fully wired
-  into heap size estimation and per-class framing overhead calculation
+- `diagnose --compact-headers` flag for JDK 25+ compact object headers (JEP 519,
+  8-byte header → 17 bytes/obj net framing overhead)
 - Diagnostic summary section at the top of the text report: file size, heap estimate,
   file/heap gap, total instance count, average instance size, compressed-oops inference,
   and gap breakdown with percentages (framing, obj-array ref expansion, metadata)
@@ -24,7 +24,8 @@ and this project adheres to [Semantic Versioning](https://semver.org/spec/v2.0.0
   size with and without compressed oops
 - Per-instance HPROF framing overhead tracking: net file-only overhead per object =
   25 bytes framing minus the runtime object header (13 bytes/obj with compressed oops ON,
-  9 bytes/obj with compressed oops OFF); explains why a 20 GB heap produces a 36+ GB file
+  9 bytes/obj with compressed oops OFF, 17 bytes/obj with compact headers);
+  explains why a 20 GB heap produces a 36+ GB file
 - OBJ_ARRAY compressed-reference expansion tracking: 4 extra bytes per element when
   idSize=8 but runtime uses compressed oops (refSize=4)
 - Problem detection with severity levels (ERROR / WARNING / INFO): concatenated dumps,
@@ -37,10 +38,13 @@ and this project adheres to [Semantic Versioning](https://semver.org/spec/v2.0.0
   tool-neutral terminology ("estimated heap size", "heap analysis tools")
 - `MatShallowSizeEstimator` renamed to `HeapSizeEstimator`
 - `diagnose` command description updated to "disk-vs-runtime size discrepancies"
+- Compressed oops status is now inferred automatically from heap size (< 32 GB → ON,
+  ≥ 32 GB → OFF); removed `--assume-compressed-oops` (was a no-op) and
+  `--no-compressed-oops` (manual override no longer needed)
 
 ### Fixed
 - `--assume-compressed-oops` and `--no-compressed-oops` CLI flags were declared but
-  never passed to the diagnostic engine; now correctly wired
+  never passed to the diagnostic engine (now replaced by automatic inference)
 
 ## [0.2.1] - 2026-02-24
 
