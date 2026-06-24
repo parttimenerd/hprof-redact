@@ -73,7 +73,7 @@ class HprofDiagnoseExamplesTest {
 
         @Test
         void matSizePositive() {
-            assertTrue(report.sizeAttribution().matHeapSizeWithCompressedOops() > 0,
+            assertTrue(report.sizeAttribution().estimatedHeapSizeWithCompressedOops() > 0,
                     "MAT compressed size should be > 0");
         }
 
@@ -363,8 +363,8 @@ class HprofDiagnoseExamplesTest {
 
         @Test
         void matSizeNonZero() {
-            assertTrue(report.sizeAttribution().matHeapSizeWithCompressedOops() > 0,
-                    "matHeapSizeWithCompressedOops should be > 0 for primitive arrays");
+            assertTrue(report.sizeAttribution().estimatedHeapSizeWithCompressedOops() > 0,
+                    "estimatedHeapSizeWithCompressedOops should be > 0 for primitive arrays");
         }
 
         @Test

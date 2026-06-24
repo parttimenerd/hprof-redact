@@ -69,7 +69,7 @@ public final class HprofDiagnose {
         RecordHistogram topLevelHistogram = new RecordHistogram();
         RecordHistogram subrecordHistogram = new RecordHistogram();
 
-        // Class stats: classId -> [instanceCount, totalInstanceBytes, matCompressed, matUncompressed]
+        // Class stats: classId -> [instanceCount, totalInstanceBytes, heapEstimateCompressed, heapEstimateUncompressed]
         Map<Long, long[]> classStats = new HashMap<>();
         TopNTracker<DiagnosticReport.TopArray> topArrays = new TopNTracker<>(options.topN);
         List<DiagnosticReport.SegmentIssue> segmentIssues = new ArrayList<>();
@@ -255,8 +255,8 @@ public final class HprofDiagnose {
                 state.segmentFramingBytes,
                 state.heapDumpEndBytes,
                 state.unknownOrUnparseableBytes,
-                state.matCompressed,
-                state.matUncompressed,
+                state.heapEstimateCompressed,
+                state.heapEstimateUncompressed,
                 state.objectIdOverheadBytes,
                 state.compressedRefExpansionBytes
         );
@@ -349,7 +349,7 @@ public final class HprofDiagnose {
                     DiagnosticReport.Problem.Severity.ERROR,
                     "CONCATENATED_DUMP",
                     "Concatenated dump: file contains " + n + " additional HPROF stream(s)",
-                    "The file contains " + (n + 1) + " concatenated HPROF streams. Eclipse MAT parses only the"
+                    "The file contains " + (n + 1) + " concatenated HPROF streams. Heap analysis tools parse only the"
                     + " first stream and silently ignores the rest, so its reported heap size is smaller than"
                     + " the on-disk file size. This typically happens when -XX:+HeapDumpOnOutOfMemoryError"
                     + " appends to an existing dump file rather than overwriting it. Fix: delete or rename"
@@ -368,7 +368,7 @@ public final class HprofDiagnose {
                     "One or more HEAP_DUMP_SEGMENT records declare a length that does not match the bytes"
                     + " consumed by their subrecords. This may indicate a truncated write, a buggy HPROF"
                     + " producer, or file corruption. Objects in the mismatched portion may not be visible"
-                    + " in Eclipse MAT."
+                    + " by heap analysis tools."
             ));
         }
 
@@ -381,7 +381,7 @@ public final class HprofDiagnose {
                     "The file ends with bytes that cannot be parsed as HPROF records (offset "
                     + trailingBytes.offset() + "). This may mean the JVM was killed mid-write"
                     + " (disk full, OOM-kill, SIGKILL), the file was transferred incompletely, or"
-                    + " the file has been corrupted. Eclipse MAT silently ignores these bytes; objects"
+                    + " the file has been corrupted. Heap analysis tools silently ignore these bytes; objects"
                     + " in the unwritten portion are missing from the analysis."
             ));
         }
@@ -393,8 +393,8 @@ public final class HprofDiagnose {
                     "GZIP_SIZE_CONFUSION",
                     "File is gzip-compressed: on-disk size ≠ decompressed size",
                     "The file is gzip-compressed. The on-disk size shown above is the compressed size."
-                    + " Eclipse MAT and hprof-redact diagnose both work on the decompressed stream, which"
-                    + " may be 3–10× larger. When comparing file size to MAT's reported heap size, use"
+                    + " Heap analysis tools and hprof-redact diagnose both work on the decompressed stream, which"
+                    + " may be 3–10× larger. When comparing file size to estimated heap size, use"
                     + " the decompressed size (run 'gzip -l " + fileSummary.filePath() + "' to see it)."
             ));
         }
@@ -409,10 +409,10 @@ public final class HprofDiagnose {
                     String.format(java.util.Locale.ROOT,
                             "UTF-8 string metadata is unusually large (%.1f%% of file)", pct),
                     "HPROF_UTF8 records carry class, method, and field names. They are NOT counted in"
-                    + " Eclipse MAT's heap size. Large UTF-8 sections are common in applications with"
+                    + " the heap size estimate. Large UTF-8 sections are common in applications with"
                     + " many dynamically-loaded classes (OSGi, JEE, code-generation frameworks). Of the "
                     + utf8.totalBytes() + " bytes of UTF-8 data, only " + utf8.referencedBytes()
-                    + " bytes are referenced by class definitions and stay resident in MAT after parsing;"
+                    + " bytes are referenced by class definitions and stay resident for class name resolution;"
                     + " the other " + utf8.unreferencedBytes() + " bytes are transient."
             ));
         }
@@ -426,20 +426,20 @@ public final class HprofDiagnose {
                     "Duplicate object IDs detected (" + n + " object(s) appear more than once)",
                     "Some object IDs appear in more than one INSTANCE_DUMP, OBJ_ARRAY_DUMP, or"
                     + " PRIM_ARRAY_DUMP subrecord. This can occur in concatenated dumps (same live objects"
-                    + " in both streams) or from a buggy HPROF agent. Eclipse MAT may silently keep only"
+                    + " in both streams) or from a buggy HPROF agent. Heap analysis tools may silently keep only"
                     + " the first occurrence, so some instances may not be visible."
             ));
         }
 
         // 7. HEAP_METADATA_ONLY (INFO)
-        if (sa.matHeapSizeWithCompressedOops() == 0
+        if (sa.estimatedHeapSizeWithCompressedOops() == 0
                 && (sa.classDumpBytes() > 0 || sa.utf8StringBytes() > 0)) {
             problems.add(new DiagnosticReport.Problem(
                     DiagnosticReport.Problem.Severity.INFO,
                     "HEAP_METADATA_ONLY",
-                    "File contains no heap objects visible to Eclipse MAT",
+                    "File contains no heap objects",
                     "All on-disk bytes are metadata (class dumps, UTF-8 strings, GC roots, framing)."
-                    + " Eclipse MAT will report a heap size of 0. This may indicate a very early dump"
+                    + " The estimated heap size is 0. This may indicate a very early dump"
                     + " taken before object allocation, an empty JVM, or a corrupt/incomplete segment."
             ));
         }
@@ -451,8 +451,8 @@ public final class HprofDiagnose {
         boolean hasErrorProblems = problems.stream()
                 .anyMatch(p -> p.severity() == DiagnosticReport.Problem.Severity.ERROR);
         boolean isGzip = fileSummary.filePath().toLowerCase().endsWith(".gz");
-        long matHeap = Math.max(sa.matHeapSizeWithCompressedOops(), 1);
-        double ratio = (double) fileSizeBytes / matHeap;
+        long heapEstimate = Math.max(sa.estimatedHeapSizeWithCompressedOops(), 1);
+        double ratio = (double) fileSizeBytes / heapEstimate;
 
         // 9. OBJECT_ID_OVERHEAD (INFO) — only when idSize=8 and the overhead is non-trivial
         boolean framingExplained = false;
@@ -461,13 +461,13 @@ public final class HprofDiagnose {
             if (fileSizeBytes > 0 && totalOverhead > fileSizeBytes * 0.05) {
                 // Each instance contributes exactly (1 + 2*idSize + 8) = 25 bytes of overhead.
                 long instanceCount = sa.objectIdOverheadBytes() / (1 + 8 * 2 + 8);
-                // Does the framing overhead alone plausibly explain the observed file/MAT ratio?
+                // Does the framing overhead alone plausibly explain the observed file/heap ratio?
                 // A file with N instances of avg payload P bytes has:
-                //   disk_instances = N * (25 + P),  MAT_instances = N * P
+                //   disk_instances = N * (25 + P),  heap_estimate_instances = N * P
                 //   ratio_instances = 1 + 25/P  (ignoring arrays, which pull ratio toward 1.0)
                 // For the full file ratio to be ~R, the instance section ratio is > R.
                 // If framing overhead accounts for >= 80% of the gap, we say it's "fully explained".
-                long gap = fileSizeBytes - matHeap;
+                long gap = fileSizeBytes - heapEstimate;
                 double fractionExplained = gap > 0 ? (double) totalOverhead / gap : 0.0;
                 framingExplained = fractionExplained >= 0.70;
 
@@ -475,25 +475,26 @@ public final class HprofDiagnose {
                         DiagnosticReport.Problem.Severity.INFO,
                         "OBJECT_ID_OVERHEAD",
                         String.format(java.util.Locale.ROOT,
-                                "HPROF record framing overhead: %,d bytes (%.0f%% of the file/MAT gap)",
+                                "HPROF record framing overhead: %,d bytes (%.0f%% of the file/heap gap)",
                                 totalOverhead, fractionExplained * 100),
                         String.format(java.util.Locale.ROOT,
                                 "With idSize=8, every INSTANCE_DUMP subrecord carries 25 bytes of framing"
                                 + " (1 subtag + 8 objectId + 4 stackTrace + 8 classId + 4 dataLength field)"
-                                + " that Eclipse MAT does not include in its heap-size calculation — it counts"
+                                + " that is not counted in the heap size estimate — it counts"
                                 + " only the instance data payload (dataLength). For OBJ_ARRAY_DUMP, each"
-                                + " element is stored as idSize=8 bytes on disk but MAT's formula uses"
-                                + " refSize=4 (compressed oops), so these 4 extra bytes per element also"
-                                + " widen the disk/MAT gap."
+                                + " element is stored as idSize=8 bytes on disk but the heap size estimator"
+                                + " uses refSize=4 (compressed oops), so these 4 extra bytes per element also"
+                                + " widen the file/heap gap."
                                 + " Note: for INSTANCE_DUMP, reference fields within the payload are also"
                                 + " written as idSize=8 bytes even when the JVM uses compressed oops (runtime"
-                                + " ref = 4 bytes). MAT counts the full dataLength as-is, so it too sees"
-                                + " 8-byte refs — the ref expansion in instances does NOT widen the disk/MAT"
-                                + " gap, but it does mean MAT may report MORE than the actual runtime heap."
+                                + " ref = 4 bytes). The heap size estimator uses the full dataLength as-is,"
+                                + " so it too sees 8-byte refs — the ref expansion in instances does NOT widen"
+                                + " the file/heap gap, but it does mean the heap size estimate may exceed the"
+                                + " actual runtime heap."
                                 + " This file has ~%,d instance subrecords: framing = %,d bytes, obj-array"
                                 + " reference expansion = %,d bytes, combined %,d bytes. This accounts for"
                                 + " %.0f%% of the %,d-byte gap between the on-disk file (%,d bytes) and"
-                                + " MAT's reported heap (%,d bytes). For a heap with hundreds of millions of"
+                                + " estimated heap (%,d bytes). For a heap with hundreds of millions of"
                                 + " small objects — linked-list nodes, tree nodes, cache entries — this"
                                 + " overhead routinely makes a 20 GB heap produce a 30–40 GB HPROF file."
                                 + " No action is required; this is the expected and correct file size.",
@@ -504,7 +505,7 @@ public final class HprofDiagnose {
                                 fractionExplained * 100,
                                 gap,
                                 fileSizeBytes,
-                                matHeap)
+                                heapEstimate)
                 ));
             }
         }
@@ -516,13 +517,13 @@ public final class HprofDiagnose {
                         DiagnosticReport.Problem.Severity.INFO,
                         "LARGE_UNREACHABLE_RATIO",
                         String.format(java.util.Locale.ROOT,
-                                "File/MAT ratio %.1f× — dump may include many unreachable objects", ratio),
+                                "File/heap ratio %.1f× — dump may include many unreachable objects", ratio),
                         String.format(java.util.Locale.ROOT,
-                                "The file is %.1f× larger than Eclipse MAT's reported heap size, but no"
+                                "The file is %.1f× larger than the estimated heap size, but no"
                                 + " structural anomalies were detected. This often means the dump was taken"
                                 + " without running GC first (jmap without :live, or -XX:+HeapDumpOnOutOfMemoryError"
                                 + " default). Unreachable objects are included on disk but may be excluded from"
-                                + " MAT's object graph unless 'Keep unreachable objects' is enabled. Take a"
+                                + " heap analysis tool results unless 'Keep unreachable objects' is enabled. Take a"
                                 + " 'jmap -dump:live,format=b' dump for comparison.", ratio)
                 ));
             }
@@ -633,7 +634,7 @@ public final class HprofDiagnose {
                     segmentIn.skipFully(idSize + 4);
                     long numElements = segmentIn.readU4();
                     HprofType elementType = HprofType.fromCode(segmentIn.readU1());
-                    segmentIn.skipFully(numElements * (long) MatShallowSizeEstimator.primitiveSize(elementType));
+                    segmentIn.skipFully(numElements * (long) HeapSizeEstimator.primitiveSize(elementType));
                 }
                 default -> throw new IOException(
                         "Unsupported heap dump subrecord tag: 0x" + Integer.toHexString(subTag));
@@ -732,20 +733,18 @@ public final class HprofDiagnose {
                     subRecordPayload = (long) idSize * 2 + 8 + dataLength;
                     state.heapObjectInstanceBytes += subRecordPayload;
 
-                    // Overhead not counted by MAT: subtag(1) + objectId(idSize) + stackTrace(4)
-                    // + classId(idSize) + dataLength(4) = 1 + 2*idSize + 8 bytes of framing.
-                    // MAT only counts dataLength.
+                    // Heap size estimate counts only dataLength.
                     state.objectIdOverheadBytes += 1 + (long) idSize * 2 + 8;
 
                     long[] cstats = state.classStats.computeIfAbsent(classId, k -> new long[4]);
                     cstats[0]++;
                     cstats[1] += dataLength;
-                    long matComp = MatShallowSizeEstimator.instanceMatSize(dataLength);
-                    long matUncomp = MatShallowSizeEstimator.instanceMatSize(dataLength);
-                    cstats[2] += matComp;
-                    cstats[3] += matUncomp;
-                    state.matCompressed += matComp;
-                    state.matUncompressed += matUncomp;
+                    long heapEstComp = HeapSizeEstimator.instanceMatSize(dataLength);
+                    long heapEstUncomp = HeapSizeEstimator.instanceMatSize(dataLength);
+                    cstats[2] += heapEstComp;
+                    cstats[3] += heapEstUncomp;
+                    state.heapEstimateCompressed += heapEstComp;
+                    state.heapEstimateUncompressed += heapEstUncomp;
 
                     state.trackId(objectId, "INSTANCE_DUMP");
                 }
@@ -759,21 +758,22 @@ public final class HprofDiagnose {
                     subRecordPayload = (long) idSize * 2 + 4 + 4 + numElements * idSize;
                     state.heapObjectObjArrayBytes += subRecordPayload;
 
-                    // When idSize=8 but the JVM uses compressed oops, each reference element is
-                    // stored as 8 bytes on disk, but MAT counts only 4 bytes per reference.
+                    // Overhead not in heap size estimate:
+                    // when idSize=8 but the JVM uses compressed oops, each reference element is
+                    // stored as 8 bytes on disk, but the heap size estimator counts only 4 bytes per reference.
                     // Overhead = numElements * (idSize - 4) bytes.
                     if (idSize > 4) {
                         state.compressedRefExpansionBytes += numElements * (idSize - 4);
                     }
 
-                    long matComp = MatShallowSizeEstimator.objArrayMatSize(numElements, idSize, 4, objectAlign);
-                    long matUncomp = MatShallowSizeEstimator.objArrayMatSize(numElements, idSize, idSize, objectAlign);
-                    state.matCompressed += matComp;
-                    state.matUncompressed += matUncomp;
+                    long heapEstComp = HeapSizeEstimator.objArrayMatSize(numElements, idSize, 4, objectAlign);
+                    long heapEstUncomp = HeapSizeEstimator.objArrayMatSize(numElements, idSize, idSize, objectAlign);
+                    state.heapEstimateCompressed += heapEstComp;
+                    state.heapEstimateUncompressed += heapEstUncomp;
 
                     long diskBytes = 1 + subRecordPayload;
                     state.topArrays.add(diskBytes, new DiagnosticReport.TopArray(
-                            arrayId, "OBJ", numElements, diskBytes, matComp, matUncomp));
+                            arrayId, "OBJ", numElements, diskBytes, heapEstComp, heapEstUncomp));
 
                     state.trackId(arrayId, "OBJ_ARRAY_DUMP");
                 }
@@ -783,21 +783,21 @@ public final class HprofDiagnose {
                     long numElements = segmentIn.readU4();
                     int elementTypeCode = segmentIn.readU1();
                     HprofType elementType = HprofType.fromCode(elementTypeCode);
-                    int elemSize = MatShallowSizeEstimator.primitiveSize(elementType);
+                    int elemSize = HeapSizeEstimator.primitiveSize(elementType);
                     segmentIn.skipFully(numElements * elemSize);
 
                     subRecordPayload = idSize + 4 + 4 + 1 + numElements * (long) elemSize;
                     state.heapObjectPrimArrayBytes += subRecordPayload;
 
-                    long matComp = MatShallowSizeEstimator.primArrayMatSize(numElements, elementType, idSize, 4, objectAlign);
-                    long matUncomp = MatShallowSizeEstimator.primArrayMatSize(numElements, elementType, idSize, idSize, objectAlign);
-                    state.matCompressed += matComp;
-                    state.matUncompressed += matUncomp;
+                    long heapEstComp = HeapSizeEstimator.primArrayMatSize(numElements, elementType, idSize, 4, objectAlign);
+                    long heapEstUncomp = HeapSizeEstimator.primArrayMatSize(numElements, elementType, idSize, idSize, objectAlign);
+                    state.heapEstimateCompressed += heapEstComp;
+                    state.heapEstimateUncompressed += heapEstUncomp;
 
                     long diskBytes = 1 + subRecordPayload;
                     String arrayType = "PRIM:" + elementType.name().toLowerCase();
                     state.topArrays.add(diskBytes, new DiagnosticReport.TopArray(
-                            arrayId, arrayType, numElements, diskBytes, matComp, matUncomp));
+                            arrayId, arrayType, numElements, diskBytes, heapEstComp, heapEstUncomp));
 
                     state.trackId(arrayId, "PRIM_ARRAY_DUMP");
                 }
@@ -942,8 +942,8 @@ public final class HprofDiagnose {
         long segmentFramingBytes;
         long heapDumpEndBytes;
         long unknownOrUnparseableBytes;
-        long matCompressed;
-        long matUncompressed;
+        long heapEstimateCompressed;
+        long heapEstimateUncompressed;
         long objectIdOverheadBytes;
         long compressedRefExpansionBytes;
 

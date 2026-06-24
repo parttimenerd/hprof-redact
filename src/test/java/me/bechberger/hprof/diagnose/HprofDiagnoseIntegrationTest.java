@@ -152,9 +152,9 @@ class HprofDiagnoseIntegrationTest {
     }
 
     @Test
-    void matHeapSizeEstimateIsPositive() {
-        assertTrue(report.sizeAttribution().matHeapSizeWithCompressedOops() > 0,
-                "matHeapSizeWithCompressedOops should be > 0");
+    void estimatedHeapSizeIsPositive() {
+        assertTrue(report.sizeAttribution().estimatedHeapSizeWithCompressedOops() > 0,
+                "estimatedHeapSizeWithCompressedOops should be > 0");
     }
 
     // -------------------------------------------------------------------------

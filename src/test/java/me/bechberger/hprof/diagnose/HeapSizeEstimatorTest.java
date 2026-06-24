@@ -7,10 +7,10 @@ package me.bechberger.hprof.diagnose;
 import me.bechberger.hprof.HprofType;
 import org.junit.jupiter.api.Test;
 
-import static me.bechberger.hprof.diagnose.MatShallowSizeEstimator.*;
+import static me.bechberger.hprof.diagnose.HeapSizeEstimator.*;
 import static org.junit.jupiter.api.Assertions.*;
 
-class MatShallowSizeEstimatorTest {
+class HeapSizeEstimatorTest {
 
     // -------------------------------------------------------------------------
     // alignUp

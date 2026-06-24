@@ -123,26 +123,26 @@ public record DiagnosticReport(
      *                                      9 bytes per top-level record plus 1 byte per heap-dump subtag
      * @param heapDumpEndBytes              bytes for HPROF_HEAP_DUMP_END records
      * @param unknownOrUnparseableBytes     bytes that could not be attributed to any known record type
-     * @param matHeapSizeWithCompressedOops estimated MAT heap size assuming reference size = 4 bytes
-     * @param matHeapSizeWithoutCompressedOops estimated MAT heap size assuming reference size = idSize bytes
+     * @param estimatedHeapSizeWithCompressedOops estimated runtime heap size assuming reference size = 4 bytes
+     * @param estimatedHeapSizeWithoutCompressedOops estimated runtime heap size assuming reference size = idSize bytes
      * @param objectIdOverheadBytes         fixed per-instance framing bytes in INSTANCE_DUMP subrecords
-     *                                      that MAT does not count: for each instance, the subrecord
-     *                                      header is: {@code 1 (subtag) + idSize (objectId) +
+     *                                      not counted in the heap size estimate: for each instance,
+     *                                      the subrecord header is: {@code 1 (subtag) + idSize (objectId) +
      *                                      4 (stackTrace) + idSize (classId) + 4 (dataLength field)
      *                                      = 1 + 2×idSize + 8} bytes. With idSize=8 this is exactly
-     *                                      25 bytes per object — all invisible to MAT, which counts
+     *                                      25 bytes per object — not counted in the estimate, which uses
      *                                      only the {@code dataLength} payload. At 500 million
-     *                                      objects ≈ 12.5 GB of overhead not visible in MAT.
-     *                                      Note: this is a disk-vs-MAT overhead. Reference fields
+     *                                      objects ≈ 12.5 GB of overhead not in the estimate.
+     *                                      Note: this is a disk-vs-estimate overhead. Reference fields
      *                                      within the payload are also written as idSize=8 bytes
      *                                      (decompressed) even when the JVM used compressed oops,
-     *                                      but since MAT reads the raw dataLength too, this does
-     *                                      NOT widen the disk/MAT gap — it does mean MAT may exceed
-     *                                      the actual runtime heap for ref-heavy workloads.
-     * @param compressedRefExpansionBytes   bytes in OBJ_ARRAY_DUMP on disk that MAT does not count:
-     *                                      when idSize=8 but the JVM uses compressed oops (refSize=4),
-     *                                      each array element is stored as 8 bytes on disk but MAT's
-     *                                      formula uses refSize=4 (4 bytes per element).
+     *                                      but since the estimator reads the raw dataLength too, this
+     *                                      does NOT widen the disk/heap gap — it does mean the estimate
+     *                                      may exceed the actual runtime heap for ref-heavy workloads.
+     * @param compressedRefExpansionBytes   bytes in OBJ_ARRAY_DUMP on disk not counted in the heap
+     *                                      size estimate: when idSize=8 but the JVM uses compressed
+     *                                      oops (refSize=4), each array element is stored as 8 bytes
+     *                                      on disk but the estimator uses refSize=4 (4 bytes per element).
      *                                      Overhead = {@code numElements × (idSize − 4)} per array.
      */
     public record SizeAttribution(
@@ -158,8 +158,8 @@ public record DiagnosticReport(
             long segmentFramingBytes,
             long heapDumpEndBytes,
             long unknownOrUnparseableBytes,
-            long matHeapSizeWithCompressedOops,
-            long matHeapSizeWithoutCompressedOops,
+            long estimatedHeapSizeWithCompressedOops,
+            long estimatedHeapSizeWithoutCompressedOops,
             long objectIdOverheadBytes,
             long compressedRefExpansionBytes
     ) {}
@@ -238,16 +238,16 @@ public record DiagnosticReport(
      * @param className                      resolved class name, or {@code "class#<id>"} if unknown
      * @param instanceCount                  number of HPROF_GC_INSTANCE_DUMP records for this class
      * @param totalInstanceBytes             sum of dataLength fields across all instances
-     * @param matHeapSizeWithCompressedOops  estimated MAT retained heap assuming refSize = 4
-     * @param matHeapSizeWithoutCompressedOops estimated MAT retained heap assuming refSize = idSize
+     * @param estimatedHeapSizeWithCompressedOops  estimated retained heap assuming refSize = 4
+     * @param estimatedHeapSizeWithoutCompressedOops estimated retained heap assuming refSize = idSize
      */
     public record TopClass(
             long classId,
             String className,
             long instanceCount,
             long totalInstanceBytes,
-            long matHeapSizeWithCompressedOops,
-            long matHeapSizeWithoutCompressedOops
+            long estimatedHeapSizeWithCompressedOops,
+            long estimatedHeapSizeWithoutCompressedOops
     ) {}
 
     /**
@@ -258,16 +258,16 @@ public record DiagnosticReport(
      *                                       {@code "OBJ"}
      * @param numElements                    number of elements in the array
      * @param diskBytes                      bytes occupied by this array's subrecord on disk
-     * @param matHeapSizeWithCompressedOops  estimated MAT heap size assuming refSize = 4
-     * @param matHeapSizeWithoutCompressedOops estimated MAT heap size assuming refSize = idSize
+     * @param estimatedHeapSizeWithCompressedOops  estimated heap size assuming refSize = 4
+     * @param estimatedHeapSizeWithoutCompressedOops estimated heap size assuming refSize = idSize
      */
     public record TopArray(
             long arrayId,
             String arrayType,
             long numElements,
             long diskBytes,
-            long matHeapSizeWithCompressedOops,
-            long matHeapSizeWithoutCompressedOops
+            long estimatedHeapSizeWithCompressedOops,
+            long estimatedHeapSizeWithoutCompressedOops
     ) {}
 
     /**

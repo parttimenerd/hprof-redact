@@ -113,11 +113,11 @@ public final class TextReportWriter {
     private static void writeSizeAttribution(DiagnosticReport.SizeAttribution s, PrintWriter out) {
         out.println("--- Size Attribution ---");
         out.printf("%-40s %20s   %23s   %27s%n",
-                "Category", "On Disk (bytes)", "MAT Heap (compressed)", "MAT Heap (uncompressed)");
+                "Category", "On Disk (bytes)", "Est. Heap (compressed oops)", "Est. Heap (full refs)");
 
         // heap_objects rows
         printAttrRow(out, "heap_objects.instances",
-                s.heapObjectInstanceBytes(), s.matHeapSizeWithCompressedOops(), s.matHeapSizeWithoutCompressedOops());
+                s.heapObjectInstanceBytes(), s.estimatedHeapSizeWithCompressedOops(), s.estimatedHeapSizeWithoutCompressedOops());
         printAttrRow(out, "heap_objects.obj_arrays",
                 s.heapObjectObjArrayBytes(), 0, 0);
         printAttrRow(out, "heap_objects.prim_arrays",
@@ -141,29 +141,29 @@ public final class TextReportWriter {
                 + s.unknownOrUnparseableBytes();
 
         out.printf("%-45s %s%n", "TOTAL on-disk:", formatBytes(totalOnDisk));
-        out.printf("%-45s %s%n", "TOTAL MAT heap (compressed):", formatBytes(s.matHeapSizeWithCompressedOops()));
-        out.printf("%-45s %s%n", "TOTAL MAT heap (uncompressed):", formatBytes(s.matHeapSizeWithoutCompressedOops()));
+        out.printf("%-45s %s%n", "TOTAL est. heap (compressed oops):", formatBytes(s.estimatedHeapSizeWithCompressedOops()));
+        out.printf("%-45s %s%n", "TOTAL est. heap (full refs):", formatBytes(s.estimatedHeapSizeWithoutCompressedOops()));
         out.println();
-        out.println("  NOTE: MAT's \"heap size\" counts only heap_objects.* categories.");
-        out.println("  Objects not reachable from GC roots are excluded from MAT's default");
-        out.println("  view but included here if \"Keep unreachable objects\" was enabled.");
-        out.println("  MAT's instance size = INSTANCE_DUMP dataLength (includes 8-byte ref");
+        out.println("  NOTE: The heap size estimate counts only heap_objects.* categories.");
+        out.println("  Objects not reachable from GC roots are excluded from heap analysis tools'");
+        out.println("  default view but included here if \"Keep unreachable objects\" was enabled.");
+        out.println("  The estimated instance size = INSTANCE_DUMP dataLength (includes 8-byte ref");
         out.println("  fields even when the JVM used compressed oops at runtime). This means");
-        out.println("  MAT may report MORE than the runtime heap for ref-heavy workloads.");
-        out.println("  The disk/MAT gap comes from subrecord framing + OBJ_ARRAY ref expansion.");
+        out.println("  the heap size estimate may exceed the runtime heap for ref-heavy workloads.");
+        out.println("  The file/heap gap comes from subrecord framing + OBJ_ARRAY ref expansion.");
         out.println();
 
         // Object-ID and compressed-reference overhead breakdown (shown only when non-zero)
         long instanceOverhead = s.objectIdOverheadBytes();
         long refExpansion = s.compressedRefExpansionBytes();
         if (instanceOverhead > 0 || refExpansion > 0) {
-            out.println("  Overhead in file but not in MAT heap (explains disk > MAT gap):");
+            out.println("  Overhead in file but not in heap size estimate (explains file > est. heap gap):");
             if (instanceOverhead > 0) {
                 out.printf("    instance subrecord framing  (25 bytes per object, idSize=8): %s bytes%n",
                         formatBytes(instanceOverhead));
             }
             if (refExpansion > 0) {
-                out.printf("    OBJ_ARRAY ref expansion (4 bytes/element, idSize=8 vs MAT refSize=4): %s bytes%n",
+                out.printf("    OBJ_ARRAY ref expansion (4 bytes/element, idSize=8 vs estimator refSize=4): %s bytes%n",
                         formatBytes(refExpansion));
             }
             out.printf("    combined: %s bytes%n", formatBytes(instanceOverhead + refExpansion));
@@ -172,12 +172,12 @@ public final class TextReportWriter {
     }
 
     private static void printAttrRow(PrintWriter out, String label,
-                                      long diskBytes, long matComp, long matUncomp) {
+                                      long diskBytes, long estComp, long estUncomp) {
         out.printf("%-40s %20s   %23s   %27s%n",
                 label,
                 formatBytes(diskBytes),
-                formatBytes(matComp),
-                formatBytes(matUncomp));
+                formatBytes(estComp),
+                formatBytes(estUncomp));
     }
 
     private static void writeUtf8Analysis(DiagnosticReport.Utf8Analysis u, long fileSizeBytes, PrintWriter out) {
@@ -186,7 +186,7 @@ public final class TextReportWriter {
         String flag = u.isUnusuallyLarge() ? "  [UNUSUALLY LARGE]" : "  [NORMAL]";
         out.printf("Total UTF-8 bytes:      %s (%.1f%% of file)%s%n",
                 formatBytes(u.totalBytes()), pct, flag);
-        out.printf("  Referenced (MAT-resident after parse):    %s bytes%n",
+        out.printf("  Referenced (retained for class resolution):    %s bytes%n",
                 formatBytes(u.referencedBytes()));
         out.printf("  Unreferenced (transient during parse):   %s bytes%n",
                 formatBytes(u.unreferencedBytes()));
@@ -196,10 +196,10 @@ public final class TextReportWriter {
                 : "";
         out.printf("Largest record:     %s bytes%s%n", formatBytes(u.largestRecordBytes()), sample);
         out.println();
-        out.println("  NOTE: UTF-8 strings are NOT counted in MAT's heap size. They are decoded");
+        out.println("  NOTE: UTF-8 strings are NOT counted in the heap size estimate. They are decoded");
         out.printf("  into memory during parsing (~%s peak), but only the referenced subset%n",
                 formatBytesHuman(u.totalBytes()));
-        out.printf("  (~%s) stays resident in MAT's ClassImpl objects for the session.%n",
+        out.printf("  (~%s) stays resident for class name resolution for the session.%n",
                 formatBytesHuman(u.referencedBytes()));
         out.println();
     }
@@ -208,7 +208,7 @@ public final class TextReportWriter {
         int n = classes.size();
         out.printf("--- Top %d Classes by Instance Bytes ---%n", n);
         out.printf(" %3s  %-50s %12s   %16s   %16s%n",
-                "#", "Class Name", "Instances", "Instance Bytes", "MAT (compressed)");
+                "#", "Class Name", "Instances", "Instance Bytes", "Est. Heap (cOops)");
         int rank = 1;
         for (DiagnosticReport.TopClass c : classes) {
             out.printf(" %3d  %-50s %12s   %16s   %16s%n",
@@ -216,7 +216,7 @@ public final class TextReportWriter {
                     c.className(),
                     formatBytes(c.instanceCount()),
                     formatBytes(c.totalInstanceBytes()),
-                    formatBytes(c.matHeapSizeWithCompressedOops()));
+                    formatBytes(c.estimatedHeapSizeWithCompressedOops()));
         }
         out.println();
     }
@@ -225,7 +225,7 @@ public final class TextReportWriter {
         int n = arrays.size();
         out.printf("--- Top %d Largest Arrays ---%n", n);
         out.printf(" %3s  %-12s  %12s   %12s   %16s%n",
-                "#", "Type", "Elements", "Disk Bytes", "MAT (compressed)");
+                "#", "Type", "Elements", "Disk Bytes", "Est. Heap (cOops)");
         int rank = 1;
         for (DiagnosticReport.TopArray a : arrays) {
             out.printf(" %3d  %-12s  %12s   %12s   %16s%n",
@@ -233,7 +233,7 @@ public final class TextReportWriter {
                     a.arrayType(),
                     formatBytes(a.numElements()),
                     formatBytes(a.diskBytes()),
-                    formatBytes(a.matHeapSizeWithCompressedOops()));
+                    formatBytes(a.estimatedHeapSizeWithCompressedOops()));
         }
         out.println();
     }
@@ -268,9 +268,9 @@ public final class TextReportWriter {
                         formatBytes(h.decompressedOffset()), h.magic());
             }
         }
-        out.println("  NOTE: MAT silently treats each additional header as a separate dump.");
+        out.println("  NOTE: Heap analysis tools silently treat each additional header as a separate dump.");
         out.println("  The bytes between dumps all count toward the file size but may be");
-        out.println("  double-counted in MAT's UI or may represent a partial/corrupt second dump.");
+        out.println("  double-counted by heap analysis tools or may represent a partial/corrupt second dump.");
         out.println();
     }
 
@@ -287,7 +287,7 @@ public final class TextReportWriter {
                 out.printf("  Reason: %s%n", tb.reason());
             }
         }
-        out.println("  NOTE: MAT silently ignores trailing bytes. They count toward file size");
+        out.println("  NOTE: Heap analysis tools silently ignore trailing bytes. They count toward file size");
         out.println("  but are never parsed or reported.");
         out.println();
     }

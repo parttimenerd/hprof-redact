@@ -7,14 +7,15 @@ package me.bechberger.hprof.diagnose;
 import me.bechberger.hprof.HprofType;
 
 /**
- * Mirrors the shallow-size formulas from Eclipse MAT's {@code HprofParserHandlerImpl}.
+ * Estimates the runtime heap footprint of each heap object from HPROF record data,
+ * using the same sizing formulas the JVM uses for object layout.
  *
- * <p>Used by the diagnostic report to estimate how much heap each object would contribute to MAT's
- * reported "heap size" figure, which differs from raw on-disk bytes.
+ * <p>Used by the diagnostic report to estimate how much heap each object contributes to
+ * the reported "heap size" figure, which differs from raw on-disk bytes.
  */
-public final class MatShallowSizeEstimator {
+public final class HeapSizeEstimator {
 
-    private MatShallowSizeEstimator() {}
+    private HeapSizeEstimator() {}
 
     /**
      * Rounds {@code value} up to the nearest multiple of {@code align}.
@@ -28,38 +29,38 @@ public final class MatShallowSizeEstimator {
     }
 
     /**
-     * MAT shallow size for an INSTANCE_DUMP record. MAT trusts the JVM's {@code dataLength}
+     * Estimated heap size for an INSTANCE_DUMP record. Trusts the JVM's {@code dataLength}
      * directly.
      *
      * @param dataLength the data length field from the HPROF INSTANCE_DUMP record
-     * @return the MAT shallow size
+     * @return the estimated heap size
      */
     public static long instanceMatSize(long dataLength) {
         return dataLength;
     }
 
     /**
-     * MAT shallow size for an OBJ_ARRAY_DUMP record. MAT computes the JVM object layout.
+     * Estimated heap size for an OBJ_ARRAY_DUMP record, using the JVM object layout formula.
      *
      * @param numElements the number of elements in the array
      * @param idSize id size from the HPROF header (4 or 8)
      * @param refSize reference size: {@code idSize} for uncompressed oops, 4 for compressed oops
      * @param objectAlign JVM object alignment (typically 8)
-     * @return the MAT shallow size
+     * @return the estimated heap size
      */
     public static long objArrayMatSize(long numElements, int idSize, int refSize, int objectAlign) {
         return alignUp(idSize + refSize + 4 + numElements * refSize, objectAlign);
     }
 
     /**
-     * MAT shallow size for a PRIM_ARRAY_DUMP record. MAT computes the JVM object layout.
+     * Estimated heap size for a PRIM_ARRAY_DUMP record, using the JVM object layout formula.
      *
      * @param numElements the number of elements in the array
      * @param elementType the primitive element type (must not be OBJECT or ARRAY_OBJECT)
      * @param idSize id size from the HPROF header (4 or 8)
      * @param refSize reference size: {@code idSize} for uncompressed oops, 4 for compressed oops
      * @param objectAlign JVM object alignment (typically 8)
-     * @return the MAT shallow size
+     * @return the estimated heap size
      * @throws IllegalArgumentException if {@code elementType} is not a primitive type
      */
     public static long primArrayMatSize(
