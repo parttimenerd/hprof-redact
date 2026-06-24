@@ -9,6 +9,7 @@ import java.util.List;
 /**
  * Top-level record containing all sections produced by an HPROF diagnostic pass.
  *
+ * @param problems           detected problems and anomalies, most severe first
  * @param fileSummary        summary of the file header and basic metadata
  * @param recordHistogram    one entry per top-level tag seen in the file
  * @param subrecordHistogram one entry per heap-dump subtag seen
@@ -23,6 +24,7 @@ import java.util.List;
  * @param duplicateIdWarning warning message when OOM aborted duplicate-ID scan, null otherwise
  */
 public record DiagnosticReport(
+        List<Problem> problems,
         FileSummary fileSummary,
         List<RecordStat> recordHistogram,
         List<SubrecordStat> subrecordHistogram,
@@ -36,6 +38,18 @@ public record DiagnosticReport(
         List<DuplicateId> duplicateIds,
         String duplicateIdWarning
 ) {
+
+    /**
+     * A detected problem or anomaly in the HPROF file.
+     *
+     * @param severity    severity level
+     * @param code        machine-readable code, e.g. {@code "CONCATENATED_DUMP"}
+     * @param title       one-line summary, e.g. {@code "Concatenated dump detected"}
+     * @param description full explanation with impact and recommended action
+     */
+    public record Problem(Severity severity, String code, String title, String description) {
+        public enum Severity { ERROR, WARNING, INFO }
+    }
 
     /**
      * Summary of the HPROF file header and basic file metadata.

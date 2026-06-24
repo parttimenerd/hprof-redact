@@ -307,6 +307,9 @@ public final class HprofDiagnose {
         }
 
         return new DiagnosticReport(
+                detectProblems(fileSummary, sizeAttribution, utf8Analysis, segmentIssues,
+                        allHeaders, trailingBytesRecord, duplicateIdsList, state.duplicateIdWarning,
+                        fileSizeBytes),
                 fileSummary,
                 recordStats,
                 subrecordStats,
@@ -320,6 +323,152 @@ public final class HprofDiagnose {
                 duplicateIdsList,
                 state.duplicateIdWarning
         );
+    }
+
+    private static List<DiagnosticReport.Problem> detectProblems(
+            DiagnosticReport.FileSummary fileSummary,
+            DiagnosticReport.SizeAttribution sa,
+            DiagnosticReport.Utf8Analysis utf8,
+            List<DiagnosticReport.SegmentIssue> segmentIssues,
+            List<DiagnosticReport.HeaderOccurrence> duplicateHeaders,
+            DiagnosticReport.TrailingBytes trailingBytes,
+            List<DiagnosticReport.DuplicateId> duplicateIds,
+            String duplicateIdWarning,
+            long fileSizeBytes) {
+
+        List<DiagnosticReport.Problem> problems = new ArrayList<>();
+
+        // 1. CONCATENATED_DUMP (ERROR)
+        long extraHeaders = duplicateHeaders.stream().filter(h -> h.decompressedOffset() > 0).count();
+        boolean hasConcatenated = extraHeaders > 0;
+        if (hasConcatenated) {
+            long n = extraHeaders;
+            problems.add(new DiagnosticReport.Problem(
+                    DiagnosticReport.Problem.Severity.ERROR,
+                    "CONCATENATED_DUMP",
+                    "Concatenated dump: file contains " + n + " additional HPROF stream(s)",
+                    "The file contains " + (n + 1) + " concatenated HPROF streams. Eclipse MAT parses only the"
+                    + " first stream and silently ignores the rest, so its reported heap size is smaller than"
+                    + " the on-disk file size. This typically happens when -XX:+HeapDumpOnOutOfMemoryError"
+                    + " appends to an existing dump file rather than overwriting it. Fix: delete or rename"
+                    + " the dump file between JVM restarts, or point -XX:HeapDumpPath at a directory so the"
+                    + " JVM generates unique filenames."
+            ));
+        }
+
+        // 2. SEGMENT_LENGTH_MISMATCH (ERROR)
+        if (!segmentIssues.isEmpty()) {
+            int n = segmentIssues.size();
+            problems.add(new DiagnosticReport.Problem(
+                    DiagnosticReport.Problem.Severity.ERROR,
+                    "SEGMENT_LENGTH_MISMATCH",
+                    "Segment length mismatch in " + n + " HEAP_DUMP_SEGMENT record(s)",
+                    "One or more HEAP_DUMP_SEGMENT records declare a length that does not match the bytes"
+                    + " consumed by their subrecords. This may indicate a truncated write, a buggy HPROF"
+                    + " producer, or file corruption. Objects in the mismatched portion may not be visible"
+                    + " in Eclipse MAT."
+            ));
+        }
+
+        // 3. TRUNCATED_FILE (ERROR) — only when not explained by concatenated dump
+        if (trailingBytes != null && !hasConcatenated) {
+            problems.add(new DiagnosticReport.Problem(
+                    DiagnosticReport.Problem.Severity.ERROR,
+                    "TRUNCATED_FILE",
+                    "File appears truncated or has trailing garbage",
+                    "The file ends with bytes that cannot be parsed as HPROF records (offset "
+                    + trailingBytes.offset() + "). This may mean the JVM was killed mid-write"
+                    + " (disk full, OOM-kill, SIGKILL), the file was transferred incompletely, or"
+                    + " the file has been corrupted. Eclipse MAT silently ignores these bytes; objects"
+                    + " in the unwritten portion are missing from the analysis."
+            ));
+        }
+
+        // 4. GZIP_SIZE_CONFUSION (WARNING)
+        if (fileSummary.filePath().toLowerCase().endsWith(".gz")) {
+            problems.add(new DiagnosticReport.Problem(
+                    DiagnosticReport.Problem.Severity.WARNING,
+                    "GZIP_SIZE_CONFUSION",
+                    "File is gzip-compressed: on-disk size ≠ decompressed size",
+                    "The file is gzip-compressed. The on-disk size shown above is the compressed size."
+                    + " Eclipse MAT and hprof-redact diagnose both work on the decompressed stream, which"
+                    + " may be 3–10× larger. When comparing file size to MAT's reported heap size, use"
+                    + " the decompressed size (run 'gzip -l " + fileSummary.filePath() + "' to see it)."
+            ));
+        }
+
+        // 5. UTF8_UNUSUALLY_LARGE (WARNING)
+        if (utf8.isUnusuallyLarge()) {
+            long fileSz = fileSummary.fileSizeBytes();
+            double pct = fileSz > 0 ? (100.0 * utf8.totalBytes() / fileSz) : 0.0;
+            problems.add(new DiagnosticReport.Problem(
+                    DiagnosticReport.Problem.Severity.WARNING,
+                    "UTF8_UNUSUALLY_LARGE",
+                    String.format(java.util.Locale.ROOT,
+                            "UTF-8 string metadata is unusually large (%.1f%% of file)", pct),
+                    "HPROF_UTF8 records carry class, method, and field names. They are NOT counted in"
+                    + " Eclipse MAT's heap size. Large UTF-8 sections are common in applications with"
+                    + " many dynamically-loaded classes (OSGi, JEE, code-generation frameworks). Of the "
+                    + utf8.totalBytes() + " bytes of UTF-8 data, only " + utf8.referencedBytes()
+                    + " bytes are referenced by class definitions and stay resident in MAT after parsing;"
+                    + " the other " + utf8.unreferencedBytes() + " bytes are transient."
+            ));
+        }
+
+        // 6. DUPLICATE_OBJECT_IDS (WARNING)
+        if (duplicateIds != null && !duplicateIds.isEmpty()) {
+            int n = duplicateIds.size();
+            problems.add(new DiagnosticReport.Problem(
+                    DiagnosticReport.Problem.Severity.WARNING,
+                    "DUPLICATE_OBJECT_IDS",
+                    "Duplicate object IDs detected (" + n + " object(s) appear more than once)",
+                    "Some object IDs appear in more than one INSTANCE_DUMP, OBJ_ARRAY_DUMP, or"
+                    + " PRIM_ARRAY_DUMP subrecord. This can occur in concatenated dumps (same live objects"
+                    + " in both streams) or from a buggy HPROF agent. Eclipse MAT may silently keep only"
+                    + " the first occurrence, so some instances may not be visible."
+            ));
+        }
+
+        // 7. HEAP_METADATA_ONLY (INFO)
+        if (sa.matHeapSizeWithCompressedOops() == 0
+                && (sa.classDumpBytes() > 0 || sa.utf8StringBytes() > 0)) {
+            problems.add(new DiagnosticReport.Problem(
+                    DiagnosticReport.Problem.Severity.INFO,
+                    "HEAP_METADATA_ONLY",
+                    "File contains no heap objects visible to Eclipse MAT",
+                    "All on-disk bytes are metadata (class dumps, UTF-8 strings, GC roots, framing)."
+                    + " Eclipse MAT will report a heap size of 0. This may indicate a very early dump"
+                    + " taken before object allocation, an empty JVM, or a corrupt/incomplete segment."
+            ));
+        }
+
+        // 8. LARGE_UNREACHABLE_RATIO (INFO)
+        boolean hasHeapObjects = sa.heapObjectPrimArrayBytes() + sa.heapObjectObjArrayBytes()
+                + sa.heapObjectInstanceBytes() > 0;
+        boolean hasErrorProblems = problems.stream()
+                .anyMatch(p -> p.severity() == DiagnosticReport.Problem.Severity.ERROR);
+        boolean isGzip = fileSummary.filePath().toLowerCase().endsWith(".gz");
+        if (hasHeapObjects && !hasErrorProblems && !isGzip) {
+            long matHeap = Math.max(sa.matHeapSizeWithCompressedOops(), 1);
+            double ratio = (double) fileSizeBytes / matHeap;
+            if (ratio > 1.5) {
+                problems.add(new DiagnosticReport.Problem(
+                        DiagnosticReport.Problem.Severity.INFO,
+                        "LARGE_UNREACHABLE_RATIO",
+                        String.format(java.util.Locale.ROOT,
+                                "File/MAT ratio %.1f× — dump may include many unreachable objects", ratio),
+                        String.format(java.util.Locale.ROOT,
+                                "The file is %.1f× larger than Eclipse MAT's reported heap size, but no"
+                                + " structural anomalies were detected. This often means the dump was taken"
+                                + " without running GC first (jmap without :live, or -XX:+HeapDumpOnOutOfMemoryError"
+                                + " default). Unreachable objects are included on disk but may be excluded from"
+                                + " MAT's object graph unless 'Keep unreachable objects' is enabled. Take a"
+                                + " 'jmap -dump:live,format=b' dump for comparison.", ratio)
+                ));
+            }
+        }
+
+        return problems;
     }
 
     // ---- Pass 1 ----

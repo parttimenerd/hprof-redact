@@ -23,6 +23,7 @@ public final class TextReportWriter {
     // -------------------------------------------------------------------------
 
     public static void write(DiagnosticReport report, PrintWriter out) {
+        writeProblems(report.problems(), out);
         writeFileSummary(report.fileSummary(), out);
         writeRecordHistogram(report.recordHistogram(), out);
         writeSubrecordHistogram(report.subrecordHistogram(), out);
@@ -40,6 +41,37 @@ public final class TextReportWriter {
     // -------------------------------------------------------------------------
     // Sections
     // -------------------------------------------------------------------------
+
+    private static void writeProblems(List<DiagnosticReport.Problem> problems, PrintWriter out) {
+        if (problems.isEmpty()) {
+            out.println("=== No Problems Detected ===");
+            out.println();
+            return;
+        }
+        out.println("=== Problems Detected ===");
+        for (DiagnosticReport.Problem p : problems) {
+            String icon = switch (p.severity()) {
+                case ERROR   -> "[ERROR]  ";
+                case WARNING -> "[WARNING]";
+                case INFO    -> "[INFO]   ";
+            };
+            out.printf("%s  %s%n", icon, p.title());
+            // Word-wrap description at ~90 chars, indented 11 spaces to align with title
+            String indent = "           ";
+            String[] words = p.description().split(" ");
+            StringBuilder line = new StringBuilder(indent);
+            for (String word : words) {
+                if (line.length() + word.length() + 1 > 100 && line.length() > indent.length()) {
+                    out.println(line);
+                    line = new StringBuilder(indent);
+                }
+                if (line.length() > indent.length()) line.append(' ');
+                line.append(word);
+            }
+            if (line.length() > indent.length()) out.println(line);
+            out.println();
+        }
+    }
 
     private static void writeFileSummary(DiagnosticReport.FileSummary s, PrintWriter out) {
         out.println("=== HPROF Diagnostic Report ===");
