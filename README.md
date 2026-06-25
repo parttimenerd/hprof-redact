@@ -81,21 +81,23 @@ Stream and redact HPROF heap dumps.
 ```bash
 Usage: hprof-redact diagnose [-hV] [-o=<output>] [--json]
                              [--detect-duplicate-ids] [--top-n=<topN>] [--object-align=<objectAlign>]
-                             [--assume-compressed-oops] [--no-compressed-oops] <input>
+                             [--compact-headers] [--histogram] <input>
 Analyze an HPROF heap dump and report size attribution, anomalies, and MAT-vs-disk discrepancies.
       <input>                     Input HPROF path (plain or .gz).
-      --assume-compressed-oops    Force MAT heap size estimate to use refSize=4
-                                  (compressed oops).
+      --compact-headers           Use compact object header size (8 bytes,
+                                  JDK 25+ JEP 519) for framing overhead
+                                  calculation.
       --detect-duplicate-ids      Track duplicate object IDs (uses ~16 bytes per
                                   object; may OOM on large dumps).
   -h, --help                      Show this help message and exit.
+      --histogram                 Emit full per-class histogram with framing
+                                  overhead column (all classes, sorted by
+                                  on-disk bytes).
       --json                      Output report as JSON.
-      --no-compressed-oops        Force MAT heap size estimate to use
-                                  refSize=idSize (uncompressed oops).
   -o, --output=<output>           Write report to file instead of stdout.
       --object-align=<objectAlign>
-                                  JVM object alignment in bytes for MAT heap
-                                  size estimation (default: 8).
+                                  JVM object alignment in bytes for heap size
+                                  estimation (default: 8).
       --top-n=<topN>              Number of top classes/arrays to report
                                   (default: 20).
   -V, --version                   Print version information and exit.
@@ -111,7 +113,7 @@ human-readable (or JSON) report covering:
 - **Record and subrecord histograms** — count and byte totals per tag
 - **Size attribution** — on-disk bytes broken down by category (instances, arrays, class
   dumps, GC roots, UTF-8 strings, metadata, framing overhead), plus estimated Eclipse MAT
-  heap size with and without compressed oops
+  heap size with standard and compact object headers
 - **HPROF framing overhead** — with `idSize=8`, each `INSTANCE_DUMP` subrecord carries
   25 bytes of framing (object ID, class ID, stack-trace serial) that Eclipse MAT does not
   include in its heap-size figure. At 500 million objects this accounts for ~12.5 GB.
