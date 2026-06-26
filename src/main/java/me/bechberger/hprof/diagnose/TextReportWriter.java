@@ -99,8 +99,6 @@ public final class TextReportWriter {
             out.println("Gap breakdown:");
             printGapRow(out, "instance framing  (25 B/obj on disk)",  framingTotal, gap);
             printGapRow(out, "obj-array ref expansion  (4 B/elem)",    refExpansion, gap);
-            long heapObjectBytes = totalInstanceBytes
-                    + sa.heapObjectObjArrayBytes() + sa.heapObjectPrimArrayBytes();
             long otherHeapGap = Math.max(0, gap - framingTotal - refExpansion - metadataBytes);
             if (otherHeapGap > 0) {
                 printGapRow(out, "other heap objects", otherHeapGap, gap);
@@ -112,6 +110,30 @@ public final class TextReportWriter {
             }
         }
         out.println();
+
+        // Top classes by framing overhead (gap contribution)
+        List<DiagnosticReport.TopClass> topClasses = report.topClasses();
+        if (gap > 0 && !topClasses.isEmpty()) {
+            List<DiagnosticReport.TopClass> byFraming = topClasses.stream()
+                    .sorted((a, b) -> Long.compare(
+                            b.instanceCount() * netFramingPerObj,
+                            a.instanceCount() * netFramingPerObj))
+                    .limit(10)
+                    .toList();
+            out.println("Top classes by gap contribution (instance framing overhead):");
+            out.printf("  %-50s %12s   %12s   %s%n",
+                    "Class", "Instances", "Framing", "% of gap");
+            for (DiagnosticReport.TopClass c : byFraming) {
+                long framing = c.instanceCount() * netFramingPerObj;
+                double pct = gap > 0 ? 100.0 * framing / gap : 0.0;
+                out.printf("  %-50s %12s   %12s   %5.1f%%%n",
+                        c.className(),
+                        formatBytes(c.instanceCount()),
+                        formatBytesHuman(framing),
+                        pct);
+            }
+            out.println();
+        }
     }
 
     // -------------------------------------------------------------------------
