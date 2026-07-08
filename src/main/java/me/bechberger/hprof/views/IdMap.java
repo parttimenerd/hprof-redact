@@ -98,6 +98,13 @@ final class IdMap {
         return buf[idx];
     }
 
+    /** Returns the heap address of the object at sorted index idx (0-based, 0 = virtual root). */
+    public long addressAt(int idx) {
+        if (!sorted) throw new IllegalStateException("sort() not yet called");
+        if (idx <= 0 || idx >= size) return 0L;
+        return get(idx);
+    }
+
     /**
      * Returns the index (0-based) for the given address, or -1 if not found.
      * Must be called after sort().
