@@ -1049,7 +1049,9 @@ public final class HeapGraphBuilder {
         }
 
         short[] flushClassIndex(int N) {
-            return new short[N]; // filled by buildClassList
+            short[] arr = new short[N];
+            java.util.Arrays.fill(arr, (short) -1); // -1 = class object / unresolved
+            return arr;
         }
 
         void flushGCRoots(HeapGraph graph, IdMap idMap) {
