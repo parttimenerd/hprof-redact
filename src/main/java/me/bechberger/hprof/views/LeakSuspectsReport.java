@@ -82,7 +82,7 @@ final class LeakSuspectsReport {
             suspects.add(new Suspect(className, i, 1, retained, graph.shallowSizeOf(i), true));
         }
 
-        // Phase 2: class groups (sum of retained across all instances of the same class)
+        // Phase 2: class groups using group-retained semantics (avoid double-counting linked lists)
         if (suspects.isEmpty()) {
             int classCount = graph.classList.size();
             long[] retainedByClass = new long[classCount];
@@ -90,14 +90,29 @@ final class LeakSuspectsReport {
             long[] countByClass    = new long[classCount];
             int[]  firstByClass    = new int[classCount]; // first object index per class
             Arrays.fill(firstByClass, -1);
+            int N = graph.N;
+            int[] idom = graph.idom;
 
-            for (int i = 1; i < graph.N; i++) {
+            for (int i = 1; i < N; i++) {
                 short ci = graph.classIndex[i];
                 if (ci < 0 || ci >= classCount) continue;
-                retainedByClass[ci] += graph.retainedSizeOf(i);
                 shallowByClass[ci]  += graph.shallowSizeOf(i);
                 countByClass[ci]++;
                 if (firstByClass[ci] < 0) firstByClass[ci] = i;
+            }
+            // Group-retained: attribute shallowSize[v] to classOf(idom[v])
+            for (int i = 1; i < N; i++) {
+                if (idom[i] == HeapGraph.UNDEFINED) continue;
+                int parent = idom[i];
+                long shallow = graph.shallowSizeOf(i);
+                if (parent == HeapGraph.VIRTUAL_ROOT || parent == HeapGraph.UNDEFINED) {
+                    short ci = graph.classIndex[i];
+                    if (ci >= 0 && ci < classCount) retainedByClass[ci] += shallow;
+                } else {
+                    short parentCi = graph.classIndex[parent];
+                    int parentClass = parentCi & 0xFFFF;
+                    if (parentClass < classCount) retainedByClass[parentClass] += shallow;
+                }
             }
 
             for (int ci = 0; ci < classCount; ci++) {
