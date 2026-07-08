@@ -1,0 +1,246 @@
+<!DOCTYPE html>
+<html lang="en">
+<head>
+<meta charset="UTF-8">
+<title>Heap Report</title>
+<style>
+*{box-sizing:border-box;margin:0;padding:0}
+body{font-family:system-ui,sans-serif;font-size:14px;color:#222;background:#f4f4f7}
+header{background:#1a1a2e;color:#eee;padding:12px 24px}
+header h1{font-size:17px;font-weight:600}
+header p{font-size:12px;color:#aaa;margin-top:3px;font-family:monospace}
+nav{background:#16213e;display:flex;flex-wrap:wrap;gap:2px;padding:5px 12px}
+nav button{background:none;border:none;color:#bbb;cursor:pointer;padding:6px 13px;border-radius:3px;font-size:13px;white-space:nowrap}
+nav button:hover{background:#0f3460;color:#fff}
+nav button.active{background:#e94560;color:#fff;font-weight:600}
+.tab{display:none;padding:16px 20px;max-width:1600px}
+.tab.active{display:block}
+.filter-row{display:flex;gap:8px;margin-bottom:8px;align-items:center}
+.filter-row input{flex:1;max-width:400px;padding:5px 9px;border:1px solid #ccc;border-radius:3px;font-size:13px}
+table{width:100%;border-collapse:collapse;background:#fff;border-radius:4px;overflow:hidden;box-shadow:0 1px 2px #0001;table-layout:auto}
+th{background:#efefef;text-align:left;padding:7px 11px;font-size:12px;font-weight:600;cursor:pointer;user-select:none;white-space:nowrap;position:sticky;top:0;z-index:1;border-bottom:1px solid #ddd}
+th:hover{background:#e0e0e0}
+th.sort-asc::after{content:" \25B2";font-size:10px}
+th.sort-desc::after{content:" \25BC";font-size:10px}
+td{padding:5px 11px;border-top:1px solid #f0f0f0;font-size:13px;vertical-align:top;word-break:break-word}
+tr:hover td{background:#f0f4ff}
+.mono{font-family:monospace;font-size:12px}
+.bar-wrap{display:flex;align-items:center;gap:7px;white-space:nowrap}
+.bar{height:7px;background:#e94560;border-radius:2px;flex-shrink:0}
+.cards{display:flex;flex-wrap:wrap;gap:12px;margin-bottom:18px}
+.card{background:#fff;border-radius:4px;padding:14px 18px;min-width:150px;box-shadow:0 1px 2px #0001}
+.card-label{font-size:11px;color:#777;text-transform:uppercase;letter-spacing:.4px}
+.card-value{font-size:20px;font-weight:700;margin-top:3px;color:#1a1a2e;font-family:monospace}
+.charts{display:flex;flex-wrap:wrap;gap:16px;margin-bottom:18px}
+.chart-box{background:#fff;border-radius:4px;padding:14px;box-shadow:0 1px 2px #0001}
+.chart-box h3{font-size:13px;font-weight:600;margin-bottom:8px;color:#444}
+.legend{font-size:11px;margin-top:6px;max-width:300px}
+.legend-item{display:flex;align-items:center;gap:5px;margin-top:3px;overflow:hidden}
+.legend-dot{width:9px;height:9px;border-radius:50%;flex-shrink:0}
+.legend-label{overflow:hidden;text-overflow:ellipsis;white-space:nowrap}
+.suspect{background:#fff;border-radius:4px;padding:14px 16px;margin-bottom:10px;box-shadow:0 1px 2px #0001}
+.suspect h3{font-size:14px;font-weight:600;margin-bottom:8px;color:#c00}
+.suspect-narrative{font-size:13px;line-height:1.5;margin-bottom:10px;background:#fff8f0;padding:8px 10px;border-left:3px solid #e94560;border-radius:2px}
+.suspect-meta{display:flex;flex-wrap:wrap;gap:14px;font-size:12px;margin-bottom:10px;color:#555}
+.suspect-meta strong{color:#1a1a2e}
+.suspect h4{font-size:12px;font-weight:600;margin:10px 0 5px;color:#444;text-transform:uppercase;letter-spacing:.3px}
+.no-data{color:#888;font-style:italic;padding:16px 0}
+</style>
+</head>
+<body>
+<header>
+  <h1 id="hdr-title">Heap Report</h1>
+  <p id="hdr-meta"></p>
+</header>
+<nav id="tabs">
+  <button class="active" data-tab="overview">Overview</button>
+  <button data-tab="threads">Threads</button>
+  <button data-tab="histogram">Histogram</button>
+  <button data-tab="suspects">Leak Suspects</button>
+  <button data-tab="top-objects">Top Objects</button>
+  <button data-tab="top-classes">Top Classes</button>
+  <button data-tab="top-packages">Top Packages</button>
+  <button data-tab="top-loaders">Top ClassLoaders</button>
+  <button data-tab="sysprops">System Properties</button>
+</nav>
+
+<div id="tab-overview" class="tab active">
+  <div class="cards" id="summary-cards"></div>
+  <div class="charts" id="charts"></div>
+</div>
+
+<div id="tab-threads" class="tab">
+  <div class="filter-row"><input class="filter" placeholder="Filter threads..."></div>
+  <table id="tbl-threads">
+    <thead><tr>
+      <th data-col="0">Thread</th><th data-col="1">Address</th>
+      <th data-col="2" class="sort-desc">Retained</th><th data-col="3">Shallow</th>
+      <th data-col="4">Daemon</th><th data-col="5">Priority</th>
+      <th data-col="6">State</th><th data-col="7">Context ClassLoader</th>
+    </tr></thead>
+    <tbody>{{THREADS}}</tbody>
+  </table>
+</div>
+
+<div id="tab-histogram" class="tab">
+  <div class="filter-row"><input class="filter" placeholder="Filter classes..."></div>
+  <table id="tbl-histogram">
+    <thead><tr>
+      <th data-col="0">#</th><th data-col="1">Class</th>
+      <th data-col="2">Instances</th><th data-col="3">Shallow Heap</th>
+      <th data-col="4" class="sort-desc">Retained Heap (group)</th>
+    </tr></thead>
+    <tbody>{{HISTOGRAM}}</tbody>
+  </table>
+</div>
+
+<div id="tab-suspects" class="tab">
+  <div class="filter-row"><input class="filter" placeholder="Filter suspects..."></div>
+  <div id="suspects-content">{{SUSPECTS}}</div>
+</div>
+
+<div id="tab-top-objects" class="tab">
+  <div class="filter-row"><input class="filter" placeholder="Filter..."></div>
+  <table id="tbl-top-objects">
+    <thead><tr>
+      <th data-col="0">#</th><th data-col="1">Address</th><th data-col="2">Class</th>
+      <th data-col="3">Shallow</th><th data-col="4" class="sort-desc">Retained</th><th data-col="5">% Heap</th>
+    </tr></thead>
+    <tbody>{{TOP_OBJECTS}}</tbody>
+  </table>
+</div>
+
+<div id="tab-top-classes" class="tab">
+  <div class="filter-row"><input class="filter" placeholder="Filter..."></div>
+  <table id="tbl-top-classes">
+    <thead><tr>
+      <th data-col="0">#</th><th data-col="1">Class</th>
+      <th data-col="2">Top-Level Count</th><th data-col="3" class="sort-desc">Retained</th>
+    </tr></thead>
+    <tbody>{{TOP_CLASSES}}</tbody>
+  </table>
+</div>
+
+<div id="tab-top-packages" class="tab">
+  <div class="filter-row"><input class="filter" placeholder="Filter..."></div>
+  <table id="tbl-top-packages">
+    <thead><tr>
+      <th data-col="0">#</th><th data-col="1">Package</th>
+      <th data-col="2">Classes</th><th data-col="3" class="sort-desc">Retained</th>
+    </tr></thead>
+    <tbody>{{TOP_PACKAGES}}</tbody>
+  </table>
+</div>
+
+<div id="tab-top-loaders" class="tab">
+  <div class="filter-row"><input class="filter" placeholder="Filter..."></div>
+  <table id="tbl-top-loaders">
+    <thead><tr>
+      <th data-col="0">#</th><th data-col="1">Class Loader</th>
+      <th data-col="2">Classes</th><th data-col="3" class="sort-desc">Retained</th>
+    </tr></thead>
+    <tbody>{{TOP_LOADERS}}</tbody>
+  </table>
+</div>
+
+<div id="tab-sysprops" class="tab">
+  <div class="filter-row"><input class="filter" placeholder="Filter properties..."></div>
+  <table id="tbl-sysprops">
+    <thead><tr><th data-col="0">Key</th><th data-col="1">Value</th></tr></thead>
+    <tbody>{{SYS_PROPS}}</tbody>
+  </table>
+</div>
+
+<script>
+var D=window.__DATA__={{DATA}};
+
+// Utilities
+function fmt(n){if(n<1024)return n+' B';if(n<1048576)return(n/1024).toFixed(1)+' KB';if(n<1073741824)return(n/1048576).toFixed(1)+' MB';return(n/1073741824).toFixed(2)+' GB';}
+function esc(s){return String(s).replace(/&/g,'&amp;').replace(/</g,'&lt;').replace(/>/g,'&gt;');}
+
+// Tab switcher
+document.querySelectorAll('#tabs button').forEach(function(btn){
+  btn.addEventListener('click',function(){
+    document.querySelectorAll('#tabs button').forEach(function(b){b.classList.remove('active');});
+    document.querySelectorAll('.tab').forEach(function(t){t.classList.remove('active');});
+    btn.classList.add('active');
+    document.getElementById('tab-'+btn.dataset.tab).classList.add('active');
+  });
+});
+
+// Sort
+document.querySelectorAll('table thead th').forEach(function(th){
+  th.addEventListener('click',function(){
+    var table=th.closest('table'),tbody=table.querySelector('tbody'),col=parseInt(th.dataset.col);
+    var asc=!th.classList.contains('sort-asc');
+    table.querySelectorAll('thead th').forEach(function(t){t.classList.remove('sort-asc','sort-desc');});
+    th.classList.add(asc?'sort-asc':'sort-desc');
+    var rows=[].slice.call(tbody.querySelectorAll('tr'));
+    rows.sort(function(a,b){
+      var av=(a.cells[col]&&(a.cells[col].dataset.val||a.cells[col].textContent))||'';
+      var bv=(b.cells[col]&&(b.cells[col].dataset.val||b.cells[col].textContent))||'';
+      var an=parseFloat(av),bn=parseFloat(bv);
+      if(!isNaN(an)&&!isNaN(bn))return asc?an-bn:bn-an;
+      return asc?av.localeCompare(bv):bv.localeCompare(av);
+    });
+    rows.forEach(function(r){tbody.appendChild(r);});
+  });
+});
+
+// Filter (tables + suspect divs)
+document.querySelectorAll('.filter').forEach(function(input){
+  var tab=input.closest('.tab');
+  input.addEventListener('input',function(){
+    var q=input.value.toLowerCase();
+    tab.querySelectorAll('tbody tr,.suspect').forEach(function(row){
+      row.style.display=row.textContent.toLowerCase().includes(q)?'':'none';
+    });
+  });
+});
+
+// Overview cards
+(function(){
+  var s=D.summary;
+  document.getElementById('hdr-title').textContent='Heap Report: '+s.fileName;
+  document.getElementById('hdr-meta').textContent=s.generatedAt+' · '+fmt(s.fileSize)+' · '+s.objectCount.toLocaleString()+' objects';
+  var cards=[
+    {label:'Objects',value:s.objectCount.toLocaleString()},
+    {label:'Total Shallow',value:fmt(s.totalShallowBytes)},
+    {label:'GC Roots',value:s.gcRootCount.toLocaleString()},
+    {label:'Classes',value:s.classCount.toLocaleString()},
+    {label:'File Size',value:fmt(s.fileSize)},
+    {label:'Format',value:s.hprofFormat}
+  ];
+  document.getElementById('summary-cards').innerHTML=cards.map(function(c){
+    return '<div class="card"><div class="card-label">'+c.label+'</div><div class="card-value">'+esc(c.value)+'</div></div>';
+  }).join('');
+})();
+
+// Pie chart (inline SVG)
+function renderPie(containerId,title,slices){
+  var COLORS=['#e94560','#0f3460','#533483','#16213e','#f5a623','#7ed321','#4a90e2','#d0021b','#417505','#9013fe'];
+  var total=slices.reduce(function(s,x){return s+x.bytes;},0);
+  if(!total)return;
+  var R=80,CX=90,CY=90,size=180,angle=-Math.PI/2,paths='';
+  slices.forEach(function(sl,i){
+    var a1=angle,a2=angle+sl.bytes/total*2*Math.PI;
+    var x1=CX+R*Math.cos(a1),y1=CY+R*Math.sin(a1);
+    var x2=CX+R*Math.cos(a2),y2=CY+R*Math.sin(a2);
+    paths+='<path d="M'+CX+','+CY+' L'+x1.toFixed(1)+','+y1.toFixed(1)+' A'+R+','+R+' 0 '+(sl.bytes/total>0.5?1:0)+',1 '+x2.toFixed(1)+','+y2.toFixed(1)+' Z" fill="'+COLORS[i%COLORS.length]+'" stroke="#fff" stroke-width="1"/>';
+    angle=a2;
+  });
+  var legend=slices.map(function(sl,i){
+    return '<div class="legend-item"><div class="legend-dot" style="background:'+COLORS[i%COLORS.length]+'"></div><span class="legend-label">'+esc(sl.label)+' ('+sl.pct.toFixed(1)+'%)</span></div>';
+  }).join('');
+  var el=document.getElementById(containerId);
+  if(el)el.innerHTML='<div class="chart-box"><h3>'+esc(title)+'</h3><svg width="'+size+'" height="'+size+'" viewBox="0 0 '+size+' '+size+'">'+paths+'</svg><div class="legend">'+legend+'</div></div>';
+}
+(function(){
+  var ch=document.getElementById('charts');
+  ch.innerHTML='<div id="pie-objects"></div><div id="pie-classes"></div>';
+  renderPie('pie-objects','Biggest Objects (Retained)',D.objectPieSlices);
+  renderPie('pie-classes','Biggest Classes (Retained)',D.classPieSlices);
+})();
+</script>
+</body>
+</html>
