@@ -24,7 +24,7 @@ import java.util.concurrent.Callable;
         mixinStandardHelpOptions = true,
         description = "Stream and redact HPROF heap dumps.",
         version = "0.3.0",
-        subcommands = {DiagnoseCommand.class}
+        subcommands = {DiagnoseCommand.class, ViewsCommand.class}
 )
 public class Main implements Callable<Integer> {
 
