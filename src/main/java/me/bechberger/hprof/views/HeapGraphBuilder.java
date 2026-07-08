@@ -300,7 +300,8 @@ public final class HeapGraphBuilder {
                     // Shallow size: header + ref-size * numElem (approx 16 byte header)
                     int shallowBytes = 16 + numElem * ids;
                     state.appendShallowSize(objId, shallowBytes);
-                    state.appendClassId(objId, elemClassId); // element class
+                    state.appendClassId(objId, elemClassId); // element class (used to synthesize array class)
+                    state.appendArrayType(objId, (byte) -1); // mark as object array
                 }
                 case HPROF_GC_PRIM_ARRAY_DUMP -> {
                     long objId = p.readId(); p.readU4(); int numElem = (int) p.readU4();
@@ -317,6 +318,7 @@ public final class HeapGraphBuilder {
                     state.appendShallowSize(objId, shallowBytes);
                     // mark as prim array with type
                     state.primArrayTypes.put(objId, (byte) elemType);
+                    state.appendArrayType(objId, (byte) elemType); // mark as primitive array
                 }
                 default -> throw new IOException("Unknown heap sub-record tag: 0x" + Integer.toHexString(subTag)
                         + " at remaining=" + remaining);
@@ -973,6 +975,7 @@ public final class HeapGraphBuilder {
         private long[] addrBuf;
         private int[] shallowBuf; // shallow size in bytes
         private long[] classIdBuf; // classId of each object
+        private byte[] arrayTypeBuf; // 0=not array, -1=obj array, >0=prim array elem type
         private int count;
 
         final Map<Integer, Long> classSerialToId = new HashMap<>();
@@ -985,6 +988,10 @@ public final class HeapGraphBuilder {
         final Map<Long, List<long[]>> classObjFields = new HashMap<>(); // classId → [[nameId,offset]]
         final Map<Long, Byte> primArrayTypes = new HashMap<>();
         final List<Long> classDumpIds = new ArrayList<>();   // all classId values from CLASS_DUMP records
+
+        // Synthesized array class maps (built in buildClassList second pass)
+        Map<Long, Integer> objArrayElemToClassIdx = new HashMap<>(); // elemClassId → synthetic class index
+        int[] primArrayClassIdx = new int[12]; // indexed by HPROF type code (0..11), 0=unset
 
         // GC roots (parallel arrays)
         private long[] gcRootAddrs;
@@ -1004,6 +1011,7 @@ public final class HeapGraphBuilder {
             addrBuf   = new long[est];
             shallowBuf = new int[est];
             classIdBuf = new long[est];
+            arrayTypeBuf = new byte[est];
             count = 0;
             gcRootAddrs = new long[1024];
             gcRootTypes = new byte[1024];
@@ -1015,6 +1023,7 @@ public final class HeapGraphBuilder {
                 addrBuf   = Arrays.copyOf(addrBuf, count * 2);
                 shallowBuf = Arrays.copyOf(shallowBuf, count * 2);
                 classIdBuf = Arrays.copyOf(classIdBuf, count * 2);
+                arrayTypeBuf = Arrays.copyOf(arrayTypeBuf, count * 2);
             }
             addrBuf[count++] = addr;
             idMap.append(addr);
@@ -1027,6 +1036,10 @@ public final class HeapGraphBuilder {
 
         void appendClassId(long addr, long classId) {
             if (count > 0 && addrBuf[count-1] == addr) classIdBuf[count-1] = classId;
+        }
+
+        void appendArrayType(long addr, byte type) {
+            if (count > 0 && addrBuf[count-1] == addr) arrayTypeBuf[count-1] = type;
         }
 
         void appendGCRoot(long addr, byte type) {
@@ -1097,19 +1110,61 @@ public final class HeapGraphBuilder {
                 graph.classSerialToIndex.put(serial, classIdx);
             }
 
+            // Second pass: synthesize array class records for obj arrays and prim arrays
+            for (int i = 0; i < count; i++) {
+                byte atype = arrayTypeBuf[i];
+                if (atype == 0) continue; // not an array
+                if (atype == (byte) -1) {
+                    // Object array: classIdBuf[i] = elemClassId
+                    long elemClassId = classIdBuf[i];
+                    if (!objArrayElemToClassIdx.containsKey(elemClassId)) {
+                        // Determine element class name
+                        Integer elemIdx = graph.classIdToIndex.get(elemClassId);
+                        String elemName = elemIdx != null ? graph.classList.get(elemIdx).name() : "java/lang/Object";
+                        String arrayName = "[L" + elemName + ";";
+                        int newClassIdx = graph.classList.size();
+                        graph.classList.add(new ClassRecord(0L, arrayName, 0L, 0L,
+                                0, 0, new short[0], new int[0]));
+                        objArrayElemToClassIdx.put(elemClassId, newClassIdx);
+                    }
+                } else {
+                    // Primitive array: atype = HPROF type code
+                    int typeCode = atype & 0xFF;
+                    if (typeCode < primArrayClassIdx.length && primArrayClassIdx[typeCode] == 0) {
+                        String arrayName = switch (typeCode) {
+                            case HPROF_TYPE_BOOLEAN -> "boolean[]";
+                            case HPROF_TYPE_CHAR    -> "char[]";
+                            case HPROF_TYPE_FLOAT   -> "float[]";
+                            case HPROF_TYPE_DOUBLE  -> "double[]";
+                            case HPROF_TYPE_BYTE    -> "byte[]";
+                            case HPROF_TYPE_SHORT   -> "short[]";
+                            case HPROF_TYPE_INT     -> "int[]";
+                            case HPROF_TYPE_LONG    -> "long[]";
+                            default                 -> "array[" + typeCode + "]";
+                        };
+                        int newClassIdx = graph.classList.size();
+                        graph.classList.add(new ClassRecord(0L, arrayName, 0L, 0L,
+                                0, 0, new short[0], new int[0]));
+                        primArrayClassIdx[typeCode] = newClassIdx;
+                    }
+                }
+            }
+
             // Fill shallowSizeDiv8 and classIndex for all objects
             for (int i = 0; i < count; i++) {
                 int objIdx = objectIndex(idMap, addrBuf[i]);
                 if (objIdx < 0) continue;
                 // Shallow size
                 long cid = classIdBuf[i];
-                // For instance objects (cid != 0), prefer the instanceSize from CLASS_DUMP
-                // over the approximation stored in shallowBuf (dataLen + header).
+                byte atype = arrayTypeBuf[i];
                 int bytes = shallowBuf[i];
-                if (cid != 0) {
+                if (atype == 0 && cid != 0) {
+                    // For non-array instance objects, prefer the instanceSize from CLASS_DUMP
+                    // over the approximation stored in shallowBuf (dataLen + header).
                     Integer exactSize = classInstanceSizes.get(cid);
                     if (exactSize != null && exactSize > 0) bytes = exactSize;
                 }
+                // For arrays, shallowBuf already holds the correct shallow size from the array dump
                 if (bytes > 0) {
                     int div8 = bytes / 8;
                     if (div8 > 0 && div8 <= 255) {
@@ -1119,8 +1174,20 @@ public final class HeapGraphBuilder {
                         graph.overflowSizes.put(objIdx, bytes);
                     }
                 }
-                // Class index
-                Integer cidx = graph.classIdToIndex.get(cid);
+                // Class index: use synthesized array class for arrays
+                Integer cidx;
+                if (atype == (byte) -1) {
+                    // Object array: use objArrayElemToClassIdx
+                    cidx = objArrayElemToClassIdx.get(cid);
+                } else if (atype != 0) {
+                    // Primitive array: use primArrayClassIdx
+                    int typeCode = atype & 0xFF;
+                    cidx = (typeCode < primArrayClassIdx.length && primArrayClassIdx[typeCode] != 0)
+                            ? primArrayClassIdx[typeCode] : null;
+                } else {
+                    // Regular object or class dump
+                    cidx = graph.classIdToIndex.get(cid);
+                }
                 if (cidx != null && cidx <= Short.MAX_VALUE) {
                     graph.classIndex[objIdx] = (short)(int)cidx;
                 }
