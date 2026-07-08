@@ -68,6 +68,10 @@ public final class HeapGraph {
     int[] retainedSize;              // unsigned int per obj; query via retainedSizeOf()
     LongLongMap retainedSizeOverflow;// objectId → long for objects whose retained > 4.29 GB
 
+    // ---- Unreachable object stats (computed after domtree) ----
+    int unreachableCount;
+    long unreachableShallowBytes;
+
     // ---- Class table ----
     final List<ClassRecord> classList;
     final Map<Long, Integer> classIdToIndex;    // classId → index in classList
@@ -99,6 +103,9 @@ public final class HeapGraph {
     // ---- Exclude pairs (resolved at build time) ----
     /** 3 default exclude (classIndex, fieldNameInternIdx) pairs. Filled by HeapGraphBuilder. */
     short[][] excludePairs;          // [3][2]: {classIdx, fieldNameIdx}
+
+    // ---- Stack trace data (populated only when --stack-traces is passed) ----
+    StackTraceData stackTraces;   // null unless StackTraceReader.read() was called
 
     HeapGraph(Path sourcePath, int idSize, long fileSize, String hprofFormat, IdMap idMap) {
         this.sourcePath = sourcePath;
@@ -207,6 +214,17 @@ public final class HeapGraph {
     int[] fwdOffsets;
     int[] fwdTargets;
     int totalEdges; // total inbound edges (for Phase B allocation)
+
+    void computeUnreachableStats() {
+        unreachableCount = 0;
+        unreachableShallowBytes = 0L;
+        for (int i = 1; i < N; i++) {
+            if (idom[i] == UNDEFINED) {
+                unreachableCount++;
+                unreachableShallowBytes += shallowSizeOf(i);
+            }
+        }
+    }
 
     void freeRpoPos()   { rpoPos   = null; }
     void freeRpoOrder() { rpoOrder = null; }
