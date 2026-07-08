@@ -59,13 +59,36 @@ final class SystemOverviewReport {
         long[] shallowTotal  = new long[classCount];
         long[] retainedTotal = new long[classCount];
 
-        for (int i = 1; i < graph.N; i++) {
-            if (graph.idom[i] == HeapGraph.UNDEFINED) continue; // skip unreachable objects
+        int N = graph.N;
+        int[] idom = graph.idom;
+
+        // Count instances and shallow sizes per class
+        for (int i = 1; i < N; i++) {
+            if (idom[i] == HeapGraph.UNDEFINED) continue; // skip unreachable objects
             short ci = graph.classIndex[i];
             if (ci < 0 || ci >= classCount) continue;
             instanceCount[ci]++;
             shallowTotal[ci]  += graph.shallowSizeOf(i);
-            retainedTotal[ci] += graph.retainedSizeOf(i);
+        }
+
+        // Group-retained: for each reachable node v, attribute shallowSize[v] to
+        // classOf(idom[v]) if idom[v] is a real object, else to v's own class.
+        // This counts each byte exactly once, avoiding the O(N^2) double-counting
+        // that occurs when summing per-object retained for linked-list classes.
+        for (int i = 1; i < N; i++) {
+            if (idom[i] == HeapGraph.UNDEFINED) continue; // unreachable
+            int parent = idom[i];
+            long shallow = graph.shallowSizeOf(i);
+            if (parent == HeapGraph.VIRTUAL_ROOT || parent == HeapGraph.UNDEFINED) {
+                // Attribute to own class (directly reachable from roots)
+                short ci = graph.classIndex[i];
+                if (ci >= 0 && ci < classCount) retainedTotal[ci] += shallow;
+            } else {
+                // Attribute to parent's class
+                short parentCi = graph.classIndex[parent];
+                int parentClass = parentCi & 0xFFFF;
+                if (parentClass < classCount) retainedTotal[parentClass] += shallow;
+            }
         }
 
         // sort by retained desc

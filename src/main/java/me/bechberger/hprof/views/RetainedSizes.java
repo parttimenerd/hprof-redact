@@ -34,6 +34,7 @@ final class RetainedSizes {
         // Accumulate in reverse RPO order: skip virtual root (rpoOrder[0])
         for (int rpoIdx = N - 1; rpoIdx >= 1; rpoIdx--) {
             int v = rpoOrder[rpoIdx];
+            if (v == 0) continue; // zero-tail guard: skip virtual root if it appears
             if (idom[v] == HeapGraph.UNDEFINED) continue; // unreachable node
             int parent = idom[v];
             if (parent == v) continue; // virtual root self-loop
