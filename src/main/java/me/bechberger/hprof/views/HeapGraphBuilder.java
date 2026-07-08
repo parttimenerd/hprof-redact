@@ -196,11 +196,35 @@ public final class HeapGraphBuilder {
             }
             state.buildTraceFrames(graph);
 
+            // Build synthetic thread→local edges from frame/stack roots
+            graph.syntheticThreadEdges = buildSyntheticEdges(state, graph, idMap);
+
             // Resolve exclude pairs
             resolveExcludePairs(graph);
 
             return graph;
         }
+    }
+
+    private static Map<Integer, int[]> buildSyntheticEdges(A1State state, HeapGraph graph, IdMap idMap) {
+        Map<Integer, int[]> result = new HashMap<>();
+        for (Map.Entry<Integer, List<Long>> entry : state.threadLocalsBySerial.entrySet()) {
+            int threadSerial = entry.getKey();
+            Long threadObjId = graph.threadSerialToObjectId.get(threadSerial);
+            if (threadObjId == null) continue;
+            int threadIdx = idMap.indexOf(threadObjId);
+            if (threadIdx < 0) continue;
+            int threadIdxAdjusted = threadIdx + 1; // +1 for virtual root offset
+            List<Long> localIds = entry.getValue();
+            int[] localIdxArr = new int[localIds.size()];
+            int count = 0;
+            for (Long localId : localIds) {
+                int localIdx = idMap.indexOf(localId);
+                if (localIdx >= 0) localIdxArr[count++] = localIdx + 1; // +1 for virtual root offset
+            }
+            if (count > 0) result.put(threadIdxAdjusted, java.util.Arrays.copyOf(localIdxArr, count));
+        }
+        return result;
     }
 
     private void scanHeapSegmentA1(Parser p, int segLength, HeapGraph graph, A1State state) throws IOException {
@@ -219,15 +243,27 @@ public final class HeapGraphBuilder {
                     state.appendAddress(id);
                     state.appendGCRoot(id, (byte) subTag);
                 }
-                case HPROF_GC_ROOT_JNI_LOCAL, HPROF_GC_ROOT_JAVA_FRAME, HPROF_GC_ROOT_THREAD_OBJ -> {
+                case HPROF_GC_ROOT_THREAD_OBJ -> {
                     long id = p.readId(); p.skipFully(4 + 4); remaining -= ids + 8;
                     state.appendAddress(id);
-                    state.appendGCRoot(id, (byte) subTag);
+                    state.appendGCRoot(id, (byte) subTag);  // Thread object IS a GC root
+                }
+                case HPROF_GC_ROOT_JNI_LOCAL, HPROF_GC_ROOT_JAVA_FRAME -> {
+                    long localId = p.readId();
+                    int threadSerial = (int) p.readU4();
+                    p.skipFully(4); // frameNumber
+                    remaining -= ids + 8;
+                    state.appendAddress(localId);  // still needs to be in IdMap
+                    // NOT a GC root — will be synthetic edge from thread to local
+                    state.threadLocalsBySerial.computeIfAbsent(threadSerial, k -> new ArrayList<>()).add(localId);
                 }
                 case HPROF_GC_ROOT_NATIVE_STACK, HPROF_GC_ROOT_THREAD_BLOCK -> {
-                    long id = p.readId(); p.skipFully(4); remaining -= ids + 4;
-                    state.appendAddress(id);
-                    state.appendGCRoot(id, (byte) subTag);
+                    long localId = p.readId();
+                    int threadSerial = (int) p.readU4();
+                    remaining -= ids + 4;
+                    state.appendAddress(localId);  // still needs to be in IdMap
+                    // NOT a GC root — will be synthetic edge from thread to local
+                    state.threadLocalsBySerial.computeIfAbsent(threadSerial, k -> new ArrayList<>()).add(localId);
                 }
                 case HPROF_GC_CLASS_DUMP -> {
                     int consumed = scanClassDumpA1(p, graph, state, ids);
@@ -365,6 +401,19 @@ public final class HeapGraphBuilder {
                 inDegreeCount[dstIdx]++;
             });
         }
+        // Count synthetic thread→local edges
+        if (graph.syntheticThreadEdges != null) {
+            for (Map.Entry<Integer, int[]> e : graph.syntheticThreadEdges.entrySet()) {
+                int threadIdx = e.getKey();
+                if (threadIdx < N) {
+                    int[] locals = e.getValue();
+                    outDegree[threadIdx] += locals.length;
+                    for (int localIdx : locals) {
+                        if (localIdx < N) inDegreeCount[localIdx]++;
+                    }
+                }
+            }
+        }
 
         // Prefix-sum outDegree → fwdOffsets (for fwdTargets allocation)
         int totalEdges = 0;
@@ -394,11 +443,24 @@ public final class HeapGraphBuilder {
                 fwdTargetsFinal[fwdCursorFinal[srcIdx]++] = dstIdx;
             });
         }
+        // Fill synthetic thread→local edges into forward CSR
+        if (graph.syntheticThreadEdges != null) {
+            for (Map.Entry<Integer, int[]> e : graph.syntheticThreadEdges.entrySet()) {
+                int threadIdx = e.getKey();
+                if (threadIdx < N) {
+                    int[] locals = e.getValue();
+                    for (int localIdx : locals) {
+                        if (localIdx < N) fwdTargetsFinal[fwdCursorFinal[threadIdx]++] = localIdx;
+                    }
+                }
+            }
+        }
 
         // Store forward CSR for RPO DFS; store totalEdges for Phase B pre-allocation
         graph.fwdOffsets = fwdOffsets;
         graph.fwdTargets = fwdTargets;
         graph.totalEdges = ibTotal;
+        // Note: graph.syntheticThreadEdges is kept alive for Phase B (inbound CSR)
     }
 
     @FunctionalInterface
@@ -538,6 +600,14 @@ public final class HeapGraphBuilder {
         try (Parser p = openParser()) {
             scanEdges(p, graph, (src, dst, nameId) -> inDegree[dst]++);
         }
+        // Also count synthetic thread→local edges for inbound
+        if (graph.syntheticThreadEdges != null) {
+            for (Map.Entry<Integer, int[]> e : graph.syntheticThreadEdges.entrySet()) {
+                for (int localIdx : e.getValue()) {
+                    if (localIdx < N) inDegree[localIdx]++;
+                }
+            }
+        }
         int total = 0;
         for (int i = 0; i < N; i++) { inboundOffsets[i] = total; total += inDegree[i]; }
         inboundOffsets[N] = total;
@@ -557,6 +627,21 @@ public final class HeapGraphBuilder {
                 inDegree[dstIdx]++;
             });
         }
+        // Fill synthetic thread→local edges into inbound CSR (not excluded)
+        if (graph.syntheticThreadEdges != null) {
+            for (Map.Entry<Integer, int[]> e : graph.syntheticThreadEdges.entrySet()) {
+                int threadIdx = e.getKey();
+                for (int localIdx : e.getValue()) {
+                    if (localIdx < N) {
+                        int pos = inDegree[localIdx];
+                        inboundTargets[pos] = threadIdx; // not excluded
+                        inDegree[localIdx]++;
+                    }
+                }
+            }
+        }
+        // Free synthetic edges — no longer needed
+        graph.syntheticThreadEdges = null;
 
         // VByte encode (inboundOffsets is already the correct prefix sum)
         CsrBuilderEncoder encoder = new CsrBuilderEncoder(graph, inboundTargets, inboundOffsets, N);
@@ -785,6 +870,9 @@ public final class HeapGraphBuilder {
         private long[] gcRootAddrs;
         private byte[] gcRootTypes;
         private int gcRootCount;
+
+        // threadSerial → packed list of local object addresses (for synthetic thread→local edges)
+        final Map<Integer, List<Long>> threadLocalsBySerial = new HashMap<>();
 
         // Frames and traces
         final Map<Long, Long> frames = new HashMap<>();    // frameId → methodNameId

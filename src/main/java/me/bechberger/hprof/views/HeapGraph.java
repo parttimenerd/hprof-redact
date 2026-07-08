@@ -107,6 +107,11 @@ public final class HeapGraph {
     // ---- Stack trace data (populated only when --stack-traces is passed) ----
     StackTraceData stackTraces;   // null unless StackTraceReader.read() was called
 
+    // ---- Synthetic thread→local edges (built in phase A.1, consumed in A.2, then freed) ----
+    /** threadIdx (1-based) → int[] of localIdx values (synthetic edges from thread→local for frame/stack roots).
+     *  Nulled after forward CSR is built. */
+    Map<Integer, int[]> syntheticThreadEdges;  // null after edge CSR is built
+
     HeapGraph(Path sourcePath, int idSize, long fileSize, String hprofFormat, IdMap idMap) {
         this.sourcePath = sourcePath;
         this.idSize = idSize;
