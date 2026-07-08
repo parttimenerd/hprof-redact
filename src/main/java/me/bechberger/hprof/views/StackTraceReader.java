@@ -14,7 +14,7 @@ import static me.bechberger.hprof.HprofConstants.*;
  * and correlates JAVA_FRAME/JNI_LOCAL roots to their owning thread objects.
  * Only instantiated when --stack-traces is passed.
  */
-final class StackTraceReader {
+public final class StackTraceReader {
 
     private StackTraceReader() {}
 
@@ -23,7 +23,7 @@ final class StackTraceReader {
      * Populates graph.stackTraces.
      * graph.idMap must already be sorted (post-build).
      */
-    static void read(HeapGraph graph) throws IOException {
+    public static void read(HeapGraph graph) throws IOException {
         Map<Long, String>         utf8Map     = new LinkedHashMap<>();
         Map<Long, StackTraceData.Frame>   frames  = new LinkedHashMap<>();
         Map<Integer, StackTraceData.Trace> traces  = new LinkedHashMap<>();
