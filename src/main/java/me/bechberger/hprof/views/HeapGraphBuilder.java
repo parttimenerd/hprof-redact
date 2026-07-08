@@ -184,6 +184,8 @@ public final class HeapGraphBuilder {
 
             // Resolve GC roots to indices
             state.flushGCRoots(graph, idMap);
+            // Resolve class dump indices (implicit class roots for reachability)
+            state.flushClassDumpIndices(graph, idMap);
 
             // Build class list from gathered metadata
             state.buildClassList(graph, idMap);
@@ -333,6 +335,7 @@ public final class HeapGraphBuilder {
         int instanceSize = (int) p.readU4(); consumed += 4;
 
         state.appendAddress(classId);
+        state.classDumpIds.add(classId);   // track for implicit class roots
         state.classInstanceSizes.put(classId, instanceSize);
         state.classLoaderIds.put(classId, classLoaderId);
         state.classSuperIds.put(classId, superClassId);
@@ -506,9 +509,8 @@ public final class HeapGraphBuilder {
                     p.skipFully(ids + 4L); remaining -= ids + 4;
                 }
                 case HPROF_GC_CLASS_DUMP -> {
-                    // Skip class dump — classes don't have outbound ref edges in instance data
-                    int consumed = skipClassDump(p, ids);
-                    remaining -= consumed;
+                    // Emit edges from class object static OBJECT fields
+                    remaining -= scanClassDumpEdges(p, ids, idMap, graph, consumer);
                 }
                 case HPROF_GC_INSTANCE_DUMP -> {
                     long objId = p.readId(); p.readU4(); long classId = p.readId();
@@ -558,6 +560,117 @@ public final class HeapGraphBuilder {
                 default -> throw new IOException("Unknown heap sub-record tag: 0x" + Integer.toHexString(subTag));
             }
         }
+    }
+
+    /**
+     * Read a CLASS_DUMP record and emit edges: classObj→superClass, classObj→loader,
+     * classObj→staticObjectField for each OBJECT-type static field.
+     * Returns bytes consumed.
+     */
+    private int scanClassDumpEdges(Parser p, int ids, IdMap idMap, HeapGraph graph,
+                                    EdgeConsumer consumer) throws IOException {
+        int consumed = 0;
+        long classId = p.readId(); consumed += ids;
+        p.readU4(); consumed += 4; // stack serial
+        p.skipFully(ids * 2L); consumed += ids * 2; // superClass + classLoader (metadata, skip)
+        p.skipFully(ids * 4L); consumed += ids * 4; // signers, domain, reserved×2
+        p.readU4(); consumed += 4; // instance size
+
+        int srcIdx = objectIndex(idMap, classId);
+        // Note: we do NOT add classObj→superClass or classObj→loader edges.
+        // Those are metadata references that MAT does not include in the reference graph,
+        // and including them would cause O(N²) dominator-tree behavior due to many classes
+        // sharing the same superclass (java.lang.Object etc.).
+        // We only add edges to OBJECT-type static field values.
+
+        // constant pool - skip all
+        int cpCount = p.readU2(); consumed += 2;
+        for (int i = 0; i < cpCount; i++) {
+            p.readU2(); consumed += 2;
+            int type = p.readU1(); consumed++;
+            int sz = typeSize(type, ids);
+            p.skipFully(sz); consumed += sz;
+        }
+
+        // static fields - emit OBJECT-type as edges from class object to static value
+        int sfCount = p.readU2(); consumed += 2;
+        for (int i = 0; i < sfCount; i++) {
+            p.skipFully(ids); consumed += ids; // name id
+            int type = p.readU1(); consumed++;
+            int sz = typeSize(type, ids);
+            if (type == HPROF_TYPE_OBJECT && srcIdx >= 0) {
+                long refId = p.readId(); consumed += ids;
+                if (refId != 0) {
+                    int dstIdx = objectIndex(idMap, refId);
+                    if (dstIdx >= 0) consumer.accept(srcIdx, dstIdx, 0L);
+                }
+            } else {
+                p.skipFully(sz); consumed += sz;
+            }
+        }
+
+        // instance field definitions - skip (no values here)
+        int ifCount = p.readU2(); consumed += 2;
+        for (int i = 0; i < ifCount; i++) {
+            p.skipFully(ids + 1); consumed += ids + 1;
+        }
+        return consumed;
+    }
+
+    /**
+     * Read a CLASS_DUMP record and emit named edges (same as scanClassDumpEdges but
+     * using NamedEdgeConsumer for Phase B's named-edge scan).
+     * Only emits static OBJECT-type field edges; superclass/loader edges are excluded
+     * to avoid O(N²) dominator-tree behavior.
+     * Returns bytes consumed.
+     */
+    private int scanClassDumpNamedEdges(Parser p, int ids, IdMap idMap, HeapGraph graph,
+                                         NamedEdgeConsumer consumer) throws IOException {
+        int consumed = 0;
+        long classId = p.readId(); consumed += ids;
+        p.readU4(); consumed += 4; // stack serial
+        p.skipFully(ids * 2L); consumed += ids * 2; // superClass + classLoader (metadata, not heap refs)
+        p.skipFully(ids * 4L); consumed += ids * 4; // signers, domain, reserved×2
+        p.readU4(); consumed += 4; // instance size
+
+        int srcIdx = objectIndex(idMap, classId);
+        short srcClassIdx = 0;
+
+        // constant pool - skip all
+        int cpCount = p.readU2(); consumed += 2;
+        for (int i = 0; i < cpCount; i++) {
+            p.readU2(); consumed += 2;
+            int type = p.readU1(); consumed++;
+            int sz = typeSize(type, ids);
+            p.skipFully(sz); consumed += sz;
+        }
+
+        // static fields - emit OBJECT-type as named edges from class object to static value
+        int sfCount = p.readU2(); consumed += 2;
+        for (int i = 0; i < sfCount; i++) {
+            long nameId = p.readId(); consumed += ids;
+            int type = p.readU1(); consumed++;
+            int sz = typeSize(type, ids);
+            if (type == HPROF_TYPE_OBJECT && srcIdx >= 0) {
+                long refId = p.readId(); consumed += ids;
+                if (refId != 0) {
+                    int dstIdx = objectIndex(idMap, refId);
+                    if (dstIdx >= 0) {
+                        short nameIdx = graph.internFieldName(nameId);
+                        consumer.accept(srcIdx, dstIdx, nameIdx, srcClassIdx);
+                    }
+                }
+            } else {
+                p.skipFully(sz); consumed += sz;
+            }
+        }
+
+        // instance field definitions - skip (no values here)
+        int ifCount = p.readU2(); consumed += 2;
+        for (int i = 0; i < ifCount; i++) {
+            p.skipFully(ids + 1); consumed += ids + 1;
+        }
+        return consumed;
     }
 
     private int skipClassDump(Parser p, int ids) throws IOException {
@@ -692,7 +805,8 @@ public final class HeapGraphBuilder {
                     p.skipFully(ids + 4L); remaining -= ids + 4;
                 }
                 case HPROF_GC_CLASS_DUMP -> {
-                    remaining -= skipClassDump(p, ids);
+                    // Emit named edges from class object static OBJECT fields
+                    remaining -= scanClassDumpNamedEdges(p, ids, idMap, graph, consumer);
                 }
                 case HPROF_GC_INSTANCE_DUMP -> {
                     long objId = p.readId(); p.readU4(); long classId = p.readId();
@@ -870,6 +984,7 @@ public final class HeapGraphBuilder {
         final Map<Long, Integer> classSerialByClassId = new HashMap<>();
         final Map<Long, List<long[]>> classObjFields = new HashMap<>(); // classId → [[nameId,offset]]
         final Map<Long, Byte> primArrayTypes = new HashMap<>();
+        final List<Long> classDumpIds = new ArrayList<>();   // all classId values from CLASS_DUMP records
 
         // GC roots (parallel arrays)
         private long[] gcRootAddrs;
@@ -945,6 +1060,14 @@ public final class HeapGraphBuilder {
             graph.trimRoots();
         }
 
+        void flushClassDumpIndices(HeapGraph graph, IdMap idMap) {
+            for (Long classId : classDumpIds) {
+                int idx = objectIndex(idMap, classId);
+                if (idx >= 0) graph.addClassDumpIndex(idx);
+            }
+            graph.trimClassDumpIndices();
+        }
+
         void buildClassList(HeapGraph graph, IdMap idMap) {
             // Build ClassRecord for each class
             for (Map.Entry<Long, Integer> e : classSerialByClassId.entrySet()) {
@@ -977,7 +1100,14 @@ public final class HeapGraphBuilder {
                 int objIdx = objectIndex(idMap, addrBuf[i]);
                 if (objIdx < 0) continue;
                 // Shallow size
+                long cid = classIdBuf[i];
+                // For instance objects (cid != 0), prefer the instanceSize from CLASS_DUMP
+                // over the approximation stored in shallowBuf (dataLen + header).
                 int bytes = shallowBuf[i];
+                if (cid != 0) {
+                    Integer exactSize = classInstanceSizes.get(cid);
+                    if (exactSize != null && exactSize > 0) bytes = exactSize;
+                }
                 if (bytes > 0) {
                     int div8 = bytes / 8;
                     if (div8 > 0 && div8 <= 255) {
@@ -988,7 +1118,6 @@ public final class HeapGraphBuilder {
                     }
                 }
                 // Class index
-                long cid = classIdBuf[i];
                 Integer cidx = graph.classIdToIndex.get(cid);
                 if (cidx != null && cidx <= Short.MAX_VALUE) {
                     graph.classIndex[objIdx] = (short)(int)cidx;

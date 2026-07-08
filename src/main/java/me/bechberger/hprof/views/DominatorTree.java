@@ -32,6 +32,10 @@ final class DominatorTree {
         for (int i = 0; i < graph.gcRootCount; i++) {
             idom[graph.gcRootIds[i]] = HeapGraph.VIRTUAL_ROOT;
         }
+        // Initialise idom for class dump objects (implicit roots, not counted in gcRootCount)
+        for (int i = 0; i < graph.classDumpCount; i++) {
+            idom[graph.classDumpIndices[i]] = HeapGraph.VIRTUAL_ROOT;
+        }
 
         boolean changed = true;
         int iter = 0;
@@ -40,6 +44,7 @@ final class DominatorTree {
             iter++;
             if (iter > N + 10) {
                 // CHK must converge in at most N passes for a correct RPO ordering
+                System.err.println("  [DOM] WARNING: no convergence after " + iter + " iterations!");
                 break;
             }
             // Iterate in RPO order, skipping virtual root (index 0 = rpoOrder[0])
@@ -59,6 +64,7 @@ final class DominatorTree {
 
         graph.idom = idom;
         graph.freeRpoPos(); // rpoPos no longer needed after CHK
+        System.err.println("  [DOM] " + iter + " iterations, N=" + N);
     }
 
     /** Walk inbound predecessors of b and compute the new immediate dominator. */

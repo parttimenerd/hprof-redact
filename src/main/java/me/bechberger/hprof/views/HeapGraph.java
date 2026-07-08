@@ -68,6 +68,13 @@ public final class HeapGraph {
     int[] retainedSize;              // unsigned int per obj; query via retainedSizeOf()
     LongLongMap retainedSizeOverflow;// objectId → long for objects whose retained > 4.29 GB
 
+    // ---- Class object indices (populated in Phase A.1, used in RPO/DomTree) ----
+    /** All object indices that appear in HPROF_GC_CLASS_DUMP records (1-based).
+     *  Treated as virtual-root-adjacent (like GC roots) for reachability, but
+     *  NOT counted in gcRootCount (display only shows "real" GC roots). */
+    int[] classDumpIndices;
+    int classDumpCount;
+
     // ---- Unreachable object stats (computed after domtree) ----
     int unreachableCount;
     long unreachableShallowBytes;
@@ -137,6 +144,8 @@ public final class HeapGraph {
         this.gcRootIds = new int[1024];
         this.gcRootTypes = new byte[1024];
         this.gcRootCount = 0;
+        this.classDumpIndices = new int[4096];
+        this.classDumpCount = 0;
     }
 
     /** Intern a field nameId, returning a short index (0 = no-name). */
@@ -175,6 +184,19 @@ public final class HeapGraph {
     void trimRoots() {
         gcRootIds  = Arrays.copyOf(gcRootIds, gcRootCount);
         gcRootTypes = Arrays.copyOf(gcRootTypes, gcRootCount);
+    }
+
+    /** Record a class object index as being in a CLASS_DUMP record (for implicit reachability). */
+    void addClassDumpIndex(int objIdx) {
+        if (classDumpCount == classDumpIndices.length) {
+            classDumpIndices = Arrays.copyOf(classDumpIndices, classDumpCount * 2);
+        }
+        classDumpIndices[classDumpCount++] = objIdx;
+    }
+
+    /** Trim classDumpIndices to actual count. */
+    void trimClassDumpIndices() {
+        classDumpIndices = Arrays.copyOf(classDumpIndices, classDumpCount);
     }
 
     /** Shallow size in bytes for object at index idx. */
