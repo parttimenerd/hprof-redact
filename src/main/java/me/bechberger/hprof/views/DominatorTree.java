@@ -5,6 +5,7 @@
 package me.bechberger.hprof.views;
 
 import java.util.Arrays;
+import java.util.BitSet;
 
 /**
  * Cooper-Harvey-Kennedy (2001) dominator-tree algorithm.
@@ -28,13 +29,20 @@ final class DominatorTree {
         Arrays.fill(idom, HeapGraph.UNDEFINED);
         idom[HeapGraph.VIRTUAL_ROOT] = HeapGraph.VIRTUAL_ROOT;
 
-        // Initialise idom for all direct GC roots to virtual root
+        // Virtual-root-adjacent set: nodes with an implicit VIRTUAL_ROOT predecessor
+        // (GC roots + class-dump objects). These must never be overwritten to a non-root
+        // dominator by CHK — the implicit edge from VIRTUAL_ROOT forces intersect() to
+        // resolve to VIRTUAL_ROOT when any other predecessor is present.
+        BitSet vrAdjacent = new BitSet(N);
         for (int i = 0; i < graph.gcRootCount; i++) {
-            idom[graph.gcRootIds[i]] = HeapGraph.VIRTUAL_ROOT;
+            int idx = graph.gcRootIds[i];
+            vrAdjacent.set(idx);
+            idom[idx] = HeapGraph.VIRTUAL_ROOT;
         }
-        // Initialise idom for class dump objects (implicit roots, not counted in gcRootCount)
         for (int i = 0; i < graph.classDumpCount; i++) {
-            idom[graph.classDumpIndices[i]] = HeapGraph.VIRTUAL_ROOT;
+            int idx = graph.classDumpIndices[i];
+            vrAdjacent.set(idx);
+            idom[idx] = HeapGraph.VIRTUAL_ROOT;
         }
 
         boolean changed = true;
@@ -50,7 +58,8 @@ final class DominatorTree {
             // Iterate in RPO order, skipping virtual root (index 0 = rpoOrder[0])
             for (int rpoIdx = 1; rpoIdx < N; rpoIdx++) {
                 int b = rpoOrder[rpoIdx];
-                int newIdom = HeapGraph.UNDEFINED;
+                // Seed with VIRTUAL_ROOT for GC roots + class-dump objects (implicit predecessor)
+                int newIdom = vrAdjacent.get(b) ? HeapGraph.VIRTUAL_ROOT : HeapGraph.UNDEFINED;
 
                 // Iterate predecessors of b from inbound CSR
                 newIdom = computeNewIdom(b, graph, idom, rpoPos, newIdom);
@@ -64,7 +73,6 @@ final class DominatorTree {
 
         graph.idom = idom;
         graph.freeRpoPos(); // rpoPos no longer needed after CHK
-        System.err.println("  [DOM] " + iter + " iterations, N=" + N);
     }
 
     /** Walk inbound predecessors of b and compute the new immediate dominator. */

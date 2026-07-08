@@ -193,6 +193,16 @@ public final class HeapGraphBuilder {
             // Build class list from gathered metadata
             state.buildClassList(graph, idMap);
 
+            // Resolve inherited object-field offsets: for each class, concatenate its
+            // own object fields with those of its superclasses at the correct offsets.
+            // This is essential because HPROF INSTANCE_DUMP data contains subclass fields
+            // first, then super's fields, etc. Missing this = huge unreachable count.
+            resolveInheritedFieldOffsets(graph);
+
+            // MAT parity: SYSTEM_CLASS root fallback. If no STICKY_CLASS roots were emitted,
+            // treat all non-array boot-loader classes as roots (classLoader == 0).
+            addSystemClassRootsIfMissing(graph, idMap);
+
             // Link thread serial → object index; trace frames
             state.threadSerialToObjId.forEachKeyValue((threadSerial, objId) -> {
                 int idx = idMap.indexOf(objId);
@@ -210,24 +220,112 @@ public final class HeapGraphBuilder {
         }
     }
 
-    private static Map<Integer, int[]> buildSyntheticEdges(A1State state, HeapGraph graph, IdMap idMap) {
-        Map<Integer, int[]> result = new HashMap<>();
+    /**
+     * MAT parity: expand each class's object-field offsets to include inherited fields.
+     * HPROF instance data layout is subclass-first, then super's fields, etc. Without
+     * walking the hierarchy, we miss all inherited OBJECT-typed fields and their target
+     * objects become unreachable. Replaces each ClassRecord in graph.classList with a
+     * new record whose {@code objectFieldOffsets} covers the full hierarchy.
+     */
+    private static void resolveInheritedFieldOffsets(HeapGraph graph) {
+        int n = graph.classList.size();
+        for (int ci = 0; ci < n; ci++) {
+            ClassRecord cr = graph.classList.get(ci);
+            if (cr.classId() == 0L) continue; // synthesized array class, no instance fields
+            // Walk the class hierarchy: subclass fields first, then super, super-super, ...
+            java.util.List<short[]> nameChunks = new java.util.ArrayList<>();
+            java.util.List<int[]> offsetChunks = new java.util.ArrayList<>();
+            int baseOffset = 0;
+            ClassRecord cur = cr;
+            int guard = 0;
+            while (cur != null && guard++ < 256) {
+                short[] names = cur.objectFieldNameIds();
+                int[]   offs  = cur.objectFieldOffsets();
+                if (names.length > 0) {
+                    int[] adj = new int[offs.length];
+                    for (int k = 0; k < offs.length; k++) adj[k] = offs[k] + baseOffset;
+                    nameChunks.add(names);
+                    offsetChunks.add(adj);
+                }
+                baseOffset += cur.ownFieldsSize();
+                if (cur.superClassId() == 0L) break;
+                int superIdx = graph.classIdToIndex.getIfAbsent(cur.superClassId(), -1);
+                if (superIdx < 0) break;
+                cur = graph.classList.get(superIdx);
+            }
+            int total = 0;
+            for (short[] a : nameChunks) total += a.length;
+            if (total == cr.objectFieldNameIds().length) continue; // no inheritance to add
+            short[] fullNames = new short[total];
+            int[]   fullOffs  = new int[total];
+            int pos = 0;
+            for (int k = 0; k < nameChunks.size(); k++) {
+                short[] n2 = nameChunks.get(k);
+                int[]   o2 = offsetChunks.get(k);
+                System.arraycopy(n2, 0, fullNames, pos, n2.length);
+                System.arraycopy(o2, 0, fullOffs,  pos, o2.length);
+                pos += n2.length;
+            }
+            graph.classList.set(ci, new ClassRecord(cr.classId(), cr.name(), cr.classLoaderId(),
+                    cr.superClassId(), cr.instanceSize(), cr.classSerialNumber(),
+                    fullNames, fullOffs, cr.ownFieldsSize()));
+        }
+    }
+
+    /**
+     * MAT parity fallback: if the HPROF dump contains no HPROF_GC_ROOT_STICKY_CLASS records,
+     * mark all non-array boot-loader (classLoader == 0) classes as STICKY_CLASS roots.
+     * This ensures reachability of module-system, invoke, and JAR-machinery objects that
+     * are otherwise only reachable via class constant pools of system classes.
+     */
+    private static void addSystemClassRootsIfMissing(HeapGraph graph, IdMap idMap) {
+        boolean foundSticky = false;
+        for (int i = 0; i < graph.gcRootCount; i++) {
+            if (graph.gcRootTypes[i] == HPROF_GC_ROOT_STICKY_CLASS) { foundSticky = true; break; }
+        }
+        if (foundSticky) return;
+        int added = 0;
+        // Iterate class list; array classes have classId==0 (synthetic) or name starts with '['
+        for (ClassRecord cr : graph.classList) {
+            if (cr.classId() == 0L) continue;              // synthesized array class
+            if (cr.classLoaderId() != 0L) continue;        // not boot loader
+            String name = cr.name();
+            if (name.length() > 0 && name.charAt(0) == '[') continue; // real array class
+            int idx = idMap.indexOf(cr.classId());
+            if (idx < 0) continue;
+            int adjusted = idx + 1;
+            if (graph.isGCRoot.get(adjusted)) continue;    // already a root
+            graph.addGCRoot(adjusted, (byte) HPROF_GC_ROOT_STICKY_CLASS);
+            added++;
+        }
+        if (added > 0) {
+            graph.trimRoots();
+            System.err.println("  [SYSCLASS] added " + added + " boot-loader classes as STICKY_CLASS roots");
+        }
+    }
+
+    private static Map<Integer, int[]> buildSyntheticEdges(A1State state, HeapGraph graph, IdMap idMap) {        Map<Integer, int[]> result = new HashMap<>();
+        int totalLocals = 0, mappedLocals = 0, threadsWithEdges = 0, threadsSkipped = 0;
         for (Map.Entry<Integer, List<Long>> entry : state.threadLocalsBySerial.entrySet()) {
             int threadSerial = entry.getKey();
             long threadObjId = graph.threadSerialToObjectId.getIfAbsent(threadSerial, 0L);
-            if (threadObjId == 0L) continue;
+            if (threadObjId == 0L) { threadsSkipped++; totalLocals += entry.getValue().size(); continue; }
             int threadIdx = idMap.indexOf(threadObjId);
-            if (threadIdx < 0) continue;
+            if (threadIdx < 0) { threadsSkipped++; totalLocals += entry.getValue().size(); continue; }
             int threadIdxAdjusted = threadIdx + 1; // +1 for virtual root offset
             List<Long> localIds = entry.getValue();
+            totalLocals += localIds.size();
             int[] localIdxArr = new int[localIds.size()];
             int count = 0;
             for (Long localId : localIds) {
                 int localIdx = idMap.indexOf(localId);
-                if (localIdx >= 0) localIdxArr[count++] = localIdx + 1; // +1 for virtual root offset
+                if (localIdx >= 0) { localIdxArr[count++] = localIdx + 1; mappedLocals++; }
             }
-            if (count > 0) result.put(threadIdxAdjusted, java.util.Arrays.copyOf(localIdxArr, count));
+            if (count > 0) { result.put(threadIdxAdjusted, java.util.Arrays.copyOf(localIdxArr, count)); threadsWithEdges++; }
         }
+        System.err.println("  [SYN] threads=" + state.threadLocalsBySerial.size()
+                + " withEdges=" + threadsWithEdges + " skipped=" + threadsSkipped
+                + " locals=" + totalLocals + " mapped=" + mappedLocals);
         return result;
     }
 
@@ -361,7 +459,7 @@ public final class HeapGraphBuilder {
             p.skipFully(valSize); consumed += valSize;
         }
 
-        // Instance fields — collect OBJECT-type fields
+        // Instance fields — collect OBJECT-type fields, and total own-fields size
         int ifCount = p.readU2(); consumed += 2;
         List<long[]> objFields = new ArrayList<>(); // [nameId, offset]
         int offset = 0;
@@ -374,6 +472,7 @@ public final class HeapGraphBuilder {
             offset += typeSize(type, ids);
         }
         state.classObjFields.put(classId, objFields);
+        state.classOwnFieldsSizes.put(classId, offset);
         // Approximate shallow size from instanceSize
         state.appendShallowSize(classId, instanceSize > 0 ? instanceSize : 16);
         return consumed;
@@ -520,6 +619,9 @@ public final class HeapGraphBuilder {
                     remaining -= ids + 4 + ids + 4;
                     int srcIdx = objectIndex(idMap, objId);
                     if (srcIdx < 0) { p.skipFully(dataLen); remaining -= dataLen; break; }
+                    // Emit <class> edge: instance → its class object (MAT-compatible)
+                    int classObjIdx = objectIndex(idMap, classId);
+                    if (classObjIdx >= 0) consumer.accept(srcIdx, classObjIdx, 0L);
                     // Emit edges for each OBJECT-type field
                     int classIdx = graph.classIdToIndex.getIfAbsent(classId, -1);
                     ClassRecord cr = classIdx >= 0 ? graph.classList.get(classIdx) : null;
@@ -540,9 +642,14 @@ public final class HeapGraphBuilder {
                 }
                 case HPROF_GC_OBJ_ARRAY_DUMP -> {
                     long objId = p.readId(); p.readU4(); int numElem = (int) p.readU4();
-                    p.skipFully(ids); // element class id
+                    long elemClassId = p.readId();
                     remaining -= ids + 4 + 4 + ids;
                     int srcIdx = objectIndex(idMap, objId);
+                    // Emit <class> edge: array → its element-class object (MAT-compatible)
+                    if (srcIdx >= 0 && elemClassId != 0) {
+                        int classObjIdx = objectIndex(idMap, elemClassId);
+                        if (classObjIdx >= 0) consumer.accept(srcIdx, classObjIdx, 0L);
+                    }
                     for (int i = 0; i < numElem; i++) {
                         long refId = p.readId(); remaining -= ids;
                         if (refId != 0 && srcIdx >= 0) {
@@ -574,24 +681,40 @@ public final class HeapGraphBuilder {
         int consumed = 0;
         long classId = p.readId(); consumed += ids;
         p.readU4(); consumed += 4; // stack serial
-        p.skipFully(ids * 2L); consumed += ids * 2; // superClass + classLoader (metadata, skip)
+        long superClassId = p.readId(); consumed += ids;
+        long classLoaderId = p.readId(); consumed += ids;
         p.skipFully(ids * 4L); consumed += ids * 4; // signers, domain, reserved×2
         p.readU4(); consumed += 4; // instance size
 
         int srcIdx = objectIndex(idMap, classId);
-        // Note: we do NOT add classObj→superClass or classObj→loader edges.
-        // Those are metadata references that MAT does not include in the reference graph,
-        // and including them would cause O(N²) dominator-tree behavior due to many classes
-        // sharing the same superclass (java.lang.Object etc.).
-        // We only add edges to OBJECT-type static field values.
+        // Emit classObj→superClass and classObj→classLoader edges for reachability.
+        if (srcIdx >= 0) {
+            if (superClassId != 0) {
+                int dstIdx = objectIndex(idMap, superClassId);
+                if (dstIdx >= 0) consumer.accept(srcIdx, dstIdx, 0L);
+            }
+            if (classLoaderId != 0) {
+                int dstIdx = objectIndex(idMap, classLoaderId);
+                if (dstIdx >= 0) consumer.accept(srcIdx, dstIdx, 0L);
+            }
+        }
 
-        // constant pool - skip all
+        // constant pool - emit OBJECT-type entries as edges (MAT-compatible: they hold
+        // MethodType/MemberName/String constants that would otherwise be unreachable)
         int cpCount = p.readU2(); consumed += 2;
         for (int i = 0; i < cpCount; i++) {
             p.readU2(); consumed += 2;
             int type = p.readU1(); consumed++;
             int sz = typeSize(type, ids);
-            p.skipFully(sz); consumed += sz;
+            if (type == HPROF_TYPE_OBJECT && srcIdx >= 0) {
+                long refId = p.readId(); consumed += ids;
+                if (refId != 0) {
+                    int dstIdx = objectIndex(idMap, refId);
+                    if (dstIdx >= 0) consumer.accept(srcIdx, dstIdx, 0L);
+                }
+            } else {
+                p.skipFully(sz); consumed += sz;
+            }
         }
 
         // static fields - emit OBJECT-type as edges from class object to static value
@@ -622,8 +745,7 @@ public final class HeapGraphBuilder {
     /**
      * Read a CLASS_DUMP record and emit named edges (same as scanClassDumpEdges but
      * using NamedEdgeConsumer for Phase B's named-edge scan).
-     * Only emits static OBJECT-type field edges; superclass/loader edges are excluded
-     * to avoid O(N²) dominator-tree behavior.
+     * Emits superClass, classLoader, and OBJECT-type static field edges.
      * Returns bytes consumed.
      */
     private int scanClassDumpNamedEdges(Parser p, int ids, IdMap idMap, HeapGraph graph,
@@ -631,20 +753,42 @@ public final class HeapGraphBuilder {
         int consumed = 0;
         long classId = p.readId(); consumed += ids;
         p.readU4(); consumed += 4; // stack serial
-        p.skipFully(ids * 2L); consumed += ids * 2; // superClass + classLoader (metadata, not heap refs)
+        long superClassId = p.readId(); consumed += ids;
+        long classLoaderId = p.readId(); consumed += ids;
         p.skipFully(ids * 4L); consumed += ids * 4; // signers, domain, reserved×2
         p.readU4(); consumed += 4; // instance size
 
         int srcIdx = objectIndex(idMap, classId);
         short srcClassIdx = 0;
 
-        // constant pool - skip all
+        // Emit classObj→superClass and classObj→classLoader edges (as excluded — don't affect retained)
+        if (srcIdx >= 0) {
+            if (superClassId != 0) {
+                int dstIdx = objectIndex(idMap, superClassId);
+                if (dstIdx >= 0) consumer.accept(srcIdx, dstIdx, Short.MIN_VALUE, (short) -1);
+            }
+            if (classLoaderId != 0) {
+                int dstIdx = objectIndex(idMap, classLoaderId);
+                if (dstIdx >= 0) consumer.accept(srcIdx, dstIdx, Short.MIN_VALUE, (short) -1);
+            }
+        }
+
+        // constant pool - emit OBJECT-type entries as edges (MAT-compatible: they hold
+        // MethodType/MemberName/String constants that would otherwise be unreachable)
         int cpCount = p.readU2(); consumed += 2;
         for (int i = 0; i < cpCount; i++) {
             p.readU2(); consumed += 2;
             int type = p.readU1(); consumed++;
             int sz = typeSize(type, ids);
-            p.skipFully(sz); consumed += sz;
+            if (type == HPROF_TYPE_OBJECT && srcIdx >= 0) {
+                long refId = p.readId(); consumed += ids;
+                if (refId != 0) {
+                    int dstIdx = objectIndex(idMap, refId);
+                    if (dstIdx >= 0) consumer.accept(srcIdx, dstIdx, Short.MIN_VALUE, srcClassIdx);
+                }
+            } else {
+                p.skipFully(sz); consumed += sz;
+            }
         }
 
         // static fields - emit OBJECT-type as named edges from class object to static value
@@ -818,18 +962,23 @@ public final class HeapGraphBuilder {
                     int classIdx = graph.classIdToIndex.getIfAbsent(classId, -1);
                     ClassRecord cr = classIdx >= 0 ? graph.classList.get(classIdx) : null;
                     byte[] data = p.readBytes(dataLen); remaining -= dataLen;
-                    if (srcIdx >= 0 && cr != null) {
+                    if (srcIdx >= 0) {
                         short srcClassIdx = classIdx >= 0 ? (short) classIdx : 0;
-                        for (int fi = 0; fi < cr.objectFieldOffsets().length; fi++) {
-                            int off = cr.objectFieldOffsets()[fi];
-                            if (off + ids > data.length) continue;
-                            long refId = readIdFromBytes(data, off, ids);
-                            if (refId != 0) {
-                                int dstIdx = objectIndex(idMap, refId);
-                                if (dstIdx >= 0) {
-                                    short nameIdx = fi < cr.objectFieldNameIds().length
-                                            ? cr.objectFieldNameIds()[fi] : ClassRecord.NO_NAME;
-                                    consumer.accept(srcIdx, dstIdx, nameIdx, srcClassIdx);
+                        // Emit <class> edge: instance → its class object (MAT-compatible, always excluded)
+                        int classObjIdx = objectIndex(idMap, classId);
+                        if (classObjIdx >= 0) consumer.accept(srcIdx, classObjIdx, Short.MIN_VALUE, srcClassIdx);
+                        if (cr != null) {
+                            for (int fi = 0; fi < cr.objectFieldOffsets().length; fi++) {
+                                int off = cr.objectFieldOffsets()[fi];
+                                if (off + ids > data.length) continue;
+                                long refId = readIdFromBytes(data, off, ids);
+                                if (refId != 0) {
+                                    int dstIdx = objectIndex(idMap, refId);
+                                    if (dstIdx >= 0) {
+                                        short nameIdx = fi < cr.objectFieldNameIds().length
+                                                ? cr.objectFieldNameIds()[fi] : ClassRecord.NO_NAME;
+                                        consumer.accept(srcIdx, dstIdx, nameIdx, srcClassIdx);
+                                    }
                                 }
                             }
                         }
@@ -837,10 +986,16 @@ public final class HeapGraphBuilder {
                 }
                 case HPROF_GC_OBJ_ARRAY_DUMP -> {
                     long objId = p.readId(); p.readU4(); int numElem = (int) p.readU4();
-                    p.skipFully(ids); remaining -= ids + 4 + 4 + ids;
+                    long elemClassId = p.readId();
+                    remaining -= ids + 4 + 4 + ids;
                     int srcIdx = objectIndex(idMap, objId);
-                    int classIdx = graph.classIdToIndex.getIfAbsent(objId, -1); // element class — use src class
+                    int classIdx = graph.classIdToIndex.getIfAbsent(elemClassId, -1);
                     short srcClassIdx = classIdx >= 0 ? (short) classIdx : 0;
+                    // Emit <class> edge: array → its element-class object (always excluded)
+                    if (srcIdx >= 0 && elemClassId != 0) {
+                        int classObjIdx = objectIndex(idMap, elemClassId);
+                        if (classObjIdx >= 0) consumer.accept(srcIdx, classObjIdx, Short.MIN_VALUE, srcClassIdx);
+                    }
                     for (int i = 0; i < numElem; i++) {
                         long refId = p.readId(); remaining -= ids;
                         if (refId != 0 && srcIdx >= 0) {
@@ -924,6 +1079,7 @@ public final class HeapGraphBuilder {
     }
 
     private static boolean isExcluded(short[][] pairs, short classIdx, short nameIdx) {
+        if (nameIdx == Short.MIN_VALUE) return true; // class meta edge (superClass/classLoader)
         if (pairs == null || nameIdx == ClassRecord.NO_NAME) return false;
         for (short[] pair : pairs) {
             if (pair[0] == classIdx && pair[1] == nameIdx) return true;
@@ -982,6 +1138,7 @@ public final class HeapGraphBuilder {
         final LongLongHashMap classIdToNameId = new LongLongHashMap();
         final LongIntHashMap classIdToSerial = new LongIntHashMap();
         final LongIntHashMap classInstanceSizes = new LongIntHashMap();
+        final LongIntHashMap classOwnFieldsSizes = new LongIntHashMap(); // sum of own fields' typeSize
         final LongLongHashMap classLoaderIds = new LongLongHashMap();
         final LongLongHashMap classSuperIds = new LongLongHashMap();
         final LongIntHashMap classSerialByClassId = new LongIntHashMap();
@@ -1083,13 +1240,14 @@ public final class HeapGraphBuilder {
         }
 
         void buildClassList(HeapGraph graph, IdMap idMap) {
-            // Build ClassRecord for each class
+            // Build ClassRecord for each class (with own-only field offsets initially)
             classSerialByClassId.forEachKeyValue((classId, serial) -> {
                 long nameId = classIdToNameId.getIfAbsent(classId, 0L);
                 String name = nameId != 0L ? graph.utf8Strings.getOrDefault(nameId, "?") : "?";
                 long loaderId = classLoaderIds.getIfAbsent(classId, 0L);
                 long superId = classSuperIds.getIfAbsent(classId, 0L);
                 int instSize = classInstanceSizes.getIfAbsent(classId, 0);
+                int ownFieldsSize = classOwnFieldsSizes.getIfAbsent(classId, 0);
                 List<long[]> objFields = classObjFields.getOrDefault(classId, List.of());
 
                 short[] nameIds = new short[objFields.size()];
@@ -1102,7 +1260,7 @@ public final class HeapGraphBuilder {
 
                 int classIdx = graph.classList.size();
                 graph.classList.add(new ClassRecord(classId, name, loaderId, superId,
-                        instSize, serial, nameIds, offsets));
+                        instSize, serial, nameIds, offsets, ownFieldsSize));
                 graph.classIdToIndex.put(classId, classIdx);
                 graph.classSerialToIndex.put(serial, classIdx);
             });
@@ -1121,7 +1279,7 @@ public final class HeapGraphBuilder {
                         String arrayName = "[L" + elemName + ";";
                         int newClassIdx = graph.classList.size();
                         graph.classList.add(new ClassRecord(0L, arrayName, 0L, 0L,
-                                0, 0, new short[0], new int[0]));
+                                0, 0, new short[0], new int[0], 0));
                         objArrayElemToClassIdx.put(elemClassId, newClassIdx);
                     }
                 } else {
@@ -1141,7 +1299,7 @@ public final class HeapGraphBuilder {
                         };
                         int newClassIdx = graph.classList.size();
                         graph.classList.add(new ClassRecord(0L, arrayName, 0L, 0L,
-                                0, 0, new short[0], new int[0]));
+                                0, 0, new short[0], new int[0], 0));
                         primArrayClassIdx[typeCode] = newClassIdx + 1; // +1 so 0 means unset
                     }
                 }

@@ -234,11 +234,24 @@ public final class HeapGraph {
     void computeUnreachableStats() {
         unreachableCount = 0;
         unreachableShallowBytes = 0L;
+        int[] byClass = new int[classList.size()];
         for (int i = 1; i < N; i++) {
             if (idom[i] == UNDEFINED) {
                 unreachableCount++;
                 unreachableShallowBytes += shallowSizeOf(i);
+                short ci = classIndex[i];
+                if (ci >= 0 && ci < byClass.length) byClass[ci]++;
             }
+        }
+        // Top-10 diagnostic
+        Integer[] idxs = new Integer[byClass.length];
+        for (int i = 0; i < idxs.length; i++) idxs[i] = i;
+        Arrays.sort(idxs, (a, b) -> Integer.compare(byClass[b], byClass[a]));
+        System.err.println("  [UNREACHABLE] total=" + unreachableCount + " top:");
+        for (int k = 0; k < Math.min(15, idxs.length); k++) {
+            int ci = idxs[k];
+            if (byClass[ci] == 0) break;
+            System.err.println("    " + byClass[ci] + " x " + classList.get(ci).name());
         }
     }
 
