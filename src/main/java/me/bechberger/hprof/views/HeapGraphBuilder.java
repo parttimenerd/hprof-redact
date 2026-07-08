@@ -22,6 +22,9 @@ import java.util.HashMap;
 import java.util.List;
 import java.util.zip.GZIPInputStream;
 import java.util.Map;
+import org.eclipse.collections.impl.map.mutable.primitive.LongIntHashMap;
+import org.eclipse.collections.impl.map.mutable.primitive.LongLongHashMap;
+import org.eclipse.collections.impl.map.mutable.primitive.IntLongHashMap;
 
 import static me.bechberger.hprof.HprofConstants.*;
 
@@ -113,7 +116,7 @@ public final class HeapGraphBuilder {
             A1State state = new A1State(nEstimated, idMap);
 
             // Map from classId (long) → class serial number (for classIndex lookup later)
-            Map<Long, Integer> classIdToSerial = new HashMap<>();
+            LongIntHashMap classIdToSerial = new LongIntHashMap();
             // Map from classSerial → index in classList
             // We build classList during A.1 and finalise it.
 
@@ -191,11 +194,10 @@ public final class HeapGraphBuilder {
             state.buildClassList(graph, idMap);
 
             // Link thread serial → object index; trace frames
-            for (Map.Entry<Integer, Long> e : state.threadSerialToObjId.entrySet()) {
-                long objId = e.getValue();
+            state.threadSerialToObjId.forEachKeyValue((threadSerial, objId) -> {
                 int idx = idMap.indexOf(objId);
-                if (idx >= 0) graph.threadSerialToObjectId.put(e.getKey(), objId);
-            }
+                if (idx >= 0) graph.threadSerialToObjectId.put(threadSerial, objId);
+            });
             state.buildTraceFrames(graph);
 
             // Build synthetic thread→local edges from frame/stack roots
@@ -212,8 +214,8 @@ public final class HeapGraphBuilder {
         Map<Integer, int[]> result = new HashMap<>();
         for (Map.Entry<Integer, List<Long>> entry : state.threadLocalsBySerial.entrySet()) {
             int threadSerial = entry.getKey();
-            Long threadObjId = graph.threadSerialToObjectId.get(threadSerial);
-            if (threadObjId == null) continue;
+            long threadObjId = graph.threadSerialToObjectId.getIfAbsent(threadSerial, 0L);
+            if (threadObjId == 0L) continue;
             int threadIdx = idMap.indexOf(threadObjId);
             if (threadIdx < 0) continue;
             int threadIdxAdjusted = threadIdx + 1; // +1 for virtual root offset
@@ -316,9 +318,7 @@ public final class HeapGraphBuilder {
                     state.appendAddress(objId);
                     int shallowBytes = 16 + numElem * elemSize;
                     state.appendShallowSize(objId, shallowBytes);
-                    // mark as prim array with type
-                    state.primArrayTypes.put(objId, (byte) elemType);
-                    state.appendArrayType(objId, (byte) elemType); // mark as primitive array
+                    state.appendArrayType(objId, (byte) elemType);
                 }
                 default -> throw new IOException("Unknown heap sub-record tag: 0x" + Integer.toHexString(subTag)
                         + " at remaining=" + remaining);
@@ -521,8 +521,8 @@ public final class HeapGraphBuilder {
                     int srcIdx = objectIndex(idMap, objId);
                     if (srcIdx < 0) { p.skipFully(dataLen); remaining -= dataLen; break; }
                     // Emit edges for each OBJECT-type field
-                    Integer classIdx = graph.classIdToIndex.get(classId);
-                    ClassRecord cr = classIdx != null ? graph.classList.get(classIdx) : null;
+                    int classIdx = graph.classIdToIndex.getIfAbsent(classId, -1);
+                    ClassRecord cr = classIdx >= 0 ? graph.classList.get(classIdx) : null;
                     byte[] data = p.readBytes(dataLen); remaining -= dataLen;
                     if (cr != null) {
                         for (int fi = 0; fi < cr.objectFieldOffsets().length; fi++) {
@@ -815,11 +815,11 @@ public final class HeapGraphBuilder {
                     int dataLen = (int) p.readU4();
                     remaining -= ids + 4 + ids + 4;
                     int srcIdx = objectIndex(idMap, objId);
-                    Integer classIdx = graph.classIdToIndex.get(classId);
-                    ClassRecord cr = classIdx != null ? graph.classList.get(classIdx) : null;
+                    int classIdx = graph.classIdToIndex.getIfAbsent(classId, -1);
+                    ClassRecord cr = classIdx >= 0 ? graph.classList.get(classIdx) : null;
                     byte[] data = p.readBytes(dataLen); remaining -= dataLen;
                     if (srcIdx >= 0 && cr != null) {
-                        short srcClassIdx = classIdx != null ? (short)(int)classIdx : 0;
+                        short srcClassIdx = classIdx >= 0 ? (short) classIdx : 0;
                         for (int fi = 0; fi < cr.objectFieldOffsets().length; fi++) {
                             int off = cr.objectFieldOffsets()[fi];
                             if (off + ids > data.length) continue;
@@ -839,8 +839,8 @@ public final class HeapGraphBuilder {
                     long objId = p.readId(); p.readU4(); int numElem = (int) p.readU4();
                     p.skipFully(ids); remaining -= ids + 4 + 4 + ids;
                     int srcIdx = objectIndex(idMap, objId);
-                    Integer classIdx = graph.classIdToIndex.get(objId); // element class — use src class
-                    short srcClassIdx = classIdx != null ? (short)(int)classIdx : 0;
+                    int classIdx = graph.classIdToIndex.getIfAbsent(objId, -1); // element class — use src class
+                    short srcClassIdx = classIdx >= 0 ? (short) classIdx : 0;
                     for (int i = 0; i < numElem; i++) {
                         long refId = p.readId(); remaining -= ids;
                         if (refId != 0 && srcIdx >= 0) {
@@ -978,19 +978,18 @@ public final class HeapGraphBuilder {
         private byte[] arrayTypeBuf; // 0=not array, -1=obj array, >0=prim array elem type
         private int count;
 
-        final Map<Integer, Long> classSerialToId = new HashMap<>();
-        final Map<Long, Long> classIdToNameId = new HashMap<>();
-        final Map<Long, Integer> classIdToSerial = new HashMap<>();
-        final Map<Long, Integer> classInstanceSizes = new HashMap<>();
-        final Map<Long, Long> classLoaderIds = new HashMap<>();
-        final Map<Long, Long> classSuperIds = new HashMap<>();
-        final Map<Long, Integer> classSerialByClassId = new HashMap<>();
+        final IntLongHashMap classSerialToId = new IntLongHashMap();
+        final LongLongHashMap classIdToNameId = new LongLongHashMap();
+        final LongIntHashMap classIdToSerial = new LongIntHashMap();
+        final LongIntHashMap classInstanceSizes = new LongIntHashMap();
+        final LongLongHashMap classLoaderIds = new LongLongHashMap();
+        final LongLongHashMap classSuperIds = new LongLongHashMap();
+        final LongIntHashMap classSerialByClassId = new LongIntHashMap();
         final Map<Long, List<long[]>> classObjFields = new HashMap<>(); // classId → [[nameId,offset]]
-        final Map<Long, Byte> primArrayTypes = new HashMap<>();
         final List<Long> classDumpIds = new ArrayList<>();   // all classId values from CLASS_DUMP records
 
         // Synthesized array class maps (built in buildClassList second pass)
-        Map<Long, Integer> objArrayElemToClassIdx = new HashMap<>(); // elemClassId → synthetic class index
+        final LongIntHashMap objArrayElemToClassIdx = new LongIntHashMap(); // elemClassId → synthetic class index
         int[] primArrayClassIdx = new int[12]; // indexed by HPROF type code (0..11), 0=unset
 
         // GC roots (parallel arrays)
@@ -1002,9 +1001,9 @@ public final class HeapGraphBuilder {
         final Map<Integer, List<Long>> threadLocalsBySerial = new HashMap<>();
 
         // Frames and traces
-        final Map<Long, Long> frames = new HashMap<>();    // frameId → methodNameId
+        final LongLongHashMap frames = new LongLongHashMap(); // frameId → methodNameId
         final Map<Integer, long[]> traces = new HashMap<>(); // traceSerial → frameIds
-        final Map<Integer, Long> threadSerialToObjId = new HashMap<>();
+        final IntLongHashMap threadSerialToObjId = new IntLongHashMap();
 
         A1State(int est, IdMap idMap) {
             this.idMap = idMap;
@@ -1085,14 +1084,12 @@ public final class HeapGraphBuilder {
 
         void buildClassList(HeapGraph graph, IdMap idMap) {
             // Build ClassRecord for each class
-            for (Map.Entry<Long, Integer> e : classSerialByClassId.entrySet()) {
-                long classId = e.getKey();
-                int serial = e.getValue();
-                Long nameId = classIdToNameId.get(classId);
-                String name = nameId != null ? graph.utf8Strings.getOrDefault(nameId, "?") : "?";
-                long loaderId = classLoaderIds.getOrDefault(classId, 0L);
-                long superId = classSuperIds.getOrDefault(classId, 0L);
-                int instSize = classInstanceSizes.getOrDefault(classId, 0);
+            classSerialByClassId.forEachKeyValue((classId, serial) -> {
+                long nameId = classIdToNameId.getIfAbsent(classId, 0L);
+                String name = nameId != 0L ? graph.utf8Strings.getOrDefault(nameId, "?") : "?";
+                long loaderId = classLoaderIds.getIfAbsent(classId, 0L);
+                long superId = classSuperIds.getIfAbsent(classId, 0L);
+                int instSize = classInstanceSizes.getIfAbsent(classId, 0);
                 List<long[]> objFields = classObjFields.getOrDefault(classId, List.of());
 
                 short[] nameIds = new short[objFields.size()];
@@ -1108,7 +1105,7 @@ public final class HeapGraphBuilder {
                         instSize, serial, nameIds, offsets));
                 graph.classIdToIndex.put(classId, classIdx);
                 graph.classSerialToIndex.put(serial, classIdx);
-            }
+            });
 
             // Second pass: synthesize array class records for obj arrays and prim arrays
             for (int i = 0; i < count; i++) {
@@ -1119,8 +1116,8 @@ public final class HeapGraphBuilder {
                     long elemClassId = classIdBuf[i];
                     if (!objArrayElemToClassIdx.containsKey(elemClassId)) {
                         // Determine element class name
-                        Integer elemIdx = graph.classIdToIndex.get(elemClassId);
-                        String elemName = elemIdx != null ? graph.classList.get(elemIdx).name() : "java/lang/Object";
+                        int elemIdx = graph.classIdToIndex.getIfAbsent(elemClassId, -1);
+                        String elemName = elemIdx >= 0 ? graph.classList.get(elemIdx).name() : "java/lang/Object";
                         String arrayName = "[L" + elemName + ";";
                         int newClassIdx = graph.classList.size();
                         graph.classList.add(new ClassRecord(0L, arrayName, 0L, 0L,
@@ -1145,7 +1142,7 @@ public final class HeapGraphBuilder {
                         int newClassIdx = graph.classList.size();
                         graph.classList.add(new ClassRecord(0L, arrayName, 0L, 0L,
                                 0, 0, new short[0], new int[0]));
-                        primArrayClassIdx[typeCode] = newClassIdx;
+                        primArrayClassIdx[typeCode] = newClassIdx + 1; // +1 so 0 means unset
                     }
                 }
             }
@@ -1161,8 +1158,8 @@ public final class HeapGraphBuilder {
                 if (atype == 0 && cid != 0) {
                     // For non-array instance objects, prefer the instanceSize from CLASS_DUMP
                     // over the approximation stored in shallowBuf (dataLen + header).
-                    Integer exactSize = classInstanceSizes.get(cid);
-                    if (exactSize != null && exactSize > 0) bytes = exactSize;
+                    int exactSize = classInstanceSizes.getIfAbsent(cid, 0);
+                    if (exactSize > 0) bytes = exactSize;
                 }
                 // For arrays, shallowBuf already holds the correct shallow size from the array dump
                 if (bytes > 0) {
@@ -1175,21 +1172,17 @@ public final class HeapGraphBuilder {
                     }
                 }
                 // Class index: use synthesized array class for arrays
-                Integer cidx;
+                int cidx2;
                 if (atype == (byte) -1) {
-                    // Object array: use objArrayElemToClassIdx
-                    cidx = objArrayElemToClassIdx.get(cid);
+                    cidx2 = objArrayElemToClassIdx.getIfAbsent(cid, -1);
                 } else if (atype != 0) {
-                    // Primitive array: use primArrayClassIdx
                     int typeCode = atype & 0xFF;
-                    cidx = (typeCode < primArrayClassIdx.length && primArrayClassIdx[typeCode] != 0)
-                            ? primArrayClassIdx[typeCode] : null;
+                    cidx2 = (typeCode < primArrayClassIdx.length) ? primArrayClassIdx[typeCode] - 1 : -1;
                 } else {
-                    // Regular object or class dump
-                    cidx = graph.classIdToIndex.get(cid);
+                    cidx2 = graph.classIdToIndex.getIfAbsent(cid, -1);
                 }
-                if (cidx != null && cidx <= Short.MAX_VALUE) {
-                    graph.classIndex[objIdx] = (short)(int)cidx;
+                if (cidx2 >= 0 && cidx2 <= Short.MAX_VALUE) {
+                    graph.classIndex[objIdx] = (short) cidx2;
                 }
             }
         }
@@ -1199,7 +1192,7 @@ public final class HeapGraphBuilder {
                 long[] frameIds = e.getValue();
                 long[] methodNameIds = new long[frameIds.length];
                 for (int i = 0; i < frameIds.length; i++) {
-                    methodNameIds[i] = frames.getOrDefault(frameIds[i], 0L);
+                    methodNameIds[i] = frames.getIfAbsent(frameIds[i], 0L);
                 }
                 graph.traceFrames.put(e.getKey(), methodNameIds);
             }

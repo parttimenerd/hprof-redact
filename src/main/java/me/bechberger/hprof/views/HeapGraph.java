@@ -11,6 +11,8 @@ import java.util.BitSet;
 import java.util.HashMap;
 import java.util.List;
 import java.util.Map;
+import org.eclipse.collections.impl.map.mutable.primitive.LongIntHashMap;
+import org.eclipse.collections.impl.map.mutable.primitive.IntLongHashMap;
 
 /**
  * Container for all in-memory structures built from an HPROF file.
@@ -81,8 +83,8 @@ public final class HeapGraph {
 
     // ---- Class table ----
     final List<ClassRecord> classList;
-    final Map<Long, Integer> classIdToIndex;    // classId → index in classList
-    final Map<Integer, Integer> classSerialToIndex; // classSerial → index in classList
+    final LongIntHashMap classIdToIndex;         // classId → index in classList
+    final Map<Integer, Integer> classSerialToIndex; // classSerial → index in classList (keep boxed, small)
 
     // ---- Interned field names ----
     /** Maps HPROF nameId → short intern index (0 = no-name sentinel; real names start at 1). */
@@ -92,20 +94,11 @@ public final class HeapGraph {
     // ---- UTF-8 strings from HPROF ----
     final Map<Long, String> utf8Strings;         // nameId → decoded string
 
-    // ---- String / thread resolution ----
-    /** objectId of String → objectId of its value char[]/byte[] backing array */
-    final Map<Long, Long> stringValueArrayId;
-    /** objectId of Thread → objectId of its name char[]/byte[] backing array */
-    final Map<Long, Long> threadNameArrayId;
-    /** objectId of primitive array → file byte offset of the PRIM_ARRAY_DUMP payload start */
-    final Map<Long, Long> primArrayFileOffset;   // for on-demand content reads
-    final Map<Long, String> resolvedStrings;     // memoized
-
     // ---- Thread / frame info (for thread_overview) ----
     /** threadSerial → list of frame method nameIds */
     final Map<Integer, long[]> traceFrames;
     /** threadSerial → Thread object id */
-    final Map<Integer, Long> threadSerialToObjectId;
+    final IntLongHashMap threadSerialToObjectId;
 
     // ---- Exclude pairs (resolved at build time) ----
     /** 3 default exclude (classIndex, fieldNameInternIdx) pairs. Filled by HeapGraphBuilder. */
@@ -128,18 +121,14 @@ public final class HeapGraph {
         this.heapTotalBytes = 0; // set by builder after all shallow sizes collected
         this.isGCRoot = new BitSet();
         this.classList = new ArrayList<>();
-        this.classIdToIndex = new HashMap<>();
+        this.classIdToIndex = new LongIntHashMap();
         this.classSerialToIndex = new HashMap<>();
         this.fieldNameIntern = new HashMap<>();
         this.fieldNames = new ArrayList<>();
         this.fieldNames.add(""); // index 0 = no-name sentinel
         this.utf8Strings = new HashMap<>();
-        this.stringValueArrayId = new HashMap<>();
-        this.threadNameArrayId = new HashMap<>();
-        this.primArrayFileOffset = new HashMap<>();
-        this.resolvedStrings = new HashMap<>();
         this.traceFrames = new HashMap<>();
-        this.threadSerialToObjectId = new HashMap<>();
+        this.threadSerialToObjectId = new IntLongHashMap();
         // allocate a small initial capacity for GC roots (grow on demand)
         this.gcRootIds = new int[1024];
         this.gcRootTypes = new byte[1024];
