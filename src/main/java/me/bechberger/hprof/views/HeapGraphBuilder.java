@@ -81,9 +81,19 @@ public final class HeapGraphBuilder {
         phaseB(graph);
         // --- Dominator tree (CHK) ---
         DominatorTree.compute(graph);
+        // --- Count unreachable objects (before retained sizes) ---
+        graph.computeUnreachableStats();
         // --- Retained sizes ---
         RetainedSizes.compute(graph);
         return graph;
+    }
+
+    /**
+     * Run all phases without freeing intermediate structures.
+     * For unit tests only — allows inspecting graph state after build.
+     */
+    HeapGraph buildForTesting() throws IOException {
+        return build();
     }
 
     // =========================================================

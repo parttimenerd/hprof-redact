@@ -47,6 +47,10 @@ final class SystemOverviewReport {
         out.printf("| Total shallow heap | %s |%n", formatBytes(totalShallow));
         out.printf("| GC roots | %,d |%n", graph.gcRootCount);
         out.printf("| Classes loaded | %,d |%n", graph.classList.size());
+        if (graph.unreachableCount > 0) {
+            out.printf("| Unreachable objects (excluded) | %,d (%s) |%n",
+                    graph.unreachableCount, formatBytes(graph.unreachableShallowBytes));
+        }
     }
 
     private void writeHistogram(PrintWriter out) {
@@ -56,6 +60,7 @@ final class SystemOverviewReport {
         long[] retainedTotal = new long[classCount];
 
         for (int i = 1; i < graph.N; i++) {
+            if (graph.idom[i] == HeapGraph.UNDEFINED) continue; // skip unreachable objects
             short ci = graph.classIndex[i];
             if (ci < 0 || ci >= classCount) continue;
             instanceCount[ci]++;
