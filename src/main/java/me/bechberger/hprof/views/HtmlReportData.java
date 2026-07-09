@@ -116,7 +116,7 @@ final class HtmlReportData {
             graph.sourcePath.getFileName().toString(),
             graph.hprofFormat, graph.fileSize,
             graph.N - 1L - graph.unreachableCount, totalShallow,
-            graph.gcRootCount, graph.reachableClassCount(),
+            graph.gcRootCount - graph.syntheticRootCount, graph.reachableClassCount(),
             java.time.Instant.now().toString()
         );
     }

@@ -90,7 +90,9 @@ class HeapGraphBuilderTest {
 
         HeapGraph graph = new HeapGraphBuilder(hprof).build();
 
-        assertEquals(2, graph.gcRootCount);
+        // class object 0x10L is also added as synthetic STICKY_CLASS root
+        assertEquals(3, graph.gcRootCount);
+        assertEquals(1, graph.syntheticRootCount);
         IdMap idMap = graph.idMap;
         int idx1 = idMap.indexOf(0x100L) + 1;
         int idx2 = idMap.indexOf(0x200L) + 1;

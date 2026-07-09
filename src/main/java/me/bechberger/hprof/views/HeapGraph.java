@@ -59,6 +59,8 @@ public final class HeapGraph {
     int[] gcRootIds;                 // dense list of root object indices
     byte[] gcRootTypes;              // GC root type code per actual root
     int gcRootCount;
+    /** Roots added synthetically by addSystemClassRootsIfMissing — not from HPROF records. */
+    int syntheticRootCount;
 
     // ---- Inbound reference graph (VByte stream, --low-memory) ----
     int[]  inboundOffsets;           // (N+1) elements; inboundOffsets[i] = byte start of row i in stream

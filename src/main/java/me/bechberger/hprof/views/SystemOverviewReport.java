@@ -47,7 +47,7 @@ final class SystemOverviewReport {
         out.printf("| File size | %s |%n", formatBytes(graph.fileSize));
         out.printf("| Total objects | %,d |%n", graph.N - 1 - graph.unreachableCount);
         out.printf("| Total shallow heap | %s |%n", formatBytes(totalShallow));
-        out.printf("| GC roots | %,d |%n", graph.gcRootCount);
+        out.printf("| GC roots | %,d |%n", graph.gcRootCount - graph.syntheticRootCount);
         out.printf("| Classes loaded | %,d |%n", graph.reachableClassCount());
         if (graph.unreachableCount > 0) {
             out.printf("| Unreachable objects (excluded) | %,d (%s) |%n",

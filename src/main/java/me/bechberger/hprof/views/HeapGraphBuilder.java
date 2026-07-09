@@ -325,24 +325,18 @@ public final class HeapGraphBuilder {
     }
 
     /**
-     * MAT parity fallback: if the HPROF dump contains no HPROF_GC_ROOT_STICKY_CLASS records,
-     * mark all non-array boot-loader (classLoader == 0) classes as STICKY_CLASS roots.
-     * This ensures reachability of module-system, invoke, and JAR-machinery objects that
-     * are otherwise only reachable via class constant pools of system classes.
+     * MAT parity: mark all non-array class objects from CLASS_DUMP records as STICKY_CLASS roots.
+     * MAT treats all loaded classes (those appearing in CLASS_DUMP records) as always reachable,
+     * regardless of whether explicit STICKY_CLASS root records exist. Without this, user-loaded
+     * classes with no explicit GC root record are unreachable, making their static fields (and
+     * transitively referenced objects) also unreachable.
      */
     private static void addSystemClassRootsIfMissing(HeapGraph graph, IdMap idMap) {
-        boolean foundSticky = false;
-        for (int i = 0; i < graph.gcRootCount; i++) {
-            if (graph.gcRootTypes[i] == HPROF_GC_ROOT_STICKY_CLASS) { foundSticky = true; break; }
-        }
-        if (foundSticky) return;
         int added = 0;
-        // Iterate class list; array classes have classId==0 (synthetic) or name starts with '['
         for (ClassRecord cr : graph.classList) {
             if (cr.classId() == 0L) continue;              // synthesized array class
-            if (cr.classLoaderId() != 0L) continue;        // not boot loader
             String name = cr.name();
-            if (name.length() > 0 && name.charAt(0) == '[') continue; // real array class
+            if (name.length() > 0 && name.charAt(0) == '[') continue; // array class
             int idx = idMap.indexOf(cr.classId());
             if (idx < 0) continue;
             int adjusted = idx + 1;
@@ -351,6 +345,7 @@ public final class HeapGraphBuilder {
             added++;
         }
         if (added > 0) {
+            graph.syntheticRootCount += added;
             graph.trimRoots();
         }
     }
