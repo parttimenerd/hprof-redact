@@ -1486,7 +1486,7 @@ public final class HeapGraphBuilder {
                     int typeCode = atype & 0xFF;
                     cidx2 = (typeCode < primArrayClassIdx.length) ? primArrayClassIdx[typeCode] - 1 : -1;
                 } else if (isClassObject) {
-                    cidx2 = javaLangClassIdx; // attribute all class-objects to java.lang.Class
+                    cidx2 = javaLangClassIdx; // attribute class-dump objects to java.lang.Class
                 } else {
                     cidx2 = graph.classIdToIndex.getIfAbsent(cid, -1);
                 }

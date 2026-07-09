@@ -258,6 +258,15 @@ public final class HeapGraph {
         }
     }
 
+    /** Count of reachable class-dump objects (matches MAT's "Number of classes"). */
+    int reachableClassCount() {
+        int count = 0;
+        for (int k = 0; k < classDumpCount; k++) {
+            if (idom[classDumpIndices[k]] != UNDEFINED) count++;
+        }
+        return count;
+    }
+
     void freeRpoPos()   { rpoPos   = null; }
     void freeRpoOrder() { rpoOrder = null; }
     void freeFwdCsr()   { fwdOffsets = null; fwdTargets = null; }
