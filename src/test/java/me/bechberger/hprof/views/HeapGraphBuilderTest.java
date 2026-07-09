@@ -54,7 +54,7 @@ class HeapGraphBuilderTest {
                 .addGCRoot(0x100L, HPROF_GC_ROOT_STICKY_CLASS)
                 .buildToPath();
 
-        HeapGraph graph = new HeapGraphBuilder(hprof).build();
+        HeapGraph graph = new HeapGraphBuilder(hprof).buildForTesting();
 
         assertEquals(4, graph.N); // virtual root + class object + A + B
 
@@ -88,7 +88,7 @@ class HeapGraphBuilderTest {
                 .addGCRoot(0x200L, HPROF_GC_ROOT_JNI_GLOBAL)
                 .buildToPath();
 
-        HeapGraph graph = new HeapGraphBuilder(hprof).build();
+        HeapGraph graph = new HeapGraphBuilder(hprof).buildForTesting();
 
         // class object 0x10L is also added as synthetic STICKY_CLASS root
         assertEquals(3, graph.gcRootCount);
@@ -113,7 +113,7 @@ class HeapGraphBuilderTest {
                 .addGCRoot(0x100L, HPROF_GC_ROOT_STICKY_CLASS)
                 .buildToPath();
 
-        HeapGraph graph = new HeapGraphBuilder(hprof).build();
+        HeapGraph graph = new HeapGraphBuilder(hprof).buildForTesting();
 
         assertEquals(5, graph.N); // root + array + B + C + element class
 
@@ -143,7 +143,7 @@ class HeapGraphBuilderTest {
                 .addGCRoot(0x100L, HPROF_GC_ROOT_STICKY_CLASS)
                 .buildToPath();
 
-        HeapGraph graph = new HeapGraphBuilder(hprof).build();
+        HeapGraph graph = new HeapGraphBuilder(hprof).buildForTesting();
 
         // RPO/DFS arrays are freed after use (dfsPos/dfsOrder/dfsParent after DOM, rpoOrder after retained sizes)
         assertNull(graph.dfsPos,   "dfsPos should be freed after dominator tree");

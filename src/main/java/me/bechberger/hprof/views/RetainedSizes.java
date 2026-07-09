@@ -29,8 +29,12 @@ final class RetainedSizes {
         int[] rpoOrder = graph.rpoOrder;
         int[] idom     = graph.idom;
 
-        // Initialise retainedSize[v] = shallowSize[v] for all v
-        graph.retainedSize = new int[N];
+        // Initialise retainedSize[v] = shallowSize[v] for all v.
+        // Reuse scratchIntN (donated by freeRpoPos — the old dfsPos array) if available,
+        // avoiding a fresh N-element allocation.
+        // Take donated int[N] from the phase donation chain (donated by DominatorTree as depth[]),
+        // pre-zeroed by take(). Falls back to fresh allocation if nothing was donated.
+        graph.retainedSize = graph.phaseArrays.take();
         for (int i = 1; i < N; i++) {
             long shallow = graph.shallowSizeOf(i);
             graph.setRetainedSize(i, shallow);
@@ -97,6 +101,7 @@ final class RetainedSizes {
             childTargets[cursor[p]++] = u;
         }
         // cursor no longer needed
+        // gives back the memory
         cursor = null;
         childDeg = null;
 

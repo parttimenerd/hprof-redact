@@ -168,8 +168,10 @@ final class DominatorTree {
 
         // ----------------------------------------------------------------
         // Translate DFS-position idom back to node-index space.
-        // ----------------------------------------------------------------
-        int[] idom = new int[N];
+        // Reuse dfsPos (no longer needed after this point) as the idom array,
+        // saving one N-element int[] allocation. Requires full fill to UNDEFINED first.
+        int[] idom = dfsPos; // dfsPos is int[N], same size needed for idom
+        dfsPos = null;       // drop our local reference so it's clear we've handed it over
         Arrays.fill(idom, HeapGraph.UNDEFINED);
         idom[HeapGraph.VIRTUAL_ROOT] = HeapGraph.VIRTUAL_ROOT;
 
@@ -180,14 +182,22 @@ final class DominatorTree {
         }
 
         graph.idom = idom;
-        graph.freeRpoPos(); // frees rpoPos, dfsPos, dfsOrder, dfsParent
+        graph.dfsPos = null; // already repurposed as idom — freeRpoPos must not re-stash it
+
+        // Take dfsParent directly as depth[] before freeRpoPos nulls it.
+        // dfsParent is int[N], same size — reuse avoids a fresh allocation.
+        int[] depth = graph.dfsParent;
+        graph.dfsParent = null;         // prevent freeRpoPos from nulling it after we've taken it
+        java.util.Arrays.fill(depth, 0); // zero former DFS parent indices
+
+        graph.freeRpoPos(); // donates dfsOrder to phaseArrays; nulls dfsPos (null), dfsOrder, dfsParent (null)
 
         // Measure max dominator-tree depth in O(N) by propagating depth through idom.
         // Process nodes in RPO order — rpoOrder is still valid here (only dfsPos/dfsOrder/dfsParent freed).
         // Since idom[v] always has a lower RPO position than v, RPO is a valid topological order.
         int maxDepth = 0;
         if (graph.rpoOrder != null) {
-            int[] depth = new int[N];
+            // depth[] already declared and zeroed above
             // rpoOrder[0] = VIRTUAL_ROOT, already depth 0
             int rpoReachable = 0;
             for (int i = 0; i < N; i++) if (idom[i] != HeapGraph.UNDEFINED || i == HeapGraph.VIRTUAL_ROOT) rpoReachable++;
@@ -202,6 +212,8 @@ final class DominatorTree {
             }
         }
         System.err.println("  [DOM] LT completed: reachable=" + reachable + " maxDepth=" + maxDepth);
+        // Donate depth[] for reuse — RetainedSizes will take it as retainedSize backing.
+        if (graph.phaseArrays != null) graph.phaseArrays.donate(depth);
     }
 
     // Reusable path buffer — avoids per-call allocation in eval().
