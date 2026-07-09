@@ -176,7 +176,7 @@ def load_mat_report_cached(stem: str, dumps_dir: Path) -> Optional[MatReport]:
 
 def load_mat_reports(dumps_dir: Path) -> dict[str, MatReport]:
     reports: dict[str, MatReport] = {}
-    for hprof in sorted(dumps_dir.glob("dump_*.hprof")):
+    for hprof in sorted(dumps_dir.glob("*.hprof")):
         stem = hprof.stem
         r = load_mat_report_cached(stem, dumps_dir)
         if r:
