@@ -256,7 +256,8 @@ public final class HeapGraph {
     }
 
     // ---- Transient forward CSR (built in Phase A.2, freed after RPO DFS) ----
-    int[] fwdOffsets;
+    int[] fwdOffsets; // fwdOffsets[i] = start of node i's edge list in fwdTargets (upper-bound allocated)
+    int[] fwdEnds;    // fwdEnds[i] = actual end of node i's edge list (may be < fwdOffsets[i+1])
     int[] fwdTargets;
 
     void computeUnreachableStats() {
@@ -281,7 +282,7 @@ public final class HeapGraph {
 
     void freeRpoPos()   { dfsPos = null; dfsOrder = null; dfsParent = null; }
     void freeRpoOrder() { rpoOrder = null; }
-    void freeFwdCsr()   { fwdOffsets = null; fwdTargets = null; }
+    void freeFwdCsr()   { fwdOffsets = null; fwdEnds = null; fwdTargets = null; }
 
     /** Total number of nodes including virtual root (index 0). */
     public int objectCount() { return N; }

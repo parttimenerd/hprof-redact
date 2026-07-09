@@ -594,97 +594,124 @@ public final class HeapGraphBuilder {
         IdMap idMap = graph.idMap;
 
         int[] outDegree = new int[N];
-        int[] inDegree  = new int[N];
 
-        // --- Sub-pass A.2a: count out-degree and in-degree ---
+        // --- Sub-pass A.2a: fast out-degree count (no instance data reads) ---
+        // Uses class record field counts as upper bound. Skips instance payloads entirely,
+        // which eliminates all IdMap.indexOf calls for field refs (the profiler's #1 hotspot).
         final int[] outDegreeF = outDegree;
-        final int[] inDegreeF  = inDegree;
         try (Parser p = openParser()) {
-            scanEdges(p, graph, (srcIdx, dstIdx, nameId) -> {
-                outDegreeF[srcIdx]++;
-                inDegreeF[dstIdx]++;
-            });
+            countOutDegrees(p, graph, outDegreeF);
         }
         // Count synthetic thread→local edges
         if (graph.syntheticThreadEdges != null) {
             for (Map.Entry<Integer, int[]> e : graph.syntheticThreadEdges.entrySet()) {
                 int threadIdx = e.getKey();
                 if (threadIdx < N) {
-                    int[] locals = e.getValue();
-                    outDegreeF[threadIdx] += locals.length;
-                    for (int localIdx : locals) {
-                        if (localIdx < N) inDegreeF[localIdx]++;
-                    }
+                    outDegreeF[threadIdx] += e.getValue().length;
                 }
             }
         }
 
-        // Prefix-sum outDegree → fwdOffsets; inDegree → inboundOffsets
-        int[] fwdOffsets      = new int[N + 1];
-        int[] inboundOffsets  = new int[N + 1];
-        int totalFwdEdges = 0, totalInbEdges = 0;
+        // Prefix-sum outDegree → fwdOffsets (upper-bound allocation)
+        int[] fwdOffsets = new int[N + 1];
+        int totalFwdSlots = 0;
         for (int i = 0; i < N; i++) {
-            fwdOffsets[i]     = totalFwdEdges; totalFwdEdges += outDegree[i];
-            inboundOffsets[i] = totalInbEdges; totalInbEdges += inDegree[i];
+            fwdOffsets[i] = totalFwdSlots;
+            totalFwdSlots += outDegree[i];
         }
-        fwdOffsets[N]     = totalFwdEdges;
-        inboundOffsets[N] = totalInbEdges;
+        fwdOffsets[N] = totalFwdSlots;
 
-        int[] fwdTargets      = new int[totalFwdEdges];
-        int[] inboundTargets  = new int[totalInbEdges];
+        // fwdTargets: upper-bound size. Actual edges stored at fwdOffsets[i]..fwdEnds[i].
+        // fwdTargets[i] encodes: bits 30..0 = dstIdx (1-based), bit 31 = excluded flag.
+        int[] fwdTargets = new int[totalFwdSlots];
+        int[] fwdCursor  = outDegree; // reuse as write cursor; init to fwdOffsets values
+        System.arraycopy(fwdOffsets, 0, fwdCursor, 0, N);
 
-        // Repurpose outDegree and inDegree as write cursors (copy prefix sums into them)
-        System.arraycopy(fwdOffsets,     0, outDegree, 0, N);
-        System.arraycopy(inboundOffsets, 0, inDegree,  0, N);
-
-        // --- Sub-pass A.2b: combined fill of fwdTargets and inboundTargets ---
-        // Uses scanEdgesWithNames so we also get nameIdx and srcClassIdx for inbound exclude logic.
+        // --- Sub-pass A.2b: fill fwdTargets (encodes exclude flag in high bit) ---
         short[][] excludePairs = graph.excludePairs;
-        final int[] fwdCursor = outDegree;   // write cursor for forward CSR
-        final int[] ibCursor  = inDegree;    // write cursor for inbound CSR
-        final int[] fwdT      = fwdTargets;
-        final int[] ibT       = inboundTargets;
+        final int[] fwdT = fwdTargets;
+        final int[] fwdC = fwdCursor;
         try (Parser p = openParser()) {
             scanEdgesWithNames(p, graph, (srcIdx, dstIdx, nameIdx, srcClassIdx) -> {
-                fwdT[fwdCursor[srcIdx]++] = dstIdx;
                 boolean excluded = isExcluded(excludePairs, srcClassIdx, nameIdx);
-                ibT[ibCursor[dstIdx]] = excluded ? (srcIdx | Integer.MIN_VALUE) : srcIdx;
-                ibCursor[dstIdx]++;
+                fwdT[fwdC[srcIdx]++] = excluded ? (dstIdx | Integer.MIN_VALUE) : dstIdx;
             });
         }
-        // Fill synthetic thread→local edges into both CSRs (not excluded)
+        // Fill synthetic thread→local edges (not excluded)
         if (graph.syntheticThreadEdges != null) {
             for (Map.Entry<Integer, int[]> e : graph.syntheticThreadEdges.entrySet()) {
                 int threadIdx = e.getKey();
                 if (threadIdx < N) {
                     for (int localIdx : e.getValue()) {
-                        if (localIdx < N) {
-                            fwdT[fwdCursor[threadIdx]++] = localIdx;
-                            ibT[ibCursor[localIdx]++] = threadIdx; // not excluded
-                        }
+                        if (localIdx < N) fwdT[fwdC[threadIdx]++] = localIdx; // not excluded
                     }
                 }
             }
             graph.syntheticThreadEdges = null;
         }
 
-        // Store forward CSR for RPO DFS
+        // fwdEnds[i] = actual end of node i's edge list (fwdCursor holds final write position)
+        // For RpoDfs: iterate fwdOffsets[i]..fwdEnds[i], masking out the exclude-flag high bit.
+        // Note: RpoDfs only needs dstIdx without the flag; mask below.
+        // Build clean fwdTargets for RpoDfs (strip high bit, used only for forward traversal).
+        // We also need the raw (with flag) values for inbound fill below.
+        int[] fwdEnds = fwdCursor; // fwdCursor[i] now holds the actual end position
+
+        // --- In-memory inbound CSR build: no second file pass needed ---
+        // Compute inDegrees by scanning fwdTargets[fwdOffsets[i]..fwdEnds[i]] for each node.
+        int[] inDegree = new int[N];
+        for (int src = 0; src < N; src++) {
+            int start = fwdOffsets[src], end = fwdEnds[src];
+            for (int k = start; k < end; k++) {
+                int dstRaw = fwdT[k]; // may have high bit set (exclude flag)
+                int dstIdx = dstRaw & 0x7FFFFFFF; // strip flag
+                if (dstIdx > 0 && dstIdx < N) inDegree[dstIdx]++;
+            }
+        }
+        int[] inboundOffsets = new int[N + 1];
+        int totalInbEdges = 0;
+        for (int i = 0; i < N; i++) {
+            inboundOffsets[i] = totalInbEdges;
+            totalInbEdges += inDegree[i];
+        }
+        inboundOffsets[N] = totalInbEdges;
+
+        // Fill inboundTargets from fwdTargets (exclude flag already encoded in high bit)
+        int[] inboundTargets = new int[totalInbEdges];
+        System.arraycopy(inboundOffsets, 0, inDegree, 0, N); // reuse inDegree as ibCursor
+        int[] ibCursor = inDegree;
+        for (int src = 0; src < N; src++) {
+            int start = fwdOffsets[src], end = fwdEnds[src];
+            for (int k = start; k < end; k++) {
+                int dstRaw = fwdT[k];
+                int dstIdx = dstRaw & 0x7FFFFFFF;
+                if (dstIdx > 0 && dstIdx < N) {
+                    // Encode inbound: high bit = excluded (src is excluded-from edge)
+                    boolean excluded = (dstRaw < 0); // high bit set = excluded
+                    inboundTargets[ibCursor[dstIdx]++] = excluded ? (src | Integer.MIN_VALUE) : src;
+                }
+            }
+        }
+
+        // Strip exclude flags from fwdTargets for RpoDfs forward traversal
+        for (int i = 0; i < totalFwdSlots; i++) {
+            if (fwdT[i] < 0) fwdT[i] &= 0x7FFFFFFF;
+        }
+
+        // Store forward CSR (with actual ends, not upper-bound offsets[i+1])
         graph.fwdOffsets = fwdOffsets;
+        graph.fwdEnds    = fwdEnds;
         graph.fwdTargets = fwdTargets;
 
-        // VByte-encode inbound CSR (inboundOffsets is the correct prefix sum)
+        // VByte-encode inbound CSR
         graph.inboundOffsets = inboundOffsets;
         CsrBuilderEncoder encoder = new CsrBuilderEncoder(graph, inboundTargets, inboundOffsets, N);
         encoder.encodeVByte();
         // inboundTargets freed inside encoder
     }
 
-    @FunctionalInterface
-    private interface EdgeConsumer {
-        void accept(int srcIdx, int dstIdx, long nameId) throws IOException;
-    }
-
-    private void scanEdges(Parser p, HeapGraph graph, EdgeConsumer consumer) throws IOException {
+    /** Fast out-degree count: skips instance data, uses class record field counts. */
+    private void countOutDegrees(Parser p, HeapGraph graph, int[] outDegree) throws IOException {
         int ids = graph.idSize;
         IdMap idMap = graph.idMap;
         while (true) {
@@ -693,16 +720,17 @@ public final class HeapGraphBuilder {
             p.readU4();
             long length = p.readU4();
             if (tag == HPROF_HEAP_DUMP || tag == HPROF_HEAP_DUMP_SEGMENT) {
-                scanEdgesInSegment(p, (int) length, ids, idMap, graph, consumer);
+                countOutDegreesInSegment(p, (int) length, ids, idMap, graph, outDegree);
             } else {
                 p.skipFully(length);
             }
         }
     }
 
-    private void scanEdgesInSegment(Parser p, int segLen, int ids, IdMap idMap,
-                                    HeapGraph graph, EdgeConsumer consumer) throws IOException {
+    private void countOutDegreesInSegment(Parser p, int segLen, int ids, IdMap idMap,
+                                           HeapGraph graph, int[] outDegree) throws IOException {
         int remaining = segLen;
+        int N = graph.N;
         while (remaining > 0) {
             int subTag = p.readU1(); remaining--;
             switch (subTag) {
@@ -717,55 +745,30 @@ public final class HeapGraphBuilder {
                     p.skipFully(ids + 4L); remaining -= ids + 4;
                 }
                 case HPROF_GC_CLASS_DUMP -> {
-                    // Emit edges from class object static OBJECT fields
-                    remaining -= scanClassDumpEdges(p, ids, idMap, graph, consumer);
+                    // Class dumps: edges counted exactly (class records are small)
+                    remaining -= countClassDumpOutDegrees(p, ids, idMap, graph, outDegree);
                 }
                 case HPROF_GC_INSTANCE_DUMP -> {
                     long objId = p.readId(); p.readU4(); long classId = p.readId();
                     int dataLen = (int) p.readU4();
                     remaining -= ids + 4 + ids + 4;
+                    // Skip instance data entirely — use class record field count as upper bound
+                    p.skipFully(dataLen); remaining -= dataLen;
                     int srcIdx = objectIndex(idMap, objId);
-                    if (srcIdx < 0) { p.skipFully(dataLen); remaining -= dataLen; break; }
-                    // Emit <class> edge: instance → its class object (MAT-compatible)
-                    int classObjIdx = objectIndex(idMap, classId);
-                    if (classObjIdx >= 0) consumer.accept(srcIdx, classObjIdx, 0L);
-                    // Emit edges for each OBJECT-type field
+                    if (srcIdx < 0 || srcIdx >= N) break;
+                    // +1 for the class-object edge (always emitted)
                     int classIdx = graph.classIdToIndex.getIfAbsent(classId, -1);
                     ClassRecord cr = classIdx >= 0 ? graph.classList.get(classIdx) : null;
-                    if (dataLen > instanceDataBuf.length) instanceDataBuf = new byte[dataLen];
-                    p.readBytesInto(instanceDataBuf, dataLen); remaining -= dataLen;
-                    byte[] data = instanceDataBuf;
-                    if (cr != null) {
-                        for (int fi = 0; fi < cr.objectFieldOffsets().length; fi++) {
-                            int off = cr.objectFieldOffsets()[fi];
-                            if (off + ids > data.length) continue; // malformed/truncated data
-                            long refId = readIdFromBytes(data, off, ids);
-                            if (refId != 0) {
-                                int dstIdx = objectIndex(idMap, refId);
-                                if (dstIdx >= 0) {
-                                    consumer.accept(srcIdx, dstIdx, 0L);
-                                }
-                            }
-                        }
-                    }
+                    outDegree[srcIdx] += 1 + (cr != null ? cr.objectFieldOffsets().length : 0);
                 }
                 case HPROF_GC_OBJ_ARRAY_DUMP -> {
                     long objId = p.readId(); p.readU4(); int numElem = (int) p.readU4();
-                    long elemClassId = p.readId();
-                    remaining -= ids + 4 + 4 + ids;
+                    p.skipFully(ids); remaining -= ids + 4 + 4 + ids; // skip elemClassId
+                    p.skipFully((long) numElem * ids); remaining -= (int)((long) numElem * ids);
                     int srcIdx = objectIndex(idMap, objId);
-                    // Emit <class> edge: array → its element-class object (MAT-compatible)
-                    if (srcIdx >= 0 && elemClassId != 0) {
-                        int classObjIdx = objectIndex(idMap, elemClassId);
-                        if (classObjIdx >= 0) consumer.accept(srcIdx, classObjIdx, 0L);
-                    }
-                    for (int i = 0; i < numElem; i++) {
-                        long refId = p.readId(); remaining -= ids;
-                        if (refId != 0 && srcIdx >= 0) {
-                            int dstIdx = objectIndex(idMap, refId);
-                            if (dstIdx >= 0) consumer.accept(srcIdx, dstIdx, 0L);
-                        }
-                    }
+                    if (srcIdx < 0 || srcIdx >= N) break;
+                    // +1 for the class-object edge
+                    outDegree[srcIdx] += 1 + numElem;
                 }
                 case HPROF_GC_PRIM_ARRAY_DUMP -> {
                     long objId = p.readId(); p.readU4(); int numElem = (int) p.readU4();
@@ -780,13 +783,8 @@ public final class HeapGraphBuilder {
         }
     }
 
-    /**
-     * Read a CLASS_DUMP record and emit edges: classObj→superClass, classObj→loader,
-     * classObj→staticObjectField for each OBJECT-type static field.
-     * Returns bytes consumed.
-     */
-    private int scanClassDumpEdges(Parser p, int ids, IdMap idMap, HeapGraph graph,
-                                    EdgeConsumer consumer) throws IOException {
+    private int countClassDumpOutDegrees(Parser p, int ids, IdMap idMap,
+                                          HeapGraph graph, int[] outDegree) throws IOException {
         int consumed = 0;
         long classId = p.readId(); consumed += ids;
         p.readU4(); consumed += 4; // stack serial
@@ -796,60 +794,48 @@ public final class HeapGraphBuilder {
         p.readU4(); consumed += 4; // instance size
 
         int srcIdx = objectIndex(idMap, classId);
-        // Emit classObj→superClass and classObj→classLoader edges for reachability.
-        if (srcIdx >= 0) {
-            if (superClassId != 0) {
-                int dstIdx = objectIndex(idMap, superClassId);
-                if (dstIdx >= 0) consumer.accept(srcIdx, dstIdx, 0L);
-            }
-            if (classLoaderId != 0) {
-                int dstIdx = objectIndex(idMap, classLoaderId);
-                if (dstIdx >= 0) consumer.accept(srcIdx, dstIdx, 0L);
-            }
+        int N = graph.N;
+
+        // Emit classObj→superClass and classObj→classLoader
+        int edgeCount = 0;
+        if (srcIdx >= 0 && srcIdx < N) {
+            if (superClassId != 0 && objectIndex(idMap, superClassId) >= 0) edgeCount++;
+            if (classLoaderId != 0 && objectIndex(idMap, classLoaderId) >= 0) edgeCount++;
         }
 
-        // constant pool - emit OBJECT-type entries as edges (MAT-compatible: they hold
-        // MethodType/MemberName/String constants that would otherwise be unreachable)
+        // Constant pool
         int cpCount = p.readU2(); consumed += 2;
         for (int i = 0; i < cpCount; i++) {
             p.readU2(); consumed += 2;
             int type = p.readU1(); consumed++;
             int sz = typeSize(type, ids);
-            if (type == HPROF_TYPE_OBJECT && srcIdx >= 0) {
+            if (type == HPROF_TYPE_OBJECT && srcIdx >= 0 && srcIdx < N) {
                 long refId = p.readId(); consumed += ids;
-                if (refId != 0) {
-                    int dstIdx = objectIndex(idMap, refId);
-                    if (dstIdx >= 0) consumer.accept(srcIdx, dstIdx, 0L);
-                }
+                if (refId != 0 && objectIndex(idMap, refId) >= 0) edgeCount++;
             } else {
                 p.skipFully(sz); consumed += sz;
             }
         }
-
-        // static fields - emit OBJECT-type as edges from class object to static value
+        // Static fields
         int sfCount = p.readU2(); consumed += 2;
         for (int i = 0; i < sfCount; i++) {
             p.skipFully(ids); consumed += ids; // name id
             int type = p.readU1(); consumed++;
             int sz = typeSize(type, ids);
-            if (type == HPROF_TYPE_OBJECT && srcIdx >= 0) {
+            if (type == HPROF_TYPE_OBJECT && srcIdx >= 0 && srcIdx < N) {
                 long refId = p.readId(); consumed += ids;
-                if (refId != 0) {
-                    int dstIdx = objectIndex(idMap, refId);
-                    if (dstIdx >= 0) {
-                        consumer.accept(srcIdx, dstIdx, 0L);
-                    }
-                }
+                if (refId != 0 && objectIndex(idMap, refId) >= 0) edgeCount++;
             } else {
                 p.skipFully(sz); consumed += sz;
             }
         }
-
-        // instance field definitions - skip (no values here)
+        // Instance fields (count for class object — but these don't generate extra edges here)
         int ifCount = p.readU2(); consumed += 2;
         for (int i = 0; i < ifCount; i++) {
-            p.skipFully(ids + 1); consumed += ids + 1;
+            p.skipFully(ids + 1); consumed += ids + 1; // nameId + type
         }
+
+        if (srcIdx >= 0 && srcIdx < N) outDegree[srcIdx] += edgeCount;
         return consumed;
     }
 
@@ -1666,10 +1652,30 @@ public final class HeapGraphBuilder {
         }
 
         void skipFully(long n) throws IOException {
+            if (n <= 0) return;
+            int avail = buf.remaining();
+            if (avail >= n) {
+                buf.position(buf.position() + (int) n);
+                return;
+            }
+            // Fast path for FileChannel: seek past large skips without reading through buffer
+            if (channel != null) {
+                // logical file pos = channel.position() - buf.remaining()
+                // target channel pos = channel.position() - avail + n
+                long targetPos = channel.position() - avail + n;
+                buf.position(buf.limit()); // discard buffered bytes
+                channel.position(targetPos);
+                // buf has remaining==0; next read call will refill from targetPos
+                return;
+            }
+            // Stream path: drain buffer then read+discard
+            n -= avail;
+            buf.position(buf.limit());
             while (n > 0) {
-                int avail = buf.remaining();
+                refill();
+                avail = buf.remaining();
                 if (avail >= n) { buf.position(buf.position() + (int) n); n = 0; }
-                else { n -= avail; buf.position(buf.limit()); refill(); }
+                else { n -= avail; buf.position(buf.limit()); }
             }
         }
 
