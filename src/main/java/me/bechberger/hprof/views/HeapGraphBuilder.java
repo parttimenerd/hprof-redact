@@ -124,12 +124,16 @@ public final class HeapGraphBuilder {
         IdMap idMap = new IdMap();
         long t0 = System.currentTimeMillis();
         HeapGraph graph = phaseA1(idMap);
+        System.gc(); // free A1State, utf8Strings, IdMap.buf (raw before sort)
         long t1 = System.currentTimeMillis();
         phaseA2(graph);
+        System.gc(); // free outDegree/inDegree intermediates, inboundTargets, over-alloc fwdTargets
         long t2 = System.currentTimeMillis();
         RpoDfs.compute(graph);
+        System.gc(); // free fwdOffsets/fwdTargets (freeFwdCsr called inside RpoDfs)
         long t3 = System.currentTimeMillis();
         DominatorTree.compute(graph);
+        System.gc(); // free dfsPos/dfsOrder/dfsParent (freeRpoPos called inside DominatorTree)
         long t4 = System.currentTimeMillis();
         graph.computeUnreachableStats();
         buildClassObjClassIdx(graph);
@@ -621,8 +625,8 @@ public final class HeapGraphBuilder {
         }
         fwdOffsets[N] = totalFwdSlots;
 
-        // fwdTargets: upper-bound size. Actual edges stored at fwdOffsets[i]..fwdEnds[i].
-        // fwdTargets[i] encodes: bits 30..0 = dstIdx (1-based), bit 31 = excluded flag.
+        // fwdTargets upper-bound slot. Actual edges stored contiguously; null-ref gaps compacted later.
+        // Bit 31 of each entry = excluded flag; bits 30..0 = dstIdx (stripped during compaction).
         int[] fwdTargets = new int[totalFwdSlots];
         int[] fwdCursor  = outDegree; // reuse as write cursor; init to fwdOffsets values
         System.arraycopy(fwdOffsets, 0, fwdCursor, 0, N);
@@ -650,12 +654,8 @@ public final class HeapGraphBuilder {
             graph.syntheticThreadEdges = null;
         }
 
-        // fwdEnds[i] = actual end of node i's edge list (fwdCursor holds final write position)
-        // For RpoDfs: iterate fwdOffsets[i]..fwdEnds[i], masking out the exclude-flag high bit.
-        // Note: RpoDfs only needs dstIdx without the flag; mask below.
-        // Build clean fwdTargets for RpoDfs (strip high bit, used only for forward traversal).
-        // We also need the raw (with flag) values for inbound fill below.
-        int[] fwdEnds = fwdCursor; // fwdCursor[i] now holds the actual end position
+        // fwdEnds[i] = fwdCursor[i] = actual write end after fill (before compaction)
+        int[] fwdEnds = fwdCursor;
 
         // --- In-memory inbound CSR build: no second file pass needed ---
         // Compute inDegrees by scanning fwdTargets[fwdOffsets[i]..fwdEnds[i]] for each node.
@@ -676,31 +676,33 @@ public final class HeapGraphBuilder {
         }
         inboundOffsets[N] = totalInbEdges;
 
-        // Fill inboundTargets from fwdTargets (exclude flag already encoded in high bit)
+        // Fill inboundTargets AND compact fwdTargets in-place (close null-ref gaps).
+        // After this, fwdOffsets[i+1] - fwdOffsets[i] = actual edge count (no gaps),
+        // so fwdEnds[] is not needed and we can reuse fwdOffsets[N+1] convention.
         int[] inboundTargets = new int[totalInbEdges];
         System.arraycopy(inboundOffsets, 0, inDegree, 0, N); // reuse inDegree as ibCursor
         int[] ibCursor = inDegree;
+        int writePos = 0; // compacted write position in fwdTargets
         for (int src = 0; src < N; src++) {
             int start = fwdOffsets[src], end = fwdEnds[src];
+            fwdOffsets[src] = writePos; // new compacted start
             for (int k = start; k < end; k++) {
                 int dstRaw = fwdT[k];
                 int dstIdx = dstRaw & 0x7FFFFFFF;
                 if (dstIdx > 0 && dstIdx < N) {
-                    // Encode inbound: high bit = excluded (src is excluded-from edge)
-                    boolean excluded = (dstRaw < 0); // high bit set = excluded
+                    boolean excluded = (dstRaw < 0);
                     inboundTargets[ibCursor[dstIdx]++] = excluded ? (src | Integer.MIN_VALUE) : src;
+                    fwdT[writePos++] = dstIdx; // strip flag, compact
                 }
             }
         }
+        fwdOffsets[N] = writePos; // exact total
+        // fwdTargets is now compact; trim to actual size to reclaim slack
+        if (writePos < totalFwdSlots) fwdTargets = java.util.Arrays.copyOf(fwdTargets, writePos);
 
-        // Strip exclude flags from fwdTargets for RpoDfs forward traversal
-        for (int i = 0; i < totalFwdSlots; i++) {
-            if (fwdT[i] < 0) fwdT[i] &= 0x7FFFFFFF;
-        }
-
-        // Store forward CSR (with actual ends, not upper-bound offsets[i+1])
+        // Store compact forward CSR — fwdOffsets[i+1] is exact, no fwdEnds needed
         graph.fwdOffsets = fwdOffsets;
-        graph.fwdEnds    = fwdEnds;
+        graph.fwdEnds    = null;
         graph.fwdTargets = fwdTargets;
 
         // VByte-encode inbound CSR

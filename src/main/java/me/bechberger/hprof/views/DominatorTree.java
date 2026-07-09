@@ -85,6 +85,7 @@ final class DominatorTree {
         // ----------------------------------------------------------------
         // Main LT loop: process in REVERSE DFS pre-order (d = reachable-1 down to 1).
         // ----------------------------------------------------------------
+        int[] tmp = new int[1]; // reused across iterations for VByte decode
         for (int d = reachable - 1; d >= 1; d--) {
             int v = dfsOrd[d];
 
@@ -100,7 +101,6 @@ final class DominatorTree {
             int end   = graph.inboundOffsets[v + 1];
             byte[] stream = graph.inboundStream;
             int pos = start, prev = 0;
-            int[] tmp = new int[1];
             while (pos < end) {
                 pos = VByte.decode(stream, pos, tmp);
                 int pred  = prev + tmp[0];

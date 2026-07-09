@@ -30,7 +30,6 @@ final class RpoDfs {
     static void compute(HeapGraph graph) {
         int N = graph.N;
         int[] fwdOffsets = graph.fwdOffsets;
-        int[] fwdEnds    = graph.fwdEnds;
         int[] fwdTargets = graph.fwdTargets;
 
         int[] rpoOrder = new int[N];
@@ -69,9 +68,9 @@ final class RpoDfs {
             int cursor = cursorStack[top];
 
             boolean pushed = false;
-            int childCount = childCount(node, graph, fwdOffsets, fwdEnds);
+            int childCount = childCount(node, graph, fwdOffsets);
             while (cursor < childCount) {
-                int child = getChild(node, cursor, graph, fwdOffsets, fwdEnds, fwdTargets);
+                int child = getChild(node, cursor, graph, fwdOffsets, fwdTargets);
                 cursor++;
                 if (child < 0 || child >= N) continue;
                 if (dfsPos[child] == -1) { // not yet visited
@@ -110,20 +109,20 @@ final class RpoDfs {
         graph.freeFwdCsr();
     }
 
-    private static int childCount(int node, HeapGraph graph, int[] fwdOffsets, int[] fwdEnds) {
+    private static int childCount(int node, HeapGraph graph, int[] fwdOffsets) {
         if (node == HeapGraph.VIRTUAL_ROOT) return graph.gcRootCount;
-        if (fwdOffsets == null || fwdEnds == null || node >= fwdOffsets.length - 1) return 0;
-        return fwdEnds[node] - fwdOffsets[node];
+        if (fwdOffsets == null || node >= fwdOffsets.length - 1) return 0;
+        return fwdOffsets[node + 1] - fwdOffsets[node];
     }
 
     private static int getChild(int node, int cursor, HeapGraph graph,
-                                 int[] fwdOffsets, int[] fwdEnds, int[] fwdTargets) {
+                                 int[] fwdOffsets, int[] fwdTargets) {
         if (node == HeapGraph.VIRTUAL_ROOT) {
             return cursor < graph.gcRootCount ? graph.gcRootIds[cursor] : -1;
         }
-        if (fwdOffsets == null || fwdEnds == null || fwdTargets == null) return -1;
+        if (fwdOffsets == null || fwdTargets == null) return -1;
         int start = fwdOffsets[node];
         int idx   = start + cursor;
-        return idx < fwdEnds[node] ? fwdTargets[idx] : -1;
+        return idx < fwdOffsets[node + 1] ? fwdTargets[idx] : -1;
     }
 }
