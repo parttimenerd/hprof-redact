@@ -28,6 +28,7 @@ Exit code: 0 = all checks within tolerance, 1 = regressions found.
 
 import argparse
 import json
+import os
 import re
 import subprocess
 import sys
@@ -352,6 +353,206 @@ def run_our_tool(jar: Path, hprof: Path, out_md: Path) -> bool:
     return result.returncode == 0
 
 
+# ── benchmark ─────────────────────────────────────────────────────────────────
+
+def measure_run(cmd: list, timeout: int = 600) -> 'tuple[float, int] | None':
+    """Wrap cmd with /usr/bin/time -v and parse wall time + peak RSS.
+
+    Returns (wall_seconds, rss_bytes) or None on failure.
+    """
+    wrapped = ['/usr/bin/time', '-v'] + cmd
+    try:
+        result = subprocess.run(
+            wrapped, capture_output=True, text=True, timeout=timeout
+        )
+    except subprocess.TimeoutExpired:
+        return None
+    except Exception:
+        return None
+
+    # /usr/bin/time -v writes its report to stderr
+    stderr = result.stderr
+
+    # Parse elapsed wall-clock time — two formats:
+    #   "Elapsed (wall clock) time (h:mm:ss or m:ss): 0:14.12"
+    #   "Elapsed (wall clock) time (h:mm:ss or m:ss): 0:01:04.53"
+    wall_seconds: Optional[float] = None
+    m = re.search(r'Elapsed \(wall clock\) time.*?:\s*(\S+)', stderr)
+    if m:
+        raw = m.group(1)
+        parts = raw.split(':')
+        if len(parts) == 2:
+            # M:SS.cs
+            wall_seconds = int(parts[0]) * 60 + float(parts[1])
+        elif len(parts) == 3:
+            # H:MM:SS.cs
+            wall_seconds = int(parts[0]) * 3600 + int(parts[1]) * 60 + float(parts[2])
+
+    # Parse maximum resident set size (in KB on Linux)
+    rss_kb: Optional[int] = None
+    m2 = re.search(r'Maximum resident set size \(kbytes\):\s*(\d+)', stderr)
+    if m2:
+        rss_kb = int(m2.group(1))
+
+    if wall_seconds is None or rss_kb is None:
+        return None
+
+    return (wall_seconds, rss_kb * 1024)
+
+
+def _fmt_bytes_human(n: int) -> str:
+    """Human-readable bytes: '62.1 MB', '310.4 MB', etc."""
+    if n >= 1024 ** 3:
+        return f"{n / 1024 ** 3:.1f} GB"
+    if n >= 1024 ** 2:
+        return f"{n / 1024 ** 2:.1f} MB"
+    if n >= 1024:
+        return f"{n / 1024:.1f} KB"
+    return f"{n} B"
+
+
+def run_benchmark(args) -> None:
+    """Measure wall time and peak RSS for our tool and MAT on every .hprof in dumps_dir."""
+    gnu_time = '/usr/bin/time'
+    # Verify /usr/bin/time exists and supports -v
+    if not Path(gnu_time).exists():
+        print(f"ERROR: {gnu_time} not found — benchmark requires GNU time (Linux only)",
+              file=sys.stderr)
+        sys.exit(2)
+    probe = subprocess.run(
+        [gnu_time, '-v', 'true'], capture_output=True, text=True
+    )
+    if 'Maximum resident set size' not in probe.stderr:
+        print(f"ERROR: {gnu_time} does not support -v (need GNU time, not BSD time)",
+              file=sys.stderr)
+        sys.exit(2)
+
+    jar = args.jar
+    mat_sh = args.mat_sh
+    dumps_dir: Path = args.dumps_dir
+
+    # Collect hprof files (filtered by --dump / --skip)
+    hprofs: list[Path] = sorted(dumps_dir.glob('*.hprof'))
+    if args.dump:
+        hprofs = [h for h in hprofs if h.stem == args.dump]
+    if args.skip:
+        hprofs = [h for h in hprofs if h.stem not in args.skip]
+
+    if not hprofs:
+        print("Benchmark: no .hprof files found — nothing to measure.")
+        return
+
+    @dataclass
+    class BenchRow:
+        name: str
+        file_size: int
+        ours_rss: Optional[int]
+        mat_rss: Optional[int]
+        ours_t: Optional[float]
+        mat_t: Optional[float]
+
+    rows: list[BenchRow] = []
+
+    print(f"\nRunning benchmarks on {len(hprofs)} dump(s) (sequential, cold start)…")
+    for hprof in hprofs:
+        file_size = os.path.getsize(hprof)
+        print(f"  {hprof.name} ({_fmt_bytes_human(file_size)})")
+
+        # Our tool: java -jar <jar> views <hprof> /dev/null
+        print(f"    Running our tool…", end='', flush=True)
+        ours = measure_run(
+            ['java', '-jar', str(jar), 'views', str(hprof), '/dev/null']
+        )
+        if ours:
+            print(f" {ours[0]:.1f}s  RSS={_fmt_bytes_human(ours[1])}")
+        else:
+            print(" FAILED")
+
+        # MAT: <mat-sh> <hprof> org.eclipse.mat.api:overview
+        print(f"    Running MAT…", end='', flush=True)
+        mat = measure_run(
+            [str(mat_sh), str(hprof), 'org.eclipse.mat.api:overview']
+        )
+        if mat:
+            print(f" {mat[0]:.1f}s  RSS={_fmt_bytes_human(mat[1])}")
+        else:
+            print(" FAILED")
+
+        rows.append(BenchRow(
+            name=hprof.name,
+            file_size=file_size,
+            ours_rss=ours[1] if ours else None,
+            mat_rss=mat[1] if mat else None,
+            ours_t=ours[0] if ours else None,
+            mat_t=mat[0] if mat else None,
+        ))
+
+    # ── print table ──────────────────────────────────────────────────────────
+    col_w = max(len(r.name) for r in rows) + 2
+
+    total_w = col_w + 12 + 11 + 10 + 12 + 10 + 10 + 10 + 7
+    sep = '=' * total_w
+    dash = '-' * total_w
+
+    print(f"\nBenchmark Results")
+    print(sep)
+    hdr = (f" {'Dump':<{col_w}}{'File size':>12}{'Ours RSS':>11}{'MAT RSS':>10}"
+           f"{'RSS ratio':>12}{'Ours t':>10}{'MAT t':>10}{'Speedup':>10}  Goals")
+    print(hdr)
+    print(dash)
+
+    for r in rows:
+        fs = _fmt_bytes_human(r.file_size)
+
+        if r.ours_rss is not None:
+            ours_rss_s = _fmt_bytes_human(r.ours_rss)
+        else:
+            ours_rss_s = 'ERR'
+
+        if r.mat_rss is not None:
+            mat_rss_s = _fmt_bytes_human(r.mat_rss)
+        else:
+            mat_rss_s = 'ERR'
+
+        if r.ours_rss and r.mat_rss:
+            rss_ratio_s = f"{r.mat_rss / r.ours_rss:.1f}x"
+        else:
+            rss_ratio_s = 'ERR'
+
+        if r.ours_t is not None:
+            ours_t_s = f"{r.ours_t:.1f}s"
+        else:
+            ours_t_s = 'ERR'
+
+        if r.mat_t is not None:
+            mat_t_s = f"{r.mat_t:.1f}s"
+        else:
+            mat_t_s = 'ERR'
+
+        if r.ours_t and r.mat_t:
+            speedup_s = f"{r.mat_t / r.ours_t:.1f}x"
+        else:
+            speedup_s = 'ERR'
+
+        # Goals
+        if r.ours_rss is not None:
+            rss_goal = '✓' if r.ours_rss <= r.file_size / 2 else '✗'
+        else:
+            rss_goal = '?'
+        if r.ours_t is not None and r.mat_t is not None:
+            speed_goal = '✓' if r.mat_t / r.ours_t >= 3.0 else '✗'
+        else:
+            speed_goal = '?'
+        goals = f"{rss_goal} {speed_goal}"
+
+        print(f" {r.name:<{col_w}}{fs:>12}{ours_rss_s:>11}{mat_rss_s:>10}"
+              f"{rss_ratio_s:>12}{ours_t_s:>10}{mat_t_s:>10}{speedup_s:>10}  {goals}")
+
+    print(dash)
+    print(f" Goals: RSS ≤ filesize/2 (col 1), speedup ≥ 3× (col 2)")
+    print()
+
+
 def _run_one(args_tuple) -> tuple[str, bool]:
     """Worker for parallel generation. Returns (stem, success)."""
     stem, jar, hprof, md_out = args_tuple
@@ -524,7 +725,16 @@ def main():
     ap.add_argument('--no-color',      action='store_true')
     ap.add_argument('--workers',       type=int, default=10,
                     help='Parallel workers for report generation (default: 10)')
+    ap.add_argument('--benchmark',     action='store_true',
+                    help='Measure wall time and peak RSS for our tool and MAT')
+    ap.add_argument('--mat-sh',        type=Path,
+                    help='Path to MAT ParseHeapDump.sh (required with --benchmark)')
     args = ap.parse_args()
+
+    if args.benchmark:
+        if not args.mat_sh:
+            ap.error('--mat-sh is required when --benchmark is set')
+        run_benchmark(args)
 
     use_color = not args.no_color and sys.stdout.isatty()
 
