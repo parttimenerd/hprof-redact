@@ -1,270 +1,230 @@
-# Performance Audit: hprof-redact Views
+# Performance Analysis: hprof-redact views package
 
-**Context:** Processing a 135 MB HPROF dump (fj-kmeans, ~800M objects, ~1.6B edges) takes several minutes with peak virtual memory usage of 38 GB. This document identifies root causes and concrete mitigation strategies.
-
----
-
-## Critical Issues (Primary drivers of 38 GB virtual memory / slow runtime)
-
-### CRITICAL-1: UTF-8 String Interning — Unbounded HashMap Growth
-**File:** `HeapGraphBuilder.java` lines 177-185  
-**Root Cause:** All UTF-8 strings from HPROF records (class names, field names, method names, stack frame info) are decoded and stored in `graph.utf8Strings` (a HashMap<Long, String>). For a large heap, this can include:
-- Thousands of unique class names
-- Millions of field/method names (not deduplicated across loads)
-- Each String object has ~40-60 bytes overhead plus character data
-
-For 800M objects with diverse metadata, this HashMap can easily accumulate hundreds of MB of String objects that are held in memory for the entire run.
-
-**Concrete Fix:**
-1. **Lazy decode/intern:** Store raw bytes in a map first; decode only when accessed by reports. Implement a `String getUtf8String(long nameId)` method that decodes on-demand with internal LRU caching (e.g., 10k entries).
-2. **Estimated impact:** Reduces UTF-8 Map footprint from ~200-500 MB (worst case) to ~20-50 MB (working set).
-
-**Implementation sketch:**
-- Add a private `LinkedHashMap<Long, String> utf8Cache = new LinkedHashMap<Long, String>(1 << 14, 0.75f, true) { protected boolean removeEldestEntry(...) { return size() > 10000; } };`
-- Store raw bytes in a separate `Map<Long, byte[]> utf8Raw` initially.
-- On access, check cache first, then decode and populate cache.
+Target workload: 1 million+ objects, 2+ million edges, 100 MB–2 GB HPROF files.
 
 ---
 
-### CRITICAL-2: Multi-Pass File Parsing — Redundant Buffering and Re-decompression
-**File:** `HeapGraphBuilder.java` lines 121-138 (Phase A.1, A.2, B scans)  
-**Root Cause:** The three main phases (A.1, A.2, B) each re-open the HPROF file independently:
-- Phase A.1 (line 157): `try (Parser p = openParser())`
-- Phase A.2 (lines 583, 626): Two separate `openParser()` calls
-- Phase B (lines 940, 962): Two more `openParser()` calls
+## 1. Concrete Performance Bottlenecks
 
-For gzipped files, this means **decompressing the entire file 5 times**. Each decompression loads ~1 MB buffers into the JVM heap (GZIPInputStream internal buffers). Even for uncompressed files, this causes:
-- Repeated I/O system calls (inefficient for SSDs)
-- Multiple 1 MB direct ByteBuffers in off-heap memory (counted toward virtual memory)
-- Cache misses on re-reads of cold file pages
+### 1.1 Five file passes instead of three
 
-**Concrete Fix:**
-1. **Single-pass consolidation (Phase B only):** Merge Phase A.2b (forward CSR fill) and Phase B (inbound CSR fill + named edges) into a single pass. Store intermediate state (outDegree counts from A.2a) to enable single traversal of heap data.
-2. **If consolidation is infeasible:** Cache decompressed content in a ring buffer or memory-mapped region.
-3. **Estimated impact:** Eliminates 60% of file I/O overhead; saves ~2-4 GB virtual memory on gzipped 135 MB dumps (5x decompression buffers @ 1 MB each + OS page cache duplication).
+**File:** `HeapGraphBuilder.java`  
+**Summary:** The build pipeline opens the HPROF file five times for sequential reads. Phase A.2 opens it twice (sub-pass A.2a count, sub-pass A.2b fill), then Phase B opens it twice more (one inDegree recount, one named-edge fill). For a 2 GB file on spinning disk or networked storage this is catastrophic; even on NVMe it wastes significant I/O time.
 
-**Implementation sketch:**
-- Refactor `phaseA2` to split into:
-  - `phaseA2_count()`: Single pass to count inDegree and outDegree
-  - Keep `phaseA2_fill()` inline with Phase B in a combined `phaseB()` that does both inbound CSR + named edges in one pass
+The inDegree recount at the start of `phaseB` (lines 955–966) is entirely redundant: the same counts were computed in sub-pass A.2a and stored in `inDegree`. They are not mutated before Phase B begins—only `fwdOffsets`/`fwdTargets` are written from those counts. The `inDegree` array (`inDegreeCount`) in `phaseA2` is discarded after the prefix-sum at lines 618–623, but the prefix-sum result itself (`inboundOffsets`) could be retained and passed to Phase B.
 
----
+**Fix:** Thread `inboundOffsets` (or the raw `inDegree` counts) from `phaseA2` through to `phaseB`, eliminating one full file pass. This reduces five sequential reads to four.
 
-### CRITICAL-3: Parallel Array Doubling in A1State — Quadratic Growth
-**File:** `HeapGraphBuilder.java` lines 1264-1272 (A1State.appendAddress)  
-**Root Cause:** Dynamic buffers for addresses, shallow sizes, class IDs, and array types use `Arrays.copyOf(..., count * 2)` when full. For 800M objects:
-- Initial estimate: ~16.7M objects → 4 x 8-byte longs = 32 MB per buffer
-- Worst case: growth path triggers at ~100M, then at ~200M, then ~400M, ~800M
-- Each doubling retains the old array until GC; transient peaks can reach **2x the target size**
-- With 4 parallel arrays (addrBuf, shallowBuf, classIdBuf, arrayTypeBuf), the transiency multiplier is ~8x
+### 1.2 `INSTANCE_DUMP` data allocated as `byte[]` twice per object per edge-scan pass
 
-For 800M objects, target size is ~6.4 GB; doubling transients = **12-16 GB peak just for A1State**.
+**File:** `HeapGraphBuilder.java`, `scanEdgesInSegment` line 718; `scanEdgesWithNamesInSegment` line 1056  
+**Summary:** For every `HPROF_GC_INSTANCE_DUMP` record encountered in sub-pass A.2b and the Phase B named-edge scan, `p.readBytes(dataLen)` allocates a fresh `byte[]`. With one million instances and an average instance data size of ~64 bytes, each of these two passes allocates ~64 MB of short-lived objects. GC pressure compounds with allocation: these arrays are immediately eligible for collection but generate significant minor-GC activity.
 
-**Concrete Fix:**
-1. **Better initial estimate:** Use `Math.max(fileSize / 40, 1_000_000)` instead of `fileSize / 48`. For 135 MB, this estimates ~3.4M, closer to actual ~800M, reducing overallocation factor.
-2. **Preallocate arrays upfront:** After parsing HPROF_START_THREAD, HPROF_LOAD_CLASS, etc., scan for object count hints (e.g., some HPROF variants include object count metadata). Pre-size all buffers to exact N once known.
-3. **Use primitive arrays pool:** Recycle unused doubling buffers via a simple list instead of relying on GC.
-4. **Estimated impact:** Reduces transient peak by 40-50% (~6-8 GB saved for 135 MB dump).
+**Fix:** Maintain a single reusable `byte[]` scratch buffer in the scan methods, growing it to `max(dataLen)` seen so far:
 
-**Implementation sketch:**
 ```java
-// Better estimate:
-int nEstimated = Math.max(1_000_000, (int) Math.min(fileSize / 40, Integer.MAX_VALUE / 2L));
-// Then in buildClassList, once idMap.size() is known, resize exact:
-if (count < idMap.size()) {
-  // Exact size available, trim now to avoid future doubles
-  A1State state = ...; // resize buffers to idMap.size() + margin
+// field in HeapGraphBuilder:
+private byte[] instanceDataBuf = new byte[256];
+
+// in scanEdgesInSegment / scanEdgesWithNamesInSegment:
+if (dataLen > instanceDataBuf.length)
+    instanceDataBuf = new byte[dataLen];
+p.readBytesInto(instanceDataBuf, dataLen);
+```
+
+`Parser.readBytesInto` is a straightforward addition that reads directly into the provided buffer without allocation.
+
+### 1.3 `sortWithFlags` is O(n²) for rows with more than 16 entries
+
+**File:** `HeapGraphBuilder.java`, `BitSortHelper.sortWithFlags` lines 1609–1628; `CsrBuilder.java`, `sortWithFlags` lines 276–320  
+**Summary:** For rows larger than 16 (i.e., nodes with in-degree > 16), the code strips flags, sorts, then re-applies flags via a linear scan per entry: an O(n²) algorithm. High-degree nodes (e.g., widely-shared utility objects, arrays, or the bootstrap classloader) can easily have thousands of incoming edges. A node with 10,000 predecessors takes ~50 million comparisons.
+
+**Fix:** Pack the flag into the lower bit before sorting, then use standard sort and unpack:
+
+```java
+// Pack: encode as (srcIdx << 1) | excludedBit, sort normally, unpack
+for (int i = lo; i < hi; i++) {
+    int raw = arr[i];
+    int src = raw & Integer.MAX_VALUE;
+    int flag = (raw >>> 31) & 1;
+    arr[i] = (src << 1) | flag;  // requires N < 2^30, true for all real heaps
+}
+Arrays.sort(arr, lo, hi);
+for (int i = lo; i < hi; i++) {
+    int v = arr[i];
+    arr[i] = (v >>> 1) | ((v & 1) << 31);
+}
+```
+
+This is O(n log n) and avoids the `boolean[]` and nested scan entirely.
+
+### 1.4 `buildPath` and `writeAccumulationPath` are O(N) per depth step
+
+**File:** `HtmlReportData.java` lines 469–486; `LeakSuspectsReport.java` lines 129–152  
+**Summary:** Finding the best child at each depth step scans all N nodes to find `idom[i] == current`. With N = 1 million and a path of depth 5, that is 5 million iterations per suspect. For large heaps with multiple suspects this adds seconds to report generation.
+
+The dominator-tree children CSR is already built inside `RetainedSizes.compute` (lines 80–97) for the DFS. That structure (`childTargets`/`childOff`) is discarded at the end of `RetainedSizes.compute` (local variables go out of scope). If it were retained on the graph, path-walking would become O(degree) per step instead of O(N).
+
+**Fix:** Expose `int[] domChildOffsets` / `int[] domChildTargets` on `HeapGraph`, populate them once in `RetainedSizes.compute` (they are already computed there), and use them in `buildPath` and `writeAccumulationPath`.
+
+### 1.5 `resolveExcludePairs` does O(C) + O(F) scans per pair for name resolution
+
+**File:** `HeapGraphBuilder.java` lines 1182–1213  
+**Summary:** The three default exclude pairs are resolved by iterating `graph.classList` (O(C) for class name lookup) and then iterating `graph.fieldNameIntern.entrySet()` (O(F)) for each pair. For a heap with 50,000 classes and 100,000 field names this is ~450,000 iterations. The field-name lookup inverts the intern map by calling `graph.fieldNameFor(e.getValue())` on each entry—a slow reverse lookup.
+
+**Fix:** Build a transient `name→classIdx` map during `buildClassList` (already iterating classList), and look up field names directly via `utf8Strings` before interning rather than scanning the intern map in reverse.
+
+### 1.6 `isExcluded` linear scan on every inbound edge
+
+**File:** `HeapGraphBuilder.java` line 1173; `CsrBuilder.java` line 126  
+**Summary:** `isExcluded` iterates `excludePairs` (always length ≤ 3) for every single inbound edge stored. With 2 million edges this is 6 million comparisons. While individually cheap, a two-level lookup keyed on `(classIdx << 16) | nameIdx` packed into a small `int[]` set or even a single precomputed `long` bitmask would reduce it to one operation.
+
+### 1.7 `computeMatSizeRecursive` recomputes intermediate results and has no stack guard
+
+**File:** `HeapGraphBuilder.java` lines 73–90  
+**Summary:** `computeMatSizeRecursive` is recursive and walks the full superclass chain without caching intermediate (non-leaf) results. The outer `computeMatInstanceSize` caches only the final `alignUp` result. For class B extending C extending D (each computed cold), computing size(B) recurses into size(C) which recurses into size(D); if later size(C) is requested again it is not in the cache. Also there is no recursion depth guard—the `guard` variable in `resolveInheritedFieldOffsets` (line 295) caps hierarchy walks at 256, but the recursive size computation has no equivalent.
+
+**Fix:** Inline the cache lookup inside `computeMatSizeRecursive` itself so all intermediate results are memoized, and add a depth counter to guard against cycles.
+
+---
+
+## 2. Memory Usage Improvements
+
+### 2.1 `A1State` parallel arrays duplicate addresses already in `IdMap`
+
+**File:** `HeapGraphBuilder.java`, `A1State` lines 1220–1525  
+**Summary:** `A1State` maintains `addrBuf` (long[]), `shallowBuf` (int[]), `classIdBuf` (long[]), and `arrayTypeBuf` (byte[]) in parallel, while `IdMap.buf` also holds every address. Before `idMap.sort()` there are two copies of every address: one in `addrBuf` and one in `IdMap.buf`. For 1 million objects at 8 bytes each that is 16 MB of duplicate long arrays.
+
+`appendShallowSize`, `appendClassId`, and `appendArrayType` (lines 1291–1302) all depend on `addrBuf[count-1]` being the just-appended address, so both arrays must be kept in sync. The simplest fix is to eliminate `addrBuf` and drive all metadata writes by `count` directly (since `appendAddress` always increments `count` first), removing the need for the address-equality check entirely.
+
+### 2.2 `classObjFields` uses `HashMap<Long, List<long[]>>` with extensive boxing
+
+**File:** `HeapGraphBuilder.java`, `A1State` line 1243  
+**Summary:** `classObjFields` maps each classId (boxed `Long`) to a `List<long[]>` where each entry is a two-element `long[]`. With 50,000 classes and an average of 3 object fields per class, this creates ~150,000 `long[]` allocations plus ~50,000 boxed Longs. Use Eclipse Collections' `LongObjectHashMap<long[]>` with a flat encoding (alternating nameId, offset in the array) to collapse this to ~50,000 allocations with zero boxing.
+
+### 2.3 `fwdOffsets`/`fwdTargets` and `inboundTargets` allocation overlap in Phase A.2/B transition
+
+**File:** `HeapGraphBuilder.java` lines 619–624, lines 970–971  
+**Summary:** At the end of Phase A.2, `fwdOffsets[N+1]` and `fwdTargets[totalEdges]` are both live. Phase B then allocates `inDegree[N]` and `inboundTargets[total]`. For 1M nodes and 2M edges this is approximately: fwdOffsets (4 MB) + fwdTargets (8 MB) + inDegree (4 MB) + inboundTargets (8 MB) = 24 MB live simultaneously. The fwdCSR is freed by `RpoDfs.compute` before Phase B, so the actual overlap at Phase B entry is only `inDegree` + `inboundTargets` alongside the already-freed fwdCSR. No change needed here, but note that the redundant inDegree recount in Phase B (§1.1) causes an unnecessary extra 4 MB allocation.
+
+### 2.4 Dominator-tree DFS in `RetainedSizes` allocates eight O(N) arrays simultaneously
+
+**File:** `RetainedSizes.java` lines 80–113  
+**Summary:** The `hasSameClassAncestor` DFS allocates: `childDeg[N]`, `childOff[N+1]`, `childTargets[E]`, `cursor[N]`, `classToLastDepth[C+1]`, `classObjDepth[C+1]`, `stackNode[N+1]`, `stackChildIdx[N+1]`, `stackSavedDepth[N+1]`, `stackSavedObjDepth[N+1]`. For N=1M and E=2M this is approximately 4×4 MB (stack arrays) + 8 MB (childTargets) + 4 MB (childOff + childDeg + cursor) ≈ 28 MB peak.
+
+`cursor` (line 91) is used only during the CSR fill loop then set to null (line 98), and `childDeg` (line 80) is set to null (line 100)—good. The four stack arrays can be reduced to three by bit-packing `stackSavedDepth` and `stackSavedObjDepth` into a single `long[]` (each value is a depth ≤ N, fitting in 32 bits).
+
+### 2.5 `HeapGraph.retainedSizeOf` null-checks overflow map on every hot-path call
+
+**File:** `HeapGraph.java` lines 227–233  
+**Summary:** In the retained-size accumulation loop (`RetainedSizes.java` lines 41–51), `retainedSizeOf` is called twice per node: once for the child and once for the parent. The current implementation checks `retainedSizeOverflow != null` before the fast-path `Integer.toUnsignedLong(retainedSize[idx])`. The overflow map is non-null only when some object retains more than 4.29 GB—extremely rare. Reordering to check the sentinel value first avoids the null check in the common case:
+
+```java
+long retainedSizeOf(int idx) {
+    int raw = retainedSize[idx];
+    if (raw != (int)0xFFFFFFFFL) return Integer.toUnsignedLong(raw);
+    if (retainedSizeOverflow != null) {
+        long v = retainedSizeOverflow.get(idx);
+        if (v != LongLongMap.NOT_FOUND) return v;
+    }
+    return 0xFFFFFFFFL;
 }
 ```
 
 ---
 
-### CRITICAL-4: HashMap Allocation for Metadata Maps — O(N) Space Multiplication
-**File:** `HeapGraphBuilder.java` A1State class, lines 1213-1250  
-**Root Cause:** A1State accumulates metadata using multiple HashMaps/LongMaps:
-- `classIdToNameId`, `classIdToSerial`, `classInstanceSizes`, `classOwnFieldsSizes`, etc. (~8-10 maps)
-- Each map entry has overhead (~56 bytes per entry in Eclipse Collections maps)
-- For a typical heap with ~10k-50k distinct classes, this is ~0.5-2.8 MB per map = **5-28 MB total**
+## 3. Algorithm Improvements
 
-This is minor, but when combined with UTF-8 map growth, it compounds.
+### 3.1 Top-N reports build full sorted lists instead of using a bounded heap
 
-**Concrete Fix:**
-1. **Merge metadata maps into single ClassBuilder record:** Use a custom `class[] classMetadata` array indexed by class serial, avoiding HashMap overhead.
-2. **Estimated impact:** Saves ~10-20 MB (modest but helps GC pressure).
+**File:** `HtmlReportData.java` lines 178–195, 200–224, 228–252, 256–280; `TopConsumersReport.java` lines 37–44  
+**Summary:** `buildBiggestObjects`, `buildBiggestClasses`, `buildBiggestPackages`, and `buildBiggestClassLoaders` all collect every candidate into an `ArrayList`, then call `.sort()` on the entire list to extract the top 20. With 100,000 top-level dominators, allocating `ArrayList<int[]>` of that size and sorting it is wasteful. Use a `PriorityQueue<Integer>` of capacity 20 (min-heap) and keep only the top 20 during the single O(N) scan, achieving O(N log 20) time with O(20) extra space.
 
----
+### 3.2 `buildTopConsumers` does two O(N) passes per suspect via BitSet propagation
 
-## High Priority Issues (Memory leaks or unbounded growth patterns)
+**File:** `HtmlReportData.java` lines 379–408  
+**Summary:** For each suspect node, `buildTopConsumers` allocates a `BitSet(N)`, sets the root, then iterates all nodes 1..N propagating `idom[v]` membership, then iterates the set bits. For N=1M with 10 suspects this is 20M iterations. If the children CSR from `RetainedSizes` were retained on the graph (see §1.4), a DFS over only the subtree (typically far smaller than N) would suffice.
 
-### HIGH-1: Forward CSR + Inbound CSR Both Held in Memory Simultaneously (Phase B)
-**File:** `HeapGraphBuilder.java` lines 930-990  
-**Root Cause:** During Phase B, both `graph.fwdOffsets` and `graph.fwdTargets` (from Phase A.2) and the new `inboundTargets` array are in memory at the same time. For 1.6B edges with 4 bytes per edge:
-- fwdTargets: 1.6B * 4 = 6.4 GB
-- inboundTargets: 1.6B * 4 = 6.4 GB
-- Transient peak: **12.8 GB** (before VByte encoding compresses inboundTargets)
+### 3.3 `DominatorTree` convergence guard allows up to N iterations before warning
 
-**Concrete Fix:**
-1. **Free fwdTargets before Phase B:** After Phase A.2 and RPO DFS, call `graph.freeFwdCsr()` immediately (line 103 in `RpoDfs.compute`). Currently the free happens, but ensure the inbound CSR builder doesn't re-read forward edges.
-2. **Verify:** Check that `phaseB()` does not re-scan forward CSR (it doesn't — it uses `scanEdgesWithNames`, which re-reads HPROF directly). Good, but document this.
-3. **Estimated impact:** Already mitigated by current code structure; verify no regressions on this.
+**File:** `DominatorTree.java` lines 52–57  
+**Summary:** The convergence guard `iter > N + 10` permits N+10 full passes before warning. For N=1M that is over a million O(N × avg_in_degree) iterations—effectively an infinite loop in practice. CHK on a correct RPO ordering of a reducible graph converges in 1–2 iterations; for irreducible graphs a bound of ~50 is generous. The guard should be `iter > 50` (or some similarly small constant) to catch pathological inputs immediately.
 
----
+### 3.4 `IdMap.canUseCompressedOops` iterates all N addresses to check alignment
 
-### HIGH-2: Class Inheritance Chain Walk — Unbounded Recursion Depth
-**File:** `HeapGraphBuilder.java` lines 282-325 (resolveInheritedFieldOffsets)  
-**Root Cause:** Walking the class hierarchy for each of N classes uses recursive call to `computeMatSizeRecursive` (line 86). No guard against cycles; if class hierarchy is malformed (e.g., A → B → C → A), this recurses infinitely.
+**File:** `IdMap.java` lines 76–83  
+**Summary:** `canUseCompressedOops` scans all N addresses after sorting. Since the array is sorted, alignment can be checked by examining only the first entry (`buf[0]`) for the `(addr & 7) != 0` case, and the last entry (`buf[size-1]`) for the overflow case. This reduces an O(N) scan to O(1):
 
-**Current code:** Has a guard on line 293 (`int guard = 0; ... guard++ < 256`), but only for the hierarchy walk in `resolveInheritedFieldOffsets`. The `computeMatSizeRecursive` function (lines 73-90) called during size computation has no guard.
-
-**Concrete Fix:**
-1. **Add recursion depth guard to `computeMatSizeRecursive`:** Add a max-depth parameter; bail to default size if exceeded.
-2. **Estimated impact:** Prevents stack overflow on malformed heaps; negligible performance cost.
-
-**Implementation sketch:**
 ```java
-private static int computeMatSizeRecursive(long classId, LongLongHashMap classSuperIds,
-                                           LongIntHashMap ownObjectFieldCount,
-                                           LongIntHashMap ownPrimitiveFieldBytes,
-                                           int pointerSize, int refSize, int depth) {
-    if (depth > 256) return pointerSize + refSize; // bail
-    long superId = classSuperIds.getIfAbsent(classId, 0L);
-    // ...
-    int superSize = computeMatSizeRecursive(superId, ..., depth + 1);
-    // ...
+private boolean canUseCompressedOops() {
+    if (size == 0) return false;
+    if ((buf[0] & 7L) != 0) return false;          // any non-aligned → no
+    if ((buf[size-1] >>> 3) > 0xFFFFFFFFL) return false; // max exceeds 32-bit → no
+    return true;
 }
 ```
 
----
+The assumption is that if all addresses are 8-byte aligned (the norm for JVM heaps), then `buf[0]` being aligned implies all are. This holds because misaligned addresses are exceptional; if any address is misaligned, `buf[0]` has a 7/8 chance of being misaligned given uniform distribution.  
+**Note:** This is only safe if every address in the dump shares the same alignment property. The conservative fallback is to check first + last + a sample of N entries. For maximum safety, check only the last entry for the overflow condition (since the array is sorted, `buf[size-1]` is the maximum) and keep the alignment scan but break early on first violation.
 
-### HIGH-3: Synthetic Thread-Local Edges HashMap — Per-Thread Storage
-**File:** `HeapGraphBuilder.java` lines 358-376 (buildSyntheticEdges)  
-**Root Cause:** `threadLocalsBySerial` (a HashMap<Integer, List<Long>>) accumulates all thread-local object addresses. For a heap with many threads and deep stacks:
-- Threads: 100-1000 typical
-- Locals per thread: 10-100
-- Storage: 100-1000 threads * 50 locals * 8 bytes (Long) = 40 MB - 8 GB in worst case
+### 3.5 `resolveInheritedFieldOffsets` allocates `ArrayList` and `int[]` per class
 
-For 135 MB dumps, this is usually < 100 MB, but for large multi-threaded heaps, it can spike.
-
-**Concrete Fix:**
-1. **Convert to primitive array:** Use `threadSerialToLocalIds` as a single flat array with per-thread start/end offsets (like a CSR).
-2. **Estimated impact:** Saves ~30-50% of synthetic edge storage (avoiding boxing, list overhead).
+**File:** `HeapGraphBuilder.java` lines 284–327  
+**Summary:** For each of C classes, `resolveInheritedFieldOffsets` allocates two `ArrayList`s (`nameChunks`, `offsetChunks`) and one `int[]` per level of the hierarchy to hold adjusted offsets. With 50,000 classes and average hierarchy depth 4, this is ~200,000 short-lived allocations. Replace the ArrayLists with a single flat `int[]` scratch buffer (reused across classes) that accumulates adjusted offsets directly.
 
 ---
 
-## Medium Priority Issues (Correctness/performance improvements)
+## 4. Code Quality / Maintainability Issues
 
-### MEDIUM-1: IdMap Skip Index Rebuild After Deduplication
-**File:** `IdMap.java` lines 53-74 (sort method)  
-**Root Cause:** After deduplication, the skip index is rebuilt from the deduplicated array. If deduplication is significant (e.g., 10% of entries are duplicates from GC roots), the skip index size() will be different from the pre-dedup array, but skip-stride is not adjusted.
+### 4.1 `CsrBuilder.encodeVByte` is broken dead code
 
-**Concrete Fix:**
-1. **Rebuild skip index after dedupe:** Already done on line 72. No issue here. Code is correct.
+**File:** `CsrBuilder.java` lines 150–220  
+**Summary:** `CsrBuilder.encodeVByte()` contains an acknowledged bug: the exclude-flag re-indexing logic is incomplete (lines 193–213 include a comment "CORRECTION: use a separate logical edge counter" that was never implemented). This method is superseded by `encodeVByteWithEmbeddedFlags()` and by `BitSortHelper.sortAndEncode` in `HeapGraphBuilder`. The broken method should be removed to avoid accidental use.
 
----
+### 4.2 `CsrBuilder` and `HeapGraphBuilder.BitSortHelper` duplicate `sortWithFlags`
 
-### MEDIUM-2: VByte Stream Overestimation on Initial Allocation
-**File:** `HeapGraphBuilder.java` lines 1541-1576 (BitSortHelper.sortAndEncode)  
-**Root Cause:** Stream is allocated as `new byte[Math.max(totalEdges * 2, 16)]` (line 1543). For sparse deltas (common in dominator trees), VByte compression can achieve 1.2-1.5 bytes/edge, but the allocation assumes 2 bytes/edge, wasting ~30-40% of initial buffer.
+**File:** `CsrBuilder.java` lines 276–320; `HeapGraphBuilder.java` lines 1594–1628  
+**Summary:** Two nearly identical implementations of `sortWithFlags` exist, both containing the O(n²) flaw described in §1.3. One authoritative implementation should live in a shared package-private utility class, and both callers should use it.
 
-**Concrete Fix:**
-1. **Use dynamic resizing:** Already implemented (lines 1564-1565 check `if (streamPos + 8 > stream.length)`). No issue here. Code is correct.
+### 4.3 `HeapGraph.totalHeapBytes()` is an uncached O(N) scan duplicated in multiple places
 
----
+**File:** `HeapGraph.java` lines 247–250; `HtmlReportData.java` lines 85–88; `TopConsumersReport.java` line 52–53; `LeakSuspectsReport.java` line 39–42  
+**Summary:** `totalHeapBytes()` iterates all N objects on every call. The same loop appears inline in `HtmlReportData.compute`, `TopConsumersReport.writeBiggestObjects`, and `LeakSuspectsReport.write`. The field `heapTotalBytes` already exists on `HeapGraph` (line 43) with the comment "set by builder after all shallow sizes collected"—but it is never set (initialized to 0 at line 142). Populate it once in `HeapGraphBuilder.build()` and replace all callers with `graph.heapTotalBytes`.
 
-### MEDIUM-3: Exclude Pairs Linear Search in isExcluded
-**File:** `HeapGraphBuilder.java` line 1160 (isExcluded)  
-**Root Cause:** `isExcluded` performs linear search over `excludePairs` array. There are only 3 pairs (line 1168), so the O(3) search is negligible, but for clarity, it's worth noting this is intentionally small.
+### 4.4 `HeapGraphBuilder.skipToHeapSection` is unreachable dead code
 
-**Concrete Fix:** No action needed.
+**File:** `HeapGraphBuilder.java` lines 1115–1133  
+**Summary:** `skipToHeapSection` is a private static method that is never called. Its body contains a comment describing an abandoned design. Remove it.
 
----
+### 4.5 `HeapGraph.classSerialToIndex` uses boxed `Map<Integer, Integer>`
 
-### MEDIUM-4: StackTraceData Not Loaded by Default
-**File:** `HeapGraphBuilder.java` line 119 (stackTraces field)  
-**Root Cause:** Stack trace frames are only loaded if `StackTraceReader.read()` is explicitly called. This is good for memory efficiency, but if frames are large and many, they can cause bloat on-demand.
+**File:** `HeapGraph.java` lines 106–107  
+**Summary:** `classSerialToIndex` is declared as `Map<Integer, Integer>` with the comment "keep boxed, small". Eclipse Collections' `IntIntHashMap` is a direct drop-in replacement that eliminates boxing. With ~50,000 classes the impact is minor but inconsistent with the rest of the codebase using primitive maps throughout.
 
-**Concrete Fix:** Already mitigated by lazy loading. No action needed; document as a feature.
+### 4.6 `A1State.appendShallowSize` / `appendClassId` / `appendArrayType` repeat redundant address checks
 
----
+**File:** `HeapGraphBuilder.java` lines 1291–1302  
+**Summary:** Each of these three methods checks `count > 0 && addrBuf[count-1] == addr`. Since they are always called immediately after `appendAddress(addr)`, the guard is defensive but adds three array reads and comparisons per object (3 million extra comparisons for 1M objects). Consolidate into a single `appendObject(addr, shallow, classId, arrayType)` method that writes all four slots without the redundant checks.
 
-## Low Priority Issues (Minor optimizations)
+### 4.7 `VByte.decode` uses a mutable `int[1]` output parameter
 
-### LOW-1: Primitive Array Type Storage — Byte Array Indexing
-**File:** `HeapGraphBuilder.java` A1State, line 1232  
-**Root Cause:** `int[] primArrayClassIdx = new int[12]` stores array class indices indexed by HPROF type code (0-11). This is efficient, but the type code is stored in `arrayTypeBuf` as a byte, requiring casting. No performance issue; just a minor clarity point.
+**File:** `VByte.java` lines 25–36; `DominatorTree.java` line 92  
+**Summary:** The decode API requires callers to pass a `int[1]` wrapper to receive the decoded value. In `DominatorTree.computeNewIdom`, `tmp = new int[1]` is allocated once outside the loop—acceptable. The API could encode both result and new position in a single `long` return value (`(long)value << 32 | newPos`), which avoids the wrapper array and is more amenable to JIT inlining:
 
----
+```java
+static long decodeL(byte[] buf, int pos) {
+    int value = 0, shift = 0;
+    while (true) {
+        int b = buf[pos++] & 0xFF;
+        value |= (b & 0x7F) << shift;
+        if ((b & 0x80) == 0) return ((long)value << 32) | (pos & 0xFFFFFFFFL);
+        shift += 7;
+    }
+}
+// caller: long r = VByte.decodeL(stream, pos); int val = (int)(r >>> 32); pos = (int)r;
+```
 
-### LOW-2: ParallelArray Growth Without Compaction
-**File:** `HeapGraphBuilder.java` A1State lines 1264-1272  
-**Root Cause:** When buffers are doubled, old arrays are discarded. For very large heaps with multiple doublings, there can be brief moments where GC collects many large arrays. This causes GC pause spikes.
+### 4.8 `DominatorTree.intersect` performs two independent bounded walks in a loop that may not terminate
 
-**Concrete Fix:**
-1. **GC tuning:** Recommend `-XX:+UseG1GC -XX:MaxGCPauseMillis=500` on JVM command line to smooth out GC pauses.
-2. **Estimated impact:** Reduces pause spikes by 20-30%.
-
----
-
-### LOW-3: BitSet for Excluded Edges — Sparse Representation
-**File:** `HeapGraphBuilder.java` line 1542 (newExcluded = new BitSet(totalEdges))  
-**Root Cause:** A BitSet is allocated for all edges, but excluded edges are extremely rare (~3 per heap). This wastes space.
-
-**Concrete Fix:**
-1. **Use a compact set instead:** Store excluded edge indices in a small array or hash set.
-2. **Estimated impact:** Saves < 1 MB in practice; negligible.
-
----
-
-### LOW-4: LongLongMap Open Addressing — Clustering on Collision
-**File:** `HeapGraph.java` lines 274-334 (LongLongMap)  
-**Root Cause:** Linear probing for overflow entries can cause clustering, slowing down subsequent lookups. This only affects the overflow maps for very large objects (> 2040 B shallow size), which are rare.
-
-**Concrete Fix:**
-1. **Quadratic probing or chaining:** Switch to quadratic probing or chaining to reduce clustering.
-2. **Estimated impact:** Negligible; overflow maps are tiny in practice.
-
----
-
-## Summary of Recommended Actions (By Priority)
-
-| Priority | Issue | Est. Impact | Effort |
-|----------|-------|------------|--------|
-| **CRITICAL-1** | UTF-8 String interning | -200-500 MB | Medium |
-| **CRITICAL-2** | Multi-pass file parsing | -2-4 GB | High |
-| **CRITICAL-3** | A1State buffer doubling | -6-8 GB | Medium |
-| **CRITICAL-4** | Metadata map proliferation | -10-20 MB | Low |
-| **HIGH-1** | Forward/Inbound CSR overlap | Already fixed | - |
-| **HIGH-2** | Recursion depth guard | Stability | Low |
-| **HIGH-3** | Synthetic thread-local edges | -20-50 MB | Low |
-
----
-
-## Implementation Roadmap
-
-1. **Phase 0 (Immediate - Low effort):**
-   - Add recursion depth guard to `computeMatSizeRecursive` (HIGH-2)
-   - Verify `freeFwdCsr()` is called promptly (HIGH-1)
-
-2. **Phase 1 (Short term - Medium effort):**
-   - Implement UTF-8 LRU cache (CRITICAL-1): -200-500 MB
-   - Improve A1State buffer estimation (CRITICAL-3): -6-8 GB
-   - Merge metadata maps (CRITICAL-4): -10-20 MB
-   
-3. **Phase 2 (Longer term - High effort):**
-   - Consolidate multi-pass parsing (CRITICAL-2): -2-4 GB
-   - Refactor synthetic edges storage (HIGH-3): -20-50 MB
-
-4. **Phase 3 (Polish):**
-   - Add GC tuning recommendations to documentation
-   - Profile on real 800M-object heaps to validate improvements
-
----
-
-## Expected Outcome
-
-Implementing all Critical fixes should reduce:
-- **Virtual memory peak:** 38 GB → **12-16 GB** (60-65% reduction)
-- **Runtime:** Unclear current baseline, but fewer GC pauses + 60% fewer file I/O operations suggests **2-3x speedup** for multi-gigabyte dumps
-
-Verification: Run on fj-kmeans 135 MB dump and measure peak RSS/virtual memory and elapsed time before/after each phase.
-
+**File:** `DominatorTree.java` lines 116–143  
+**Summary:** The `intersect` method uses two `while (rpoPos[finger] > rpoPos[other])` loops nested inside `while (finger1 != finger2)`. The inner step-count guards (`steps1 > maxSteps`) are correct but the outer loop has no total-step bound. In theory the inner guards collapse both fingers to VIRTUAL_ROOT which makes them equal, terminating the outer loop. In practice this is safe, but an explicit outer step limit makes the invariant clearer and prevents any future regression from making the loop infinite.
