@@ -187,6 +187,8 @@ final class RetainedSizes {
 
         // classObjClassIdx only used here; classIndex still needed by report writers
         graph.classObjClassIdx = null;
-        graph.freeRpoOrder(); // rpoOrder no longer needed
+        // Donate rpoOrder to phaseArrays for reuse by any subsequent int[N] consumer.
+        if (graph.phaseArrays != null) graph.phaseArrays.donate(graph.rpoOrder);
+        graph.freeRpoOrder(); // null graph.rpoOrder
     }
 }

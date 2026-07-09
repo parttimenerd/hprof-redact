@@ -96,10 +96,9 @@ class HeapGraphBuilderTest {
         IdMap idMap = graph.idMap;
         int idx1 = idMap.indexOf(0x100L) + 1;
         int idx2 = idMap.indexOf(0x200L) + 1;
-        assertTrue(graph.isGCRoot != null && graph.isGCRoot.get(idx1) ||
-                containsRoot(graph, idx1), "0x100 should be a GC root");
-        assertTrue(graph.isGCRoot != null && graph.isGCRoot.get(idx2) ||
-                containsRoot(graph, idx2), "0x200 should be a GC root");
+        // GC roots have idom == VIRTUAL_ROOT (index 0)
+        assertTrue(graph.idom[idx1] == HeapGraph.VIRTUAL_ROOT, "0x100 should be a GC root (idom == 0)");
+        assertTrue(graph.idom[idx2] == HeapGraph.VIRTUAL_ROOT, "0x200 should be a GC root (idom == 0)");
     }
 
     @Test
@@ -191,12 +190,5 @@ class HeapGraphBuilderTest {
             result.add(src);
         }
         return result;
-    }
-
-    private static boolean containsRoot(HeapGraph graph, int objIdx) {
-        for (int i = 0; i < graph.gcRootCount; i++) {
-            if (graph.gcRootIds[i] == objIdx) return true;
-        }
-        return false;
     }
 }
