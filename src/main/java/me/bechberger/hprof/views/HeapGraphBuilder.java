@@ -413,7 +413,7 @@ public final class HeapGraphBuilder {
                     int threadSerial = (int) p.readU4();
                     p.skipFully(4); // frameNumber
                     remaining -= ids + 8;
-                    state.appendAddress(localId);  // still needs to be in IdMap
+                    state.appendAddressToIdMapOnly(localId);  // still needs to be in IdMap
                     // NOT a GC root — will be synthetic edge from thread to local
                     state.threadLocalsBySerial.computeIfAbsent(threadSerial, k -> new ArrayList<>()).add(localId);
                 }
@@ -421,7 +421,7 @@ public final class HeapGraphBuilder {
                     long localId = p.readId();
                     int threadSerial = (int) p.readU4();
                     remaining -= ids + 4;
-                    state.appendAddress(localId);  // still needs to be in IdMap
+                    state.appendAddressToIdMapOnly(localId);  // still needs to be in IdMap
                     // NOT a GC root — will be synthetic edge from thread to local
                     state.threadLocalsBySerial.computeIfAbsent(threadSerial, k -> new ArrayList<>()).add(localId);
                 }
@@ -1278,6 +1278,14 @@ public final class HeapGraphBuilder {
                 arrayTypeBuf = Arrays.copyOf(arrayTypeBuf, count * 2);
             }
             addrBuf[count++] = addr;
+            idMap.append(addr);
+        }
+
+        /** Register an address in IdMap only (no metadata entry). Used for GC-root locals
+         *  that are already in the dump as INSTANCE/ARRAY records — we need them in IdMap
+         *  for edge resolution but must not add a metadata-less addrBuf entry that could
+         *  corrupt shallow sizes computed from the real dump record. */
+        void appendAddressToIdMapOnly(long addr) {
             idMap.append(addr);
         }
 
