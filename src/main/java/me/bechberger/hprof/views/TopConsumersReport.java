@@ -35,13 +35,13 @@ final class TopConsumersReport {
     /** Top objects by retained size (direct children of virtual root = top-level dominators). */
     private void writeBiggestObjects(PrintWriter out) {
         // Collect all top-level dominators (idom[v] = VIRTUAL_ROOT)
-        List<int[]> tops = new ArrayList<>();
+        List<Integer> tops = new ArrayList<>();
         for (int i = 1; i < graph.N; i++) {
             if (graph.idom[i] == HeapGraph.VIRTUAL_ROOT) {
-                tops.add(new int[]{i});
+                tops.add(i);
             }
         }
-        tops.sort(Comparator.comparingLong((int[] a) -> graph.retainedSizeOf(a[0])).reversed());
+        tops.sort(Comparator.comparingLong((Integer v) -> graph.retainedSizeOf(v)).reversed());
 
         out.println("### Biggest Objects (Top-Level Dominators)");
         out.println();
@@ -52,9 +52,8 @@ final class TopConsumersReport {
         for (int i = 1; i < graph.N; i++) totalHeap += graph.shallowSizeOf(i);
 
         int rank = 1;
-        for (int[] t : tops) {
+        for (int idx : tops) {
             if (rank > TOP_N) break;
-            int idx = t[0];
             String className = classNameOf(idx);
             long retained = graph.retainedSizeOf(idx);
             double pct = totalHeap > 0 ? 100.0 * retained / totalHeap : 0;

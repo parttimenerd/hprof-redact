@@ -176,16 +176,15 @@ final class HtmlReportData {
     // -- Biggest objects (top-level dominators, top 20) --
 
     private static List<BiggestObject> buildBiggestObjects(HeapGraph graph, long totalShallow) {
-        List<int[]> tops = new ArrayList<>();
+        List<Integer> tops = new ArrayList<>();
         for (int i = 1; i < graph.N; i++)
-            if (graph.idom[i] == HeapGraph.VIRTUAL_ROOT) tops.add(new int[]{i});
-        tops.sort(Comparator.comparingLong((int[] a) -> graph.retainedSizeOf(a[0])).reversed());
+            if (graph.idom[i] == HeapGraph.VIRTUAL_ROOT) tops.add(i);
+        tops.sort(Comparator.comparingLong((Integer v) -> graph.retainedSizeOf(v)).reversed());
 
         List<BiggestObject> result = new ArrayList<>(Math.min(tops.size(), 20));
         int rank = 1;
-        for (int[] t : tops) {
+        for (int idx : tops) {
             if (rank > 20) break;
-            int idx = t[0];
             long retained = graph.retainedSizeOf(idx);
             result.add(new BiggestObject(rank++, hexAddr(graph, idx), className(graph, idx),
                 graph.shallowSizeOf(idx), retained,
