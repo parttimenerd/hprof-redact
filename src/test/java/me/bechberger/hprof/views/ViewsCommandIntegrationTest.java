@@ -39,9 +39,7 @@ class ViewsCommandIntegrationTest {
                 .addGCRoot(0x400L, HPROF_GC_ROOT_STICKY_CLASS)
                 .buildToPath();
 
-        HeapGraph graph = new HeapGraphBuilder(hprof).build();
-
-        // Write markdown
+        HeapGraph graph = new HeapGraphBuilder(hprof).buildForTesting();
         Path mdPath = tmpDir.resolve("report.md");
         StringWriter sw = new StringWriter();
         new MarkdownWriter(graph).write(new PrintWriter(sw));

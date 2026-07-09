@@ -280,7 +280,14 @@ public final class HeapGraph {
         return count;
     }
 
-    void freeRpoPos()   { dfsPos = null; dfsOrder = null; dfsParent = null; }
+    void freeRpoPos()   {
+        // Donate dfsOrder to phaseArrays for reuse as retainedSize (or depth) backing.
+        if (phaseArrays != null) phaseArrays.donate(dfsOrder);
+        dfsPos = null; dfsOrder = null; dfsParent = null;
+    }
+    /** Reusable N-element int[] pool for cross-phase array donation. Initialized by HeapGraphBuilder after N is set. */
+    PhaseArrays phaseArrays;
+
     void freeRpoOrder() { rpoOrder = null; }
     void freeFwdCsr()   { fwdOffsets = null; fwdEnds = null; fwdTargets = null; }
 
@@ -288,6 +295,33 @@ public final class HeapGraph {
     public int objectCount() { return N; }
     /** Number of GC root objects. */
     public int gcRootCount() { return gcRootCount; }
+    /** Release the address-lookup index (buf/intBuf/bucket). Call after all report writers finish. */
+    public void freeAddressIndex() { idMap.freeSortedArrays(); }
+
+    /**
+     * Single-slot donation registry: passes a reusable int[N] array between pipeline phases.
+     * Each phase that discards a large temporary int[N] calls donate(); the next phase that
+     * needs int[N] calls take(), receiving the donated array pre-zeroed (or a fresh allocation).
+     */
+    static final class PhaseArrays {
+        private final int N;
+        private int[] slot;
+
+        PhaseArrays(int N) { this.N = N; }
+
+        /** Donate arr for reuse next take(). Silently ignored if null or wrong size. */
+        void donate(int[] arr) {
+            if (arr != null && arr.length == N) slot = arr;
+        }
+
+        /** Return donated array (zeroed) or fresh int[N]. Clears the slot. */
+        int[] take() {
+            if (slot == null) return new int[N];
+            int[] arr = slot; slot = null;
+            java.util.Arrays.fill(arr, 0);
+            return arr;
+        }
+    }
 
     /**
      * Simple open-addressing hash map from int key → long value.

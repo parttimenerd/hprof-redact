@@ -87,6 +87,7 @@ public class ViewsCommand implements Callable<Integer> {
         } else {
             new MarkdownWriter(graph, thresholdPct).writeTo(outputPath);
         }
+        graph.freeAddressIndex(); // report writing done; release address lookup arrays
 
         long t2 = System.currentTimeMillis();
         System.err.printf("Report written in %.1fs%n", (t2 - t1) / 1000.0);

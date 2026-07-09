@@ -13,7 +13,7 @@ class RetainedSizesTest {
 
     private HeapGraph buildGraph(HprofTestBuilder builder) throws Exception {
         var path = builder.buildToPath();
-        return new HeapGraphBuilder(path).build();
+        return new HeapGraphBuilder(path).buildForTesting();
     }
 
     /**

@@ -128,7 +128,10 @@ final class IdMap {
         int b = (int) Math.min((off * (long) bucketCount) / addrRange, bucketCount - 1);
 
         int lo = bucket[b];
-        int hi = bucket[b + 1]; // exclusive upper bound
+        // Extend hi by one extra bucket to cover integer-division boundary cases
+        // where the reverse formula (off*bucketCount/addrRange) maps to b-1 for an
+        // address that sits exactly at bStart of bucket b.
+        int hi = (b + 2 <= bucketCount) ? bucket[b + 2] : size;
 
         // Linear scan within the small window (~4 entries average)
         if (compressedOops) {
@@ -146,6 +149,13 @@ final class IdMap {
             }
         }
         return -1;
+    }
+
+    /** Release the sorted address arrays after indexOf() will no longer be called. Frees ~N*4 or ~N*8 bytes. */
+    void freeSortedArrays() {
+        buf    = null;
+        intBuf = null;
+        bucket = null;
     }
 
     boolean isCompressedOops() { return compressedOops; }

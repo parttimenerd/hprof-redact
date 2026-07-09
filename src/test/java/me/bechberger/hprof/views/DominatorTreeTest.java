@@ -17,7 +17,7 @@ class DominatorTreeTest {
      */
     private HeapGraph buildGraph(HprofTestBuilder builder) throws Exception {
         var path = builder.buildToPath();
-        HeapGraph graph = new HeapGraphBuilder(path).build();
+        HeapGraph graph = new HeapGraphBuilder(path).buildForTesting();
         return graph;
     }
 

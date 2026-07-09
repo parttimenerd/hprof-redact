@@ -121,13 +121,25 @@ public final class HeapGraphBuilder {
 
     /** Run all phases and return the fully-populated HeapGraph. */
     public HeapGraph build() throws IOException {
+        return buildInternal();
+    }
+
+    /**
+     * Run all phases without freeing IdMap sorted arrays.
+     * For unit tests only — allows calling idMap.indexOf() after build.
+     */
+    HeapGraph buildForTesting() throws IOException {
+        return buildInternal();
+    }
+
+    private HeapGraph buildInternal() throws IOException {
         IdMap idMap = new IdMap();
         long t0 = System.currentTimeMillis();
         HeapGraph graph = phaseA1(idMap);
         System.gc(); // free A1State, utf8Strings, IdMap.buf (raw before sort)
         long t1 = System.currentTimeMillis();
         phaseA2(graph);
-        System.gc(); // free outDegree/inDegree intermediates, inboundTargets, over-alloc fwdTargets
+        System.gc(); // free outDegree/inDegree intermediates, inboundTargets
         long t2 = System.currentTimeMillis();
         RpoDfs.compute(graph);
         System.gc(); // free fwdOffsets/fwdTargets (freeFwdCsr called inside RpoDfs)
@@ -145,14 +157,6 @@ public final class HeapGraphBuilder {
         return graph;
     }
 
-    /**
-     * Run all phases without freeing intermediate structures.
-     * For unit tests only — allows inspecting graph state after build.
-     */
-    HeapGraph buildForTesting() throws IOException {
-        return build();
-    }
-
     // =========================================================
     // Phase A.1: collect addresses + metadata
     // =========================================================
@@ -160,7 +164,6 @@ public final class HeapGraphBuilder {
     private HeapGraph phaseA1(IdMap idMap) throws IOException {
         // Estimate N and E from file size (~48 bytes/object, ~2 edges/object)
         int nEstimated = Math.max(64, (int) Math.min(fileSize / 48, Integer.MAX_VALUE / 2L));
-        int eEstimated = nEstimated * 2;
 
         try (Parser p = openParser()) {
             HeapGraph graph = new HeapGraph(path, p.idSize(), fileSize, p.hprofFormat(), idMap);
@@ -234,6 +237,7 @@ public final class HeapGraphBuilder {
             idMap.sort();
             int N = 1 + idMap.size(); // slot 0 = virtual root
             graph.N = N;
+            graph.phaseArrays = new HeapGraph.PhaseArrays(N);
 
             // Propagate compressed-OOPS detection to the graph so MAT-parity size formulas
             // downstream (shallow sizes, class-object sizes) use refSize=4 instead of 8.
@@ -329,7 +333,7 @@ public final class HeapGraphBuilder {
                 System.arraycopy(o2, 0, fullOffs,  pos, o2.length);
                 pos += n2.length;
             }
-            graph.classList.set(ci, new ClassRecord(cr.classId(), cr.name(), cr.classLoaderId(),
+            graph.classList.set(ci, new ClassRecord.Full(cr.classId(), cr.name(), cr.classLoaderId(),
                     cr.superClassId(), cr.instanceSize(), cr.classSerialNumber(),
                     fullNames, fullOffs, cr.ownFieldsSize()));
         }
@@ -473,7 +477,7 @@ public final class HeapGraphBuilder {
                 case HPROF_GC_OBJ_ARRAY_DUMP -> {
                     long objId = p.readId(); p.readU4(); int numElem = (int) p.readU4();
                     long elemClassId = p.readId(); p.skipFully((long) numElem * ids);
-                    remaining -= ids + 4 + 4 + ids + (long) numElem * ids;
+                    remaining -= (int) (ids + 4 + 4 + ids + (long) numElem * ids);
 
                     // Compressed-OOPS detection (mirrors MAT's Pass1Parser.readObjectArrayDump).
                     // If the next array's address falls inside the "uncompressed end" region of the
@@ -616,19 +620,24 @@ public final class HeapGraphBuilder {
             }
         }
 
-        // Prefix-sum outDegree → fwdOffsets (upper-bound allocation)
-        int[] fwdOffsets = new int[N + 1];
+        // Prefix-sum outDegree in-place → becomes fwdOffsets[0..N-1], then extend to N+1.
+        // Reuses the outDegree array to avoid a separate N+1 allocation.
         int totalFwdSlots = 0;
         for (int i = 0; i < N; i++) {
-            fwdOffsets[i] = totalFwdSlots;
-            totalFwdSlots += outDegree[i];
+            int deg = outDegree[i];
+            outDegree[i] = totalFwdSlots;
+            totalFwdSlots += deg;
         }
+        int[] fwdOffsets = java.util.Arrays.copyOf(outDegree, N + 1);
         fwdOffsets[N] = totalFwdSlots;
+        graph.phaseArrays.donate(outDegree); // donate before losing reference; take() will zero it
+        outDegree = null;
 
         // fwdTargets upper-bound slot. Actual edges stored contiguously; null-ref gaps compacted later.
         // Bit 31 of each entry = excluded flag; bits 30..0 = dstIdx (stripped during compaction).
         int[] fwdTargets = new int[totalFwdSlots];
-        int[] fwdCursor  = outDegree; // reuse as write cursor; init to fwdOffsets values
+        // fwdCursor: take donated array (was outDegree, now zeroed), fill from fwdOffsets start positions
+        int[] fwdCursor = graph.phaseArrays.take(); // returns zeroed int[N]
         System.arraycopy(fwdOffsets, 0, fwdCursor, 0, N);
 
         // --- Sub-pass A.2b: fill fwdTargets (encodes exclude flag in high bit) ---
@@ -746,10 +755,8 @@ public final class HeapGraphBuilder {
                 case HPROF_GC_ROOT_NATIVE_STACK, HPROF_GC_ROOT_THREAD_BLOCK -> {
                     p.skipFully(ids + 4L); remaining -= ids + 4;
                 }
-                case HPROF_GC_CLASS_DUMP -> {
-                    // Class dumps: edges counted exactly (class records are small)
-                    remaining -= countClassDumpOutDegrees(p, ids, idMap, graph, outDegree);
-                }
+                case HPROF_GC_CLASS_DUMP -> // Class dumps: edges counted exactly (class records are small)
+                        remaining -= countClassDumpOutDegrees(p, ids, idMap, graph, outDegree);
                 case HPROF_GC_INSTANCE_DUMP -> {
                     long objId = p.readId(); p.readU4(); long classId = p.readId();
                     int dataLen = (int) p.readU4();
@@ -948,7 +955,7 @@ public final class HeapGraphBuilder {
 
     @FunctionalInterface
     private interface NamedEdgeConsumer {
-        void accept(int srcIdx, int dstIdx, short nameIdx, short srcClassIdx) throws IOException;
+        void accept(int srcIdx, int dstIdx, short nameIdx, short srcClassIdx);
     }
 
     private void scanEdgesWithNames(Parser p, HeapGraph graph, NamedEdgeConsumer consumer) throws IOException {
@@ -983,10 +990,8 @@ public final class HeapGraphBuilder {
                 case HPROF_GC_ROOT_NATIVE_STACK, HPROF_GC_ROOT_THREAD_BLOCK -> {
                     p.skipFully(ids + 4L); remaining -= ids + 4;
                 }
-                case HPROF_GC_CLASS_DUMP -> {
-                    // Emit named edges from class object static OBJECT fields
-                    remaining -= scanClassDumpNamedEdges(p, ids, idMap, graph, consumer);
-                }
+                case HPROF_GC_CLASS_DUMP -> // Emit named edges from class object static OBJECT fields
+                        remaining -= scanClassDumpNamedEdges(p, ids, idMap, graph, consumer);
                 case HPROF_GC_INSTANCE_DUMP -> {
                     long objId = p.readId(); p.readU4(); long classId = p.readId();
                     int dataLen = (int) p.readU4();
@@ -1085,7 +1090,6 @@ public final class HeapGraphBuilder {
 
     private static int primTypeSize(int type) {
         return switch (type) {
-            case HPROF_TYPE_BOOLEAN, HPROF_TYPE_BYTE -> 1;
             case HPROF_TYPE_CHAR, HPROF_TYPE_SHORT -> 2;
             case HPROF_TYPE_FLOAT, HPROF_TYPE_INT -> 4;
             case HPROF_TYPE_DOUBLE, HPROF_TYPE_LONG -> 8;
@@ -1293,7 +1297,7 @@ public final class HeapGraphBuilder {
                 }
 
                 int classIdx = graph.classList.size();
-                graph.classList.add(new ClassRecord(classId, name, loaderId, superId,
+                graph.classList.add(new ClassRecord.Full(classId, name, loaderId, superId,
                         instSize, serial, nameIds, offsets, ownFieldsSize));
                 graph.classIdToIndex.put(classId, classIdx);
                 graph.classSerialToIndex.put(serial, classIdx);
@@ -1317,8 +1321,7 @@ public final class HeapGraphBuilder {
                             // Fallback: array class not registered (rare). Synthesize a placeholder.
                             String arrayName = "[Ljava/lang/Object;";
                             int newClassIdx = graph.classList.size();
-                            graph.classList.add(new ClassRecord(0L, arrayName, 0L, 0L,
-                                    0, 0, new short[0], new int[0], 0));
+                            graph.classList.add(new ArrayClassRecord(arrayName));
                             objArrayElemToClassIdx.put(arrayClassId, newClassIdx);
                         }
                     }
@@ -1338,8 +1341,7 @@ public final class HeapGraphBuilder {
                             default                 -> "array[" + typeCode + "]";
                         };
                         int newClassIdx = graph.classList.size();
-                        graph.classList.add(new ClassRecord(0L, arrayName, 0L, 0L,
-                                0, 0, new short[0], new int[0], 0));
+                        graph.classList.add(new ArrayClassRecord(arrayName));
                         primArrayClassIdx[typeCode] = newClassIdx + 1; // +1 so 0 means unset
                     }
                 }
