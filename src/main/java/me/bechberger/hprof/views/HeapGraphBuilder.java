@@ -708,6 +708,8 @@ public final class HeapGraphBuilder {
         fwdOffsets[N] = writePos; // exact total
         // fwdTargets is now compact; trim to actual size to reclaim slack
         if (writePos < totalFwdSlots) fwdTargets = java.util.Arrays.copyOf(fwdTargets, writePos);
+        // Null fwdCursor/fwdEnds (same array, now dead) before allocating inboundTargets
+        fwdCursor = null; fwdEnds = null; ibCursor = null;
 
         // Store compact forward CSR — fwdOffsets[i+1] is exact, no fwdEnds needed
         graph.fwdOffsets = fwdOffsets;
@@ -719,6 +721,14 @@ public final class HeapGraphBuilder {
         CsrBuilderEncoder encoder = new CsrBuilderEncoder(graph, inboundTargets, inboundOffsets, N);
         encoder.encodeVByte();
         // inboundTargets freed inside encoder
+
+        // Free per-class field layout arrays — only needed during A2 edge scanning
+        for (ClassRecord cr : graph.classList) {
+            if (cr instanceof ClassRecord.Full f) {
+                f.freeFieldArrays();
+            }
+        }
+        graph.isGCRoot = null; // only needed for addGCRoot deduplication during A1/A2
     }
 
     /** Fast out-degree count: skips instance data, uses class record field counts. */
@@ -1521,7 +1531,9 @@ public final class HeapGraphBuilder {
             }
 
             offsets[n] = streamPos;
-            graph.inboundStream = Arrays.copyOf(stream, streamPos);
+            // Assign stream directly — inboundOffsets[n] holds the exact byte count, so
+            // no trim copy is needed. Skipping Arrays.copyOf saves up to 1.5×E bytes peak.
+            graph.inboundStream = stream;
             graph.excludedEdge = newExcluded;
         }
 

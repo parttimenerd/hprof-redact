@@ -20,7 +20,6 @@ import java.util.List;
 public final class HtmlWriter {
 
     private final HeapGraph graph;
-    private final double thresholdPct;
 
     public HtmlWriter(HeapGraph graph) {
         this(graph, LeakSuspectsReport.THRESHOLD_PCT);
@@ -28,7 +27,6 @@ public final class HtmlWriter {
 
     public HtmlWriter(HeapGraph graph, double thresholdPct) {
         this.graph = graph;
-        this.thresholdPct = thresholdPct;
     }
 
     public void writeTo(Path outputPath) throws IOException {
@@ -63,20 +61,19 @@ public final class HtmlWriter {
 
     private String buildJson(HtmlReportData.ReportData data) {
         HtmlReportData.HeapSummary s = data.summary();
-        StringBuilder sb = new StringBuilder("{\"summary\":{");
-        sb.append("\"fileName\":").append(jstr(s.fileName())).append(",");
-        sb.append("\"hprofFormat\":").append(jstr(s.hprofFormat())).append(",");
-        sb.append("\"fileSize\":").append(s.fileSize()).append(",");
-        sb.append("\"objectCount\":").append(s.objectCount()).append(",");
-        sb.append("\"totalShallowBytes\":").append(s.totalShallowBytes()).append(",");
-        sb.append("\"gcRootCount\":").append(s.gcRootCount()).append(",");
-        sb.append("\"classCount\":").append(s.classCount()).append(",");
-        sb.append("\"generatedAt\":").append(jstr(s.generatedAt()));
-        sb.append("},");
-        sb.append("\"objectPieSlices\":").append(pieJson(data.objectPieSlices())).append(",");
-        sb.append("\"classPieSlices\":").append(pieJson(data.classPieSlices()));
-        sb.append("}");
-        return sb.toString();
+        String sb = "{\"summary\":{" + "\"fileName\":" + jstr(s.fileName()) + "," +
+                    "\"hprofFormat\":" + jstr(s.hprofFormat()) + "," +
+                    "\"fileSize\":" + s.fileSize() + "," +
+                    "\"objectCount\":" + s.objectCount() + "," +
+                    "\"totalShallowBytes\":" + s.totalShallowBytes() + "," +
+                    "\"gcRootCount\":" + s.gcRootCount() + "," +
+                    "\"classCount\":" + s.classCount() + "," +
+                    "\"generatedAt\":" + jstr(s.generatedAt()) +
+                    "}," +
+                    "\"objectPieSlices\":" + pieJson(data.objectPieSlices()) + "," +
+                    "\"classPieSlices\":" + pieJson(data.classPieSlices()) +
+                    "}";
+        return sb;
     }
 
     private static String pieJson(List<HtmlReportData.PieSlice> slices) {

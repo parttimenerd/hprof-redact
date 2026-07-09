@@ -33,7 +33,6 @@ final class CsrBuilder {
 
     private final int n;
     private int[] inDegree;
-    private int estimatedEdges;
 
     // Set on the HeapGraph directly after finishCounting
     private final HeapGraph graph;
@@ -47,21 +46,14 @@ final class CsrBuilder {
     CsrBuilder(HeapGraph graph, int n, int estimatedEdges) {
         this.graph = graph;
         this.n = n;
-        this.estimatedEdges = estimatedEdges;
         this.isInbound = true;
         this.lowMemory = true;
         this.inDegree = new int[n];
     }
 
-    /** For a simple forward CSR (no exclude annotation). */
-    static CsrBuilder forwardCsr(HeapGraph graph, int n, int estimatedEdges) {
-        return new CsrBuilder(graph, n, estimatedEdges, false, false);
-    }
-
     private CsrBuilder(HeapGraph graph, int n, int estimatedEdges, boolean isInbound, boolean lowMemory) {
         this.graph = graph;
         this.n = n;
-        this.estimatedEdges = estimatedEdges;
         this.isInbound = isInbound;
         this.lowMemory = lowMemory;
         this.inDegree = new int[n];
@@ -87,13 +79,8 @@ final class CsrBuilder {
         inDegree = null; // free counting array
 
         targets = new int[total];
-        if (isInbound) {
-            graph.inboundOffsets = offsets;
-            // excludedEdge built during encodeVByteWithEmbeddedFlags, not here
-        } else {
-            // Forward CSR: store directly
-            graph.inboundOffsets = offsets; // temporary reuse; caller moves to fwdOffsets
-        }
+        // temporary reuse; caller moves to fwdOffsets
+        graph.inboundOffsets = offsets;
     }
 
     /**
@@ -215,7 +202,7 @@ final class CsrBuilder {
 
         offsets[n] = streamPos;
         targets = null; // free int[] inboundTargets
-        graph.inboundStream = Arrays.copyOf(stream, streamPos);
+        graph.inboundStream = stream; // no trim copy; inboundOffsets[n] holds exact byte count
         if (newExcluded != null) graph.excludedEdge = newExcluded;
     }
 
@@ -269,7 +256,7 @@ final class CsrBuilder {
 
         offsets[n] = streamPos;
         targets = null;
-        graph.inboundStream = Arrays.copyOf(stream, streamPos);
+        graph.inboundStream = stream; // no trim copy; inboundOffsets[n] holds exact byte count
         graph.excludedEdge = newExcluded;
     }
 

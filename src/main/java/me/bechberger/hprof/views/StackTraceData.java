@@ -6,6 +6,7 @@ package me.bechberger.hprof.views;
 
 import java.util.List;
 import java.util.Map;
+import java.util.Objects;
 
 /**
  * Stack frame and trace data parsed from HPROF_FRAME, HPROF_TRACE, HPROF_START_THREAD records.
@@ -60,7 +61,7 @@ public final class StackTraceData {
         if (trace == null) return List.of();
         return trace.frameIds().stream()
             .map(frames::get)
-            .filter(f -> f != null)
+            .filter(Objects::nonNull)
             .toList();
     }
 
