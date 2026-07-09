@@ -323,13 +323,17 @@ final class HtmlReportData {
 
         // Reused across suspects to avoid per-suspect BitSet(N) allocations.
         int[] subtreeScratch = graph.phaseArrays != null ? graph.phaseArrays.take() : new int[graph.N];
+        // Reused across suspect calls to avoid per-suspect long[classCount] allocations.
+        int classCount = graph.classList.size();
+        long[] shallowByClassScratch = new long[classCount];
+        long[] countByClassScratch   = new long[classCount];
 
         // Phase 1: single top-level dominators
         for (int i = 1; i < graph.N; i++) {
             if (graph.idom[i] != HeapGraph.VIRTUAL_ROOT) continue;
             long retained = graph.retainedSizeOf(i);
             if (retained < threshold) continue;
-            List<TopConsumer> topC = buildTopConsumers(graph, i, subtreeScratch);
+            List<TopConsumer> topC = buildTopConsumers(graph, i, subtreeScratch, shallowByClassScratch, countByClassScratch);
             suspects.add(new LeakSuspect(
                 className(graph, i), 1, retained, graph.shallowSizeOf(i),
                 totalShallow > 0 ? 100.0 * retained / totalShallow : 0.0,
@@ -342,10 +346,9 @@ final class HtmlReportData {
         // Phase 2: class groups — always run (MAT reports both individual and class-group suspects)
         // Group-retained = sum of retainedSize for top-level dominators (idom == VIRTUAL_ROOT) per class.
         {
-            int classCount = graph.classList.size();
             long[] retainedByClass = new long[classCount];
-            long[] shallowByClass  = new long[classCount];
-            long[] countByClass    = new long[classCount];
+            long[] shallowByClass  = shallowByClassScratch; // reuse scratch (already zeroed)
+            long[] countByClass    = countByClassScratch;   // reuse scratch (already zeroed)
             for (int i = 1; i < graph.N; i++) {
                 short ci = graph.classIndex[i];
                 if (ci < 0 || ci >= classCount) continue;
@@ -379,16 +382,16 @@ final class HtmlReportData {
     }
 
     /** Walk retained subtree of rootNode (single O(N) forward pass).
-     *  subtreeScratch is an int[N] working array (must be zeroed on entry; zeroed on exit). */
-    private static List<TopConsumer> buildTopConsumers(HeapGraph graph, int rootNode, int[] subtreeScratch) {
+     *  subtreeScratch is an int[N] working array (must be zeroed on entry; zeroed on exit).
+     *  shallowByClass and countByClass are long[classCount] scratch arrays (zeroed on entry; zeroed on exit). */
+    private static List<TopConsumer> buildTopConsumers(HeapGraph graph, int rootNode, int[] subtreeScratch,
+                                                        long[] shallowByClass, long[] countByClass) {
         subtreeScratch[rootNode] = 1;
         for (int v = 1; v < graph.N; v++) {
             int d = graph.idom[v];
             if (d >= 0 && subtreeScratch[d] == 1) subtreeScratch[v] = 1;
         }
         int classCount = graph.classList.size();
-        long[] shallowByClass = new long[classCount];
-        long[] countByClass   = new long[classCount];
         for (int v = 1; v < graph.N; v++) {
             if (subtreeScratch[v] == 0) continue;
             subtreeScratch[v] = 0; // zero as we go — array is zeroed by end
@@ -410,6 +413,8 @@ final class HtmlReportData {
                 ClassNames.pretty(graph.classList.get(ci).name()),
                 countByClass[ci], shallowByClass[ci]));
         }
+        // Zero modified indices so scratch arrays are clean for the next call.
+        for (int ci : sorted) { shallowByClass[ci] = 0; countByClass[ci] = 0; }
         return result;
     }
 

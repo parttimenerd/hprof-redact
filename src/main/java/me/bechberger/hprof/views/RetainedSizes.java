@@ -186,6 +186,10 @@ final class RetainedSizes {
         }
         graph.hasSameClassAncestor = hasSameClassAncestor;
 
+        // childOff and childTargets are dead after DFS; donate childOff (length N+1 >= N, accepted)
+        if (graph.phaseArrays != null) graph.phaseArrays.donate(childOff);
+        childOff = null;
+
         // classObjClassIdx only used here; classIndex still needed by report writers
         graph.classObjClassIdx = null;
         // Donate rpoOrder to phaseArrays for reuse by any subsequent int[N] consumer.

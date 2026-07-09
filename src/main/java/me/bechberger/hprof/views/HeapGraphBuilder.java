@@ -677,16 +677,18 @@ public final class HeapGraphBuilder {
         }
         int[] inboundOffsets = java.util.Arrays.copyOf(inDegree, N + 1);
         inboundOffsets[N] = totalInbEdges;
+        graph.phaseArrays.donate(inDegree); // donate before losing reference; take() will zero it
         inDegree = null;
 
         // fwdTargets exact size (no slack — counts are exact from A.2a).
-        // fwdCursor: take donated array (was outDegree, now zeroed), fill from fwdOffsets start positions.
+        // fwdCursor: take donated array (was outDegree/inDegree, now zeroed), fill from fwdOffsets.
         int[] fwdTargets     = new int[totalFwdSlots];
         int[] inboundTargets = new int[totalInbEdges];
         int[] fwdCursor = graph.phaseArrays.take(); // returns zeroed int[N]
         System.arraycopy(fwdOffsets, 0, fwdCursor, 0, N);
-        // ibCursor initialised from inboundOffsets start positions
-        int[] ibCursor = java.util.Arrays.copyOf(inboundOffsets, N);
+        // ibCursor: take donated array (fwdCursor-predecessor), fill from inboundOffsets start positions
+        int[] ibCursor = graph.phaseArrays.take(); // returns zeroed int[N]
+        System.arraycopy(inboundOffsets, 0, ibCursor, 0, N);
 
         // --- Sub-pass A.2b: fill fwdTargets AND inboundTargets simultaneously ---
         // exclude flag lives in inboundTargets (high bit of srcIdx entry), NOT in fwdTargets.
@@ -719,6 +721,11 @@ public final class HeapGraphBuilder {
         }
 
         // fwdTargets and inboundTargets are fully populated; no compaction or trim needed.
+        // fwdCursor and ibCursor are exhausted; donate for reuse by later phases.
+        graph.phaseArrays.donate(fwdCursor);
+        fwdCursor = null;
+        graph.phaseArrays.donate(ibCursor);
+        ibCursor = null;
 
         // Store compact forward CSR — fwdOffsets[i+1] is exact, no fwdEnds needed
         graph.fwdOffsets = fwdOffsets;
