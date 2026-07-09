@@ -390,12 +390,12 @@ public final class HeapGraphBuilder {
             switch (subTag) {
                 case HPROF_GC_ROOT_UNKNOWN, HPROF_GC_ROOT_STICKY_CLASS, HPROF_GC_ROOT_MONITOR_USED -> {
                     long id = p.readId(); remaining -= ids;
-                    state.appendAddress(id);
+                    state.appendAddressToIdMapOnly(id);
                     state.appendGCRoot(id, (byte) subTag);
                 }
                 case HPROF_GC_ROOT_JNI_GLOBAL -> {
                     long id = p.readId(); p.skipFully(ids); remaining -= ids * 2;
-                    state.appendAddress(id);
+                    state.appendAddressToIdMapOnly(id);
                     state.appendGCRoot(id, (byte) subTag);
                 }
                 case HPROF_GC_ROOT_THREAD_OBJ -> {
@@ -403,7 +403,7 @@ public final class HeapGraphBuilder {
                     int threadSerial = (int) p.readU4();
                     p.skipFully(4); // stackSerial
                     remaining -= ids + 8;
-                    state.appendAddress(id);
+                    state.appendAddressToIdMapOnly(id);
                     state.appendGCRoot(id, (byte) subTag);  // Thread object IS a GC root
                     // Also populate threadSerial → objectId mapping (same as HPROF_START_THREAD)
                     state.threadSerialToObjId.put(threadSerial, id);
