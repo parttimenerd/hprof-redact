@@ -2,10 +2,11 @@
  * Copyright (c) 2026.
  * SPDX-License-Identifier: MIT
  */
-package me.bechberger.hprof;
+package me.bechberger.hprof.redact;
 
-import me.bechberger.hprof.transformer.HprofTransformer;
-import me.bechberger.hprof.transformer.ZeroPrimitiveTransformer;
+import me.bechberger.hprof.redact.transformer.HprofTransformer;
+import me.bechberger.hprof.redact.transformer.ZeroPrimitiveTransformer;
+import me.bechberger.hprof.core.HprofDataInput;
 import org.junit.jupiter.api.Test;
 
 import java.io.ByteArrayInputStream;
@@ -17,7 +18,7 @@ import java.nio.file.Files;
 import java.nio.file.Path;
 import java.util.*;
 
-import static me.bechberger.hprof.HprofConstants.*;
+import static me.bechberger.hprof.core.HprofConstants.*;
 import static org.junit.jupiter.api.Assertions.assertArrayEquals;
 import static org.junit.jupiter.api.Assertions.assertEquals;
 import static org.junit.jupiter.api.Assertions.assertNotNull;

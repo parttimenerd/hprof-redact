@@ -43,19 +43,19 @@ jobs:
         if: matrix.java-version == 21
         run: |
           mkdir -p ./bin
-          cp target/hprof-redact ./bin/ || true
-          cp target/hprof-redact.jar ./bin/
+          cp target/hprof-tools ./bin/ || true
+          cp target/hprof-tools.jar ./bin/
 
       - name: Upload JAR artifact
         if: matrix.java-version == 21
         uses: actions/upload-artifact@v6
         with:
-          name: hprof-redact-jar
-          path: target/hprof-redact.jar
+          name: hprof-tools-jar
+          path: target/hprof-tools.jar
 
       - name: Upload executable artifact
         if: matrix.java-version == 21
         uses: actions/upload-artifact@v6
         with:
-          name: hprof-redact
-          path: target/hprof-redact
+          name: hprof-tools
+          path: target/hprof-tools

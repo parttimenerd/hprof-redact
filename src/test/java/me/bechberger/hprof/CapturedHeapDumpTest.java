@@ -4,8 +4,10 @@
  */
 package me.bechberger.hprof;
 
-import me.bechberger.hprof.transformer.HprofTransformer;
-import me.bechberger.hprof.transformer.ZeroPrimitiveTransformer;
+import me.bechberger.hprof.redact.transformer.HprofTransformer;
+import me.bechberger.hprof.redact.transformer.ZeroPrimitiveTransformer;
+import me.bechberger.hprof.core.HprofIO;
+import me.bechberger.hprof.redact.HprofRedact;
 import com.fasterxml.jackson.databind.JsonNode;
 import com.fasterxml.jackson.databind.ObjectMapper;
 import com.fasterxml.jackson.databind.node.ObjectNode;

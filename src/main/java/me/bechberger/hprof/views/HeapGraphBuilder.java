@@ -4,8 +4,8 @@
  */
 package me.bechberger.hprof.views;
 
-import me.bechberger.hprof.HprofType;
-import me.bechberger.hprof.ModifiedUtf8;
+import me.bechberger.hprof.core.HprofType;
+import me.bechberger.hprof.core.ModifiedUtf8;
 
 import java.io.BufferedInputStream;
 import java.io.EOFException;
@@ -26,7 +26,7 @@ import org.eclipse.collections.impl.map.mutable.primitive.LongIntHashMap;
 import org.eclipse.collections.impl.map.mutable.primitive.LongLongHashMap;
 import org.eclipse.collections.impl.map.mutable.primitive.IntLongHashMap;
 
-import static me.bechberger.hprof.HprofConstants.*;
+import static me.bechberger.hprof.core.HprofConstants.*;
 
 /**
  * Builds a HeapGraph from an HPROF file using three sequential passes:

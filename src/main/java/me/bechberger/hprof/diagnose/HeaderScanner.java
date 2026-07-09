@@ -4,7 +4,7 @@
  */
 package me.bechberger.hprof.diagnose;
 
-import me.bechberger.hprof.HprofIO;
+import me.bechberger.hprof.core.HprofIO;
 
 import java.io.IOException;
 import java.io.InputStream;

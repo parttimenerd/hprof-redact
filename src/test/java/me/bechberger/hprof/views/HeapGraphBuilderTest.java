@@ -10,7 +10,7 @@ import java.nio.file.Path;
 import java.util.ArrayList;
 import java.util.List;
 
-import static me.bechberger.hprof.HprofConstants.*;
+import static me.bechberger.hprof.core.HprofConstants.*;
 import static org.junit.jupiter.api.Assertions.*;
 
 class HeapGraphBuilderTest {

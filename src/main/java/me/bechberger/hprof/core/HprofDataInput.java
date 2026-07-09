@@ -2,7 +2,7 @@
  * Copyright (c) 2026.
  * SPDX-License-Identifier: MIT
  */
-package me.bechberger.hprof;
+package me.bechberger.hprof.core;
 
 import java.io.DataInputStream;
 import java.io.EOFException;

@@ -2,9 +2,9 @@
  * Copyright (c) 2026.
  * SPDX-License-Identifier: MIT
  */
-package me.bechberger.hprof.transformer;
+package me.bechberger.hprof.redact.transformer;
 
-import static me.bechberger.hprof.transformer.TransformerUtil.zeroPreservingUtf8String;
+import static me.bechberger.hprof.redact.transformer.TransformerUtil.zeroPreservingUtf8String;
 
 /**
  * Transformer that replaces all UTF-8 strings with repeated '0' characters.

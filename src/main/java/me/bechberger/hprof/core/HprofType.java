@@ -2,7 +2,7 @@
  * Copyright (c) 2026.
  * SPDX-License-Identifier: MIT
  */
-package me.bechberger.hprof;
+package me.bechberger.hprof.core;
 
 public enum HprofType {
     ARRAY_OBJECT(HprofConstants.HPROF_TYPE_ARRAY_OBJECT),

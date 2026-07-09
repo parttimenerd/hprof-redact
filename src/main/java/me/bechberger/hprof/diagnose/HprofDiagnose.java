@@ -4,10 +4,10 @@
  */
 package me.bechberger.hprof.diagnose;
 
-import me.bechberger.hprof.HprofDataInput;
-import me.bechberger.hprof.HprofIO;
-import me.bechberger.hprof.HprofType;
-import me.bechberger.hprof.ModifiedUtf8;
+import me.bechberger.hprof.core.HprofDataInput;
+import me.bechberger.hprof.core.HprofIO;
+import me.bechberger.hprof.core.HprofType;
+import me.bechberger.hprof.core.ModifiedUtf8;
 
 import java.io.EOFException;
 import java.io.IOException;
@@ -17,7 +17,7 @@ import java.nio.file.Path;
 import java.util.*;
 import java.util.stream.Collectors;
 
-import static me.bechberger.hprof.HprofConstants.*;
+import static me.bechberger.hprof.core.HprofConstants.*;
 
 /**
  * Main streaming diagnostic orchestrator. Reads an HPROF file and produces a {@link DiagnosticReport}.

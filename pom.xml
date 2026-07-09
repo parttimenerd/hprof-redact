@@ -5,12 +5,12 @@
     <modelVersion>4.0.0</modelVersion>
 
     <groupId>me.bechberger</groupId>
-    <artifactId>hprof-redact</artifactId>
-    <version>0.3.0</version>
+    <artifactId>hprof-tools</artifactId>
+    <version>0.4.0</version>
 
-    <name>hprof-redact</name>
-    <url>https://github.com/parttimenerd/hprof-redact</url>
-    <description>A tool for redacting HPROF files</description>
+    <name>hprof-tools</name>
+    <url>https://github.com/parttimenerd/hprof-tools</url>
+    <description>Tools for working with HPROF heap dumps: redact sensitive data, diagnose structure, generate analysis reports.</description>
 
     <licenses>
         <license>
@@ -28,9 +28,9 @@
     </developers>
 
     <scm>
-        <connection>scm:git:git@github.com:parttimenerd/hprof-redact.git</connection>
-        <developerConnection>scm:git:https://github.com/parttimenerd/hprof-redact.git</developerConnection>
-        <url>https://github.com/parttimenerd/hprof-redact</url>
+        <connection>scm:git:git@github.com:parttimenerd/hprof-tools.git</connection>
+        <developerConnection>scm:git:https://github.com/parttimenerd/hprof-tools.git</developerConnection>
+        <url>https://github.com/parttimenerd/hprof-tools</url>
     </scm>
 
     <properties>
@@ -129,7 +129,7 @@
                     </execution>
                 </executions>
                 <configuration>
-                    <jarFile>target/hprof-redact.jar</jarFile>
+                    <jarFile>target/hprof-tools.jar</jarFile>
                     <minJavaVersion>17</minJavaVersion>
                 </configuration>
             </plugin>

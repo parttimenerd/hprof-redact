@@ -4,7 +4,7 @@
  */
 package me.bechberger.hprof.diagnose;
 
-import me.bechberger.hprof.HprofType;
+import me.bechberger.hprof.core.HprofType;
 import org.junit.jupiter.api.Test;
 
 import static me.bechberger.hprof.diagnose.HeapSizeEstimator.*;

@@ -6,7 +6,7 @@ package me.bechberger.hprof.views;
 
 import org.junit.jupiter.api.Test;
 
-import static me.bechberger.hprof.HprofConstants.*;
+import static me.bechberger.hprof.core.HprofConstants.*;
 import static org.junit.jupiter.api.Assertions.*;
 
 class RetainedSizesTest {

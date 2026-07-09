@@ -2,9 +2,9 @@
  * Copyright (c) 2026.
  * SPDX-License-Identifier: MIT
  */
-package me.bechberger.hprof;
+package me.bechberger.hprof.redact;
 
-import me.bechberger.hprof.transformer.HprofTransformer;
+import me.bechberger.hprof.redact.transformer.HprofTransformer;
 
 import java.io.ByteArrayOutputStream;
 import java.io.EOFException;
@@ -18,7 +18,14 @@ import java.util.HashMap;
 import java.util.List;
 import java.util.Map;
 
-import static me.bechberger.hprof.HprofConstants.*;
+import me.bechberger.hprof.core.HprofClassInfo;
+import me.bechberger.hprof.core.HprofDataOutput;
+import me.bechberger.hprof.core.ModifiedUtf8;
+import me.bechberger.hprof.redact.VerboseHelper;
+import me.bechberger.hprof.core.HprofDataInput;
+import me.bechberger.hprof.core.HprofIO;
+import me.bechberger.hprof.core.HprofType;
+import static me.bechberger.hprof.core.HprofConstants.*;
 
 /**
  * Main class for redacting heap dumps. Reads an input HPROF file, applies transformations and writes it back

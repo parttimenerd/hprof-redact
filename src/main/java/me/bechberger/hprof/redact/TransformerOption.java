@@ -2,13 +2,13 @@
  * Copyright (c) 2026.
  * SPDX-License-Identifier: MIT
  */
-package me.bechberger.hprof;
+package me.bechberger.hprof.redact;
 
 import java.util.Locale;
-import me.bechberger.hprof.transformer.DropStringTransformer;
-import me.bechberger.hprof.transformer.HprofTransformer;
-import me.bechberger.hprof.transformer.ZeroPrimitiveTransformer;
-import me.bechberger.hprof.transformer.ZeroStringTransformer;
+import me.bechberger.hprof.redact.transformer.DropStringTransformer;
+import me.bechberger.hprof.redact.transformer.HprofTransformer;
+import me.bechberger.hprof.redact.transformer.ZeroPrimitiveTransformer;
+import me.bechberger.hprof.redact.transformer.ZeroStringTransformer;
 
 public enum TransformerOption {
     ZERO("zero"),

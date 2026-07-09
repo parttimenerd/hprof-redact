@@ -7,7 +7,7 @@ package me.bechberger.hprof.views;
 import java.io.IOException;
 import java.util.*;
 
-import static me.bechberger.hprof.HprofConstants.*;
+import static me.bechberger.hprof.core.HprofConstants.*;
 
 /**
  * Third-pass HPROF reader: parses HPROF_FRAME, HPROF_TRACE, HPROF_START_THREAD records

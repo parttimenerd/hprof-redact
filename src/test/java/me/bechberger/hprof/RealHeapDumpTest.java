@@ -5,7 +5,7 @@
 package me.bechberger.hprof;
 
 import com.sun.management.HotSpotDiagnosticMXBean;
-import me.bechberger.hprof.transformer.HprofTransformer;
+import me.bechberger.hprof.redact.transformer.HprofTransformer;
 import org.junit.jupiter.api.Assumptions;
 import org.junit.jupiter.api.Test;
 
@@ -13,7 +13,13 @@ import com.fasterxml.jackson.databind.JsonNode;
 import com.fasterxml.jackson.databind.ObjectMapper;
 import com.fasterxml.jackson.databind.node.ObjectNode;
 
-import me.bechberger.hprof.transformer.ZeroPrimitiveTransformer;
+import me.bechberger.hprof.redact.transformer.ZeroPrimitiveTransformer;
+import me.bechberger.hprof.core.HprofClassInfo;
+import me.bechberger.hprof.core.HprofDataInput;
+import me.bechberger.hprof.core.HprofIO;
+import me.bechberger.hprof.core.HprofType;
+import me.bechberger.hprof.core.ModifiedUtf8;
+import me.bechberger.hprof.redact.HprofRedact;
 
 import java.io.InputStream;
 import java.io.OutputStream;
@@ -27,7 +33,7 @@ import java.util.List;
 import java.util.Map;
 import java.util.Set;
 
-import static me.bechberger.hprof.HprofConstants.*;
+import static me.bechberger.hprof.core.HprofConstants.*;
 import static org.junit.jupiter.api.Assertions.assertArrayEquals;
 import static org.junit.jupiter.api.Assertions.assertEquals;
 import static org.junit.jupiter.api.Assertions.assertNotNull;

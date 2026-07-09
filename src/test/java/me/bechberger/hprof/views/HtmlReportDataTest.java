@@ -7,7 +7,7 @@ package me.bechberger.hprof.views;
 import org.junit.jupiter.api.Test;
 import java.nio.file.Path;
 import java.util.List;
-import static me.bechberger.hprof.HprofConstants.*;
+import static me.bechberger.hprof.core.HprofConstants.*;
 import static org.junit.jupiter.api.Assertions.*;
 
 class HtmlReportDataTest {

@@ -2,7 +2,7 @@
  * Copyright (c) 2026.
  * SPDX-License-Identifier: MIT
  */
-package me.bechberger.hprof.transformer;
+package me.bechberger.hprof.redact.transformer;
 
 /**
  * Transformer that zeros all primitive values while preserving UTF-8 string byte lengths.

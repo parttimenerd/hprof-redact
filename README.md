@@ -1,14 +1,20 @@
-# hprof-redact
+# hprof-tools
 
-[![Build](https://github.com/parttimenerd/hprof-redact/actions/workflows/build.yml/badge.svg)](https://github.com/parttimenerd/hprof-redact/actions/workflows/build.yml) [![Maven Central Version](https://img.shields.io/maven-central/v/me.bechberger/hprof-redact)](https://search.maven.org/artifact/me.bechberger/hprof-redact)
+[![Build](https://github.com/parttimenerd/hprof-tools/actions/workflows/build.yml/badge.svg)](https://github.com/parttimenerd/hprof-tools/actions/workflows/build.yml) [![Maven Central Version](https://img.shields.io/maven-central/v/me.bechberger/hprof-tools)](https://search.maven.org/artifact/me.bechberger/hprof-tools)
 
 
-`hprof-redact` is a tool for processing Java heap dumps (HPROF format) to redact sensitive data while preserving
-heap structure and size characteristics. This is useful for:
+`hprof-tools` is a suite of tools for working with Java heap dumps (HPROF format):
+
+- **`redact`** — stream and redact sensitive data while preserving heap structure and size characteristics
+- **`diagnose`** — analyze heap dump structure, size attribution, and detect anomalies
+- **`views`** — generate analysis reports (Markdown or HTML) with system overview, dominator tree, thread analysis, and more
+
+This is useful for:
 
 - Sharing heap dumps for analysis without exposing sensitive string data
 - Testing and debugging production issues safely
 - Compliance and privacy requirements when handling heap dumps
+- Understanding heap dump structure and size characteristics
 
 __This is currently just an early prototype, a proof of concept. Feel free to test it and provide me with feedback.__
 
@@ -18,24 +24,20 @@ Features:
 - Stream-based processing for large heap dumps
 - Configurable transformers for redacting string contents and primitive values, including arrays
 - Support for redacting field names, class names, method names, and other UTF-8 strings in the heap dump
+- Heap analysis reports matching Eclipse MAT output
 - Tiny JAR (< 100KB) with only [femtocli](https://github.com/parttimenerd/femtocli) as a dependency for the CLI interface
-
-Non-Features:
-- It doesn't parse every section of the heap dump, it only processes the records relevant for redacting string contents and primitive values.
-- It is therefore no general purpose heap dump parser.
-- It has no complex redaction logic like [jfr-redact](https://github.com/parttimenerd/jfr-redact) and only supports simple transformations of string contents and primitive values, but it can be extended with custom transformers.
 
 ## Installation
 
 ### As a Standalone JAR
 
-Download the latest release from [GitHub Releases](https://github.com/parttimenerd/hprof-redact/releases) and run:
+Download the latest release from [GitHub Releases](https://github.com/parttimenerd/hprof-tools/releases) and run:
 
 ```bash
-java -jar hprof-redact.jar input.hprof output.hprof
+java -jar hprof-tools.jar redact input.hprof output.hprof
 ```
 
-Or use with [JBang](https://www.jbang.dev/): `jbang hprof-redact@parttimenerd/hprof-redact`
+Or use with [JBang](https://www.jbang.dev/): `jbang hprof-tools@parttimenerd/hprof-tools`
 
 ### Via Maven
 
@@ -44,8 +46,8 @@ Add to your `pom.xml`:
 ```xml
 <dependency>
     <groupId>me.bechberger</groupId>
-    <artifactId>hprof-redact</artifactId>
-    <version>0.3.0</version>
+    <artifactId>hprof-tools</artifactId>
+    <version>0.4.0</version>
 </dependency>
 ```
 
@@ -53,33 +55,33 @@ Add to your `pom.xml`:
 
 ### Command Line
 
-`hprof-redact` has two subcommands: **`redact`** (the default) and **`diagnose`**.
+`hprof-tools` has three subcommands: **`redact`**, **`diagnose`**, and **`views`**.
 
 #### Redact
 
 ```bash
-Usage: hprof-redact [-hV] [--compress] [--transformer=<transformer>] [--verbose] <input>
-                    <output>
+Usage: hprof-tools redact [-hV] [--compress] [--dry-run] [-t=<transformer>] [--verbose]
+                          <input> <output>
 Stream and redact HPROF heap dumps.
       <input>                        Input HPROF path.
       <output>                       Output HPROF path or '-' for stdout.
-  --compress                         Enable compression format (omit array and string data,
+      --compress                     Enable compression format (omit array and string data,
                                      store only sizes).
+      --dry-run                      Process the file without writing output.
   -h, --help                         Show this help message and exit.
   -t, --transformer=<transformer>    Transformer to apply (default: zero).
                                      Options: zero (zero primitives + string
                                      contents), zero-strings (zero string
                                      contents only), drop-strings (empty string
                                      contents).
-  -v, --verbose                      Log changed field values (primitive fields
-                                     only) to stderr.
+  -v, --verbose                      Log changed field values to stderr.
   -V, --version                      Print version information and exit.
 ```
 
 #### Diagnose
 
 ```bash
-Usage: hprof-redact diagnose [-hV] [-o=<output>] [--json]
+Usage: hprof-tools diagnose [-hV] [-o=<output>] [--json]
                              [--detect-duplicate-ids] [--top-n=<topN>] [--object-align=<objectAlign>]
                              [--compact-headers] [--histogram] <input>
 Analyze an HPROF heap dump and report size attribution, anomalies, and MAT-vs-disk discrepancies.
@@ -126,9 +128,30 @@ human-readable (or JSON) report covering:
 - **Trailing bytes** — bytes after the last parseable record
 - **Duplicate object IDs** — optional scan (enable with `--detect-duplicate-ids`)
 
+#### Views
+
+```bash
+Usage: hprof-tools views [-hV] <input> <output>
+Generate a heap dump analysis report (Markdown or HTML).
+      <input>                     Input HPROF path (plain or .gz).
+      <output>                    Output path (.md for Markdown, .html for HTML).
+  -h, --help                      Show this help message and exit.
+  -V, --version                   Print version information and exit.
+```
+
+The `views` command builds a full heap object graph (dominator tree, retained sizes) and generates
+a report with:
+
+- **System Overview** — heap summary, class histogram by retained heap
+- **Dominator Tree** — top objects by retained heap
+- **Thread Overview** — threads with their retained heap
+- **Leak Suspects** — large single objects and class groups
+- **Top Consumers** — per-class breakdown with instance/shallow/retained sizes
+- **GC Roots** — all GC root categories with object counts
+
 ### Compression Format
 
-When using the `--compress` option, the output HPROF format is modified to save space by omitting array and string data:
+When using the `--compress` option with `redact`, the output HPROF format is modified to save space by omitting array and string data:
 
 **UTF-8 Strings (HPROF_UTF8):**
 - Standard format: `[record_tag][time][length][id][data...]`
@@ -184,22 +207,23 @@ Removes string contents entirely, replaces with empty strings.
 ## Programmatic Usage
 
 ```java
-import me.bechberger.hprof.HprofRedact;
+import me.bechberger.hprof.redact.HprofRedact;
+import me.bechberger.hprof.redact.transformer.ZeroPrimitiveTransformer;
 
 void main() throws IOException {
-    HprofRedact.process(
-        Path.of("input.hprof"),
-        Path.of("output.hprof"),
-        new ZeroPrimitiveTransformer());
+    try (OutputStream out = HprofIO.openOutputStream(Path.of("output.hprof"))) {
+        new HprofRedact(new ZeroPrimitiveTransformer(), null).process(
+            Path.of("input.hprof"), out);
+    }
 }
 ```
 
 ### Custom Transformers
 
-Implement [`HprofTransformer`](src/main/java/me/bechberger/hprofredact/transformer/HprofTransformer.java):
+Implement [`HprofTransformer`](src/main/java/me/bechberger/hprof/redact/transformer/HprofTransformer.java):
 
 ```java
-import me.bechberger.hprofredact.transformer.HprofTransformer;
+import me.bechberger.hprof.redact.transformer.HprofTransformer;
 
 public class MyTransformer implements HprofTransformer {
     @Override
@@ -223,8 +247,8 @@ mvn clean package
 ```
 
 This generates:
-- `target/hprof-redact.jar` - Executable JAR
-- `target/hprof-redact` - Native executable (if GraalVM available)
+- `target/hprof-tools.jar` - Executable JAR
+- `target/hprof-tools` - Native executable (if GraalVM available)
 
 ### Running Tests
 
@@ -260,6 +284,17 @@ This:
 5. Pushes to remote
 6. Creates GitHub release with artifacts
 
+## Migrating from hprof-redact
+
+This project was previously named `hprof-redact`. In version 0.4.0 it was renamed to `hprof-tools` to reflect its expanded scope.
+
+**What changed:**
+- CLI binary: `hprof-redact <input> <output>` → `hprof-tools redact <input> <output>` (`redact` is now an explicit subcommand)
+- Maven artifact: `me.bechberger:hprof-redact` → `me.bechberger:hprof-tools`
+- JBang alias: `hprof-redact@parttimenerd/hprof-redact` → `hprof-tools@parttimenerd/hprof-tools`
+- Java package: `me.bechberger.hprof.HprofRedact` → `me.bechberger.hprof.redact.HprofRedact`
+- Java package: `me.bechberger.hprof.transformer.*` → `me.bechberger.hprof.redact.transformer.*`
+
 ## Related Work and Inspiration
 
 - https://github.com/agourlay/hprof-slurp: a heap-dump analyzer written in rust
@@ -271,7 +306,7 @@ This:
 ## Support, Feedback, Contributing
 
 This project is open to feature requests/suggestions, bug reports etc.
-via [GitHub](https://github.com/parttimenerd/hprof-redact/issues) issues.
+via [GitHub](https://github.com/parttimenerd/hprof-tools/issues) issues.
 Contribution and feedback are encouraged and always welcome.
 
 ## License

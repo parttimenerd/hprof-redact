@@ -4,7 +4,7 @@
  */
 package me.bechberger.hprof.diagnose;
 
-import me.bechberger.hprof.HprofType;
+import me.bechberger.hprof.core.HprofType;
 
 /**
  * Estimates the runtime heap footprint of each heap object from HPROF record data,
