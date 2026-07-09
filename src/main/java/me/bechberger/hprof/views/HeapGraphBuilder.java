@@ -1363,17 +1363,23 @@ public final class HeapGraphBuilder {
                 byte atype = arrayTypeBuf[i];
                 if (atype == 0) continue; // not an array
                 if (atype == (byte) -1) {
-                    // Object array: classIdBuf[i] = elemClassId
-                    long elemClassId = classIdBuf[i];
-                    if (!objArrayElemToClassIdx.containsKey(elemClassId)) {
-                        // Determine element class name
-                        int elemIdx = graph.classIdToIndex.getIfAbsent(elemClassId, -1);
-                        String elemName = elemIdx >= 0 ? graph.classList.get(elemIdx).name() : "java/lang/Object";
-                        String arrayName = "[L" + elemName + ";";
-                        int newClassIdx = graph.classList.size();
-                        graph.classList.add(new ClassRecord(0L, arrayName, 0L, 0L,
-                                0, 0, new short[0], new int[0], 0));
-                        objArrayElemToClassIdx.put(elemClassId, newClassIdx);
+                    // Object array: classIdBuf[i] is the ARRAY class ID (per HPROF spec,
+                    // HPROF_GC_OBJ_ARRAY_DUMP's fourth field is "array class object ID",
+                    // not the element class). That class is typically already registered
+                    // via LOAD_CLASS + CLASS_DUMP with a name like "[Ljava/lang/Object;".
+                    long arrayClassId = classIdBuf[i];
+                    if (!objArrayElemToClassIdx.containsKey(arrayClassId)) {
+                        int existingIdx = graph.classIdToIndex.getIfAbsent(arrayClassId, -1);
+                        if (existingIdx >= 0) {
+                            objArrayElemToClassIdx.put(arrayClassId, existingIdx);
+                        } else {
+                            // Fallback: array class not registered (rare). Synthesize a placeholder.
+                            String arrayName = "[Ljava/lang/Object;";
+                            int newClassIdx = graph.classList.size();
+                            graph.classList.add(new ClassRecord(0L, arrayName, 0L, 0L,
+                                    0, 0, new short[0], new int[0], 0));
+                            objArrayElemToClassIdx.put(arrayClassId, newClassIdx);
+                        }
                     }
                 } else {
                     // Primitive array: atype = HPROF type code

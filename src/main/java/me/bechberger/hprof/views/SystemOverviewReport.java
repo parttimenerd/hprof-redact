@@ -57,37 +57,24 @@ final class SystemOverviewReport {
         int classCount = graph.classList.size();
         long[] instanceCount = new long[classCount];
         long[] shallowTotal  = new long[classCount];
-        long[] retainedTotal = new long[classCount];
+        long[] classRetained = new long[classCount];
 
         int N = graph.N;
         int[] idom = graph.idom;
 
-        // Count instances and shallow sizes per class
+        // MAT class-retained: for class C, sum retainedSize(v) over v of class C
+        // whose immediate dominator is NOT also of class C.
+        // Equivalent to MAT's getMinRetainedSize(all_instances_of_C).
         for (int i = 1; i < N; i++) {
-            if (idom[i] == HeapGraph.UNDEFINED) continue; // skip unreachable objects
             short ci = graph.classIndex[i];
             if (ci < 0 || ci >= classCount) continue;
             instanceCount[ci]++;
-            shallowTotal[ci]  += graph.shallowSizeOf(i);
-        }
-
-        // Group-retained: for each reachable node v, attribute shallowSize[v] to
-        // classOf(idom[v]) if idom[v] is a real object, else to v's own class.
-        // This counts each byte exactly once, avoiding the O(N^2) double-counting
-        // that occurs when summing per-object retained for linked-list classes.
-        for (int i = 1; i < N; i++) {
-            if (idom[i] == HeapGraph.UNDEFINED) continue; // unreachable
-            int parent = idom[i];
-            long shallow = graph.shallowSizeOf(i);
-            if (parent == HeapGraph.VIRTUAL_ROOT || parent == HeapGraph.UNDEFINED) {
-                // Attribute to own class (directly reachable from roots)
-                short ci = graph.classIndex[i];
-                if (ci >= 0 && ci < classCount) retainedTotal[ci] += shallow;
-            } else {
-                // Attribute to parent's class
-                short parentCi = graph.classIndex[parent];
-                int parentClass = parentCi & 0xFFFF;
-                if (parentClass < classCount) retainedTotal[parentClass] += shallow;
+            shallowTotal[ci] += graph.shallowSizeOf(i);
+            if (idom[i] == HeapGraph.UNDEFINED) continue; // unreachable: no retained
+            int dom = idom[i];
+            short domCi = (dom >= 1 && dom < N) ? graph.classIndex[dom] : (short) -1;
+            if (domCi != ci) {
+                classRetained[ci] += graph.retainedSizeOf(i);
             }
         }
 
@@ -96,7 +83,7 @@ final class SystemOverviewReport {
         for (int i = 0; i < classCount; i++) {
             if (instanceCount[i] > 0) indices.add(i);
         }
-        indices.sort(Comparator.comparingLong((Integer i) -> retainedTotal[i]).reversed());
+        indices.sort(Comparator.comparingLong((Integer i) -> classRetained[i]).reversed());
 
         out.println("### Class Histogram (by Retained Heap)");
         out.println();
@@ -106,11 +93,11 @@ final class SystemOverviewReport {
         int rank = 1;
         for (int ci : indices) {
             if (rank > 50) { out.println("| ... | *(top 50 shown)* | | | |"); break; }
-            String name = graph.classList.get(ci).name().replace("/", ".");
+            String name = ClassNames.pretty(graph.classList.get(ci).name());
             out.printf("| %d | `%s` | %,d | %s | %s |%n",
                     rank++, name, instanceCount[ci],
                     formatBytes(shallowTotal[ci]),
-                    formatBytes(retainedTotal[ci]));
+                    formatBytes(classRetained[ci]));
         }
     }
 

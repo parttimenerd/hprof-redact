@@ -105,7 +105,7 @@ final class TopConsumersReport {
         int rank = 1;
         for (int ci : sorted) {
             if (rank > TOP_N) break;
-            String name = graph.classList.get(ci).name().replace("/", ".");
+            String name = ClassNames.pretty(graph.classList.get(ci).name());
             out.printf("| %d | `%s` | %,d | %s |%n",
                     rank++, name, countByClass[ci],
                     SystemOverviewReport.formatBytes(retainedByClass[ci]));
@@ -164,7 +164,7 @@ final class TopConsumersReport {
     private String classNameOf(int idx) {
         short ci = graph.classIndex[idx];
         if (ci < 0 || ci >= graph.classList.size()) return "(class object)";
-        return graph.classList.get(ci).name().replace("/", ".");
+        return ClassNames.pretty(graph.classList.get(ci).name());
     }
 
     private static String topPackage(String name) {

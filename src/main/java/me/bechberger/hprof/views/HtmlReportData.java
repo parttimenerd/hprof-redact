@@ -119,15 +119,18 @@ final class HtmlReportData {
         );
     }
 
-    // -- Group-retained histogram (MAT semantics) --
-    // Each node v contributes shallowSize[v] to groupRetained[classOf(idom[v])].
-    // One O(N) pass. Fixes the O(N^2) linked-list sum problem.
+    // -- Class-retained histogram (MAT semantics) --
+    // For each class C, retained = sum of retainedSize(v) over all v of class C
+    // whose immediate dominator is NOT also of class C. This mirrors MAT's
+    // getMinRetainedSize(all-instances-of-C): the set of "top ancestors"
+    // within the class's instance set.
+    // One O(N) pass over all nodes.
 
     private static List<ClassHistogramEntry> buildHistogram(HeapGraph graph, long totalShallow) {
         int classCount = graph.classList.size();
         long[] instanceCount = new long[classCount];
         long[] shallowTotal  = new long[classCount];
-        long[] groupRetained = new long[classCount];
+        long[] classRetained = new long[classCount];
 
         for (int i = 1; i < graph.N; i++) {
             short ci = graph.classIndex[i];
@@ -135,24 +138,24 @@ final class HtmlReportData {
             instanceCount[ci]++;
             shallowTotal[ci] += graph.shallowSizeOf(i);
 
+            // Class-retained: add v's retained size iff v's idom is not the same class
             int dom = graph.idom[i];
-            if (dom >= 1 && dom < graph.N) {
-                short domCi = graph.classIndex[dom];
-                if (domCi >= 0 && domCi < classCount)
-                    groupRetained[domCi] += graph.shallowSizeOf(i);
+            short domCi = (dom >= 1 && dom < graph.N) ? graph.classIndex[dom] : (short) -1;
+            if (domCi != ci) {
+                classRetained[ci] += graph.retainedSizeOf(i);
             }
         }
 
         List<Integer> indices = new ArrayList<>(classCount);
         for (int i = 0; i < classCount; i++) if (instanceCount[i] > 0) indices.add(i);
-        indices.sort(Comparator.comparingLong((Integer i) -> groupRetained[i]).reversed());
+        indices.sort(Comparator.comparingLong((Integer i) -> classRetained[i]).reversed());
 
         List<ClassHistogramEntry> result = new ArrayList<>(indices.size());
         int rank = 1;
         for (int ci : indices) {
             result.add(new ClassHistogramEntry(rank++,
-                graph.classList.get(ci).name().replace("/", "."),
-                instanceCount[ci], shallowTotal[ci], groupRetained[ci]));
+                ClassNames.pretty(graph.classList.get(ci).name()),
+                instanceCount[ci], shallowTotal[ci], classRetained[ci]));
         }
         return result;
     }
@@ -201,7 +204,7 @@ final class HtmlReportData {
         for (int ci : sorted) {
             if (rank > 20) break;
             result.add(new BiggestClass(rank++,
-                graph.classList.get(ci).name().replace("/", "."),
+                ClassNames.pretty(graph.classList.get(ci).name()),
                 countByClass[ci], retainedByClass[ci]));
         }
         return result;
@@ -336,7 +339,7 @@ final class HtmlReportData {
             }
             for (int ci = 0; ci < classCount; ci++) {
                 if (retainedByClass[ci] < threshold) continue;
-                String name = graph.classList.get(ci).name().replace("/", ".");
+                String name = ClassNames.pretty(graph.classList.get(ci).name());
                 String narrative = String.format("%,d instances of %s occupy %s (%.2f%%) bytes.",
                     countByClass[ci], name,
                     SystemOverviewReport.formatBytes(retainedByClass[ci]),
@@ -378,7 +381,7 @@ final class HtmlReportData {
         for (int ci : sorted) {
             if (result.size() >= 3) break;
             result.add(new TopConsumer(
-                graph.classList.get(ci).name().replace("/", "."),
+                ClassNames.pretty(graph.classList.get(ci).name()),
                 countByClass[ci], shallowByClass[ci]));
         }
         return result;
@@ -473,7 +476,7 @@ final class HtmlReportData {
         if (idx <= 0 || idx >= graph.N) return "(unknown)";
         short ci = graph.classIndex[idx];
         if (ci < 0 || ci >= graph.classList.size()) return "(class object)";
-        return graph.classList.get(ci).name().replace("/", ".");
+        return ClassNames.pretty(graph.classList.get(ci).name());
     }
 
     private static String loaderName(HeapGraph graph, short classIdx) {

@@ -117,7 +117,7 @@ final class LeakSuspectsReport {
 
             for (int ci = 0; ci < classCount; ci++) {
                 if (retainedByClass[ci] < threshold) continue;
-                String name = graph.classList.get(ci).name().replace("/", ".");
+                String name = ClassNames.pretty(graph.classList.get(ci).name());
                 suspects.add(new Suspect(name, firstByClass[ci], countByClass[ci],
                         retainedByClass[ci], shallowByClass[ci], false));
             }
@@ -156,7 +156,7 @@ final class LeakSuspectsReport {
     private String classNameOf(int idx) {
         short ci = graph.classIndex[idx];
         if (ci < 0 || ci >= graph.classList.size()) return "(class object)";
-        return graph.classList.get(ci).name().replace("/", ".");
+        return ClassNames.pretty(graph.classList.get(ci).name());
     }
 
     private record Suspect(

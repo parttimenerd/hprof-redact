@@ -15,13 +15,11 @@ class HtmlReportDataTest {
     /**
      * Chain A->B->C, all same class.
      * idom: A=VRoot, B=A, C=B
-     * groupRetained[class] = sum shallowSize[v] where classOf(idom[v]) == class
-     *   = shallowSize[B] + shallowSize[C]
-     * MAT-parity: Node has super=0 (root class), so calculateSizeRecursive returns
-     *   pointerSize + refSize = 4 + 4 = 8 (with idSize=4 test setup).
-     *   alignUp(8, 8) = 8 per instance.
-     *   groupRetained = 8 + 8 = 16.
-     * (A's idom is VRoot, not the class, so A is NOT attributed to the class)
+     * MAT class-retained: sum retainedSize(v) for v of class C where idom[v] is NOT of class C.
+     *   Only A qualifies (idom[A]=VRoot, class -1). B and C are dominated by same-class A.
+     *   retainedSize(A) covers A+B+C = 3 * 8 = 24.
+     * Per-instance size: Node has super=0, so calculateSizeRecursive returns
+     *   pointerSize + refSize = 4 + 4 = 8 (with idSize=4 test setup); alignUp(8,8)=8.
      */
     @Test
     void groupRetainedChain() throws Exception {
@@ -43,8 +41,8 @@ class HtmlReportDataTest {
                 .filter(e -> e.className().equals("com.example.Node"))
                 .findFirst().orElseThrow();
 
-        assertEquals(16L, entry.groupRetainedBytes(),
-                "MAT-parity: super=0 → per-instance = alignUp(pointerSize+refSize, 8) = 8; B+C = 16");
+        assertEquals(24L, entry.groupRetainedBytes(),
+                "MAT class-retained: only top-ancestor A qualifies; retained(A)=3*8=24");
     }
 
     @Test
