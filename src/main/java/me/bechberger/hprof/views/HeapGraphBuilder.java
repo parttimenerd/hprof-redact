@@ -26,6 +26,7 @@ import org.eclipse.collections.impl.map.mutable.primitive.LongIntHashMap;
 import org.eclipse.collections.impl.map.mutable.primitive.LongLongHashMap;
 import org.eclipse.collections.impl.map.mutable.primitive.IntLongHashMap;
 import org.eclipse.collections.impl.map.mutable.primitive.IntObjectHashMap;
+import org.eclipse.collections.impl.map.mutable.primitive.LongObjectHashMap;
 
 import static me.bechberger.hprof.core.HprofConstants.*;
 
@@ -311,12 +312,16 @@ public final class HeapGraphBuilder {
      */
     private static void resolveInheritedFieldOffsets(HeapGraph graph) {
         int n = graph.classList.size();
+        // Hoist scratch lists outside the per-class loop to avoid 2×n ArrayList allocations.
+        java.util.List<short[]> nameChunks   = new java.util.ArrayList<>(8);
+        java.util.List<int[]>   offsetChunks = new java.util.ArrayList<>(8);
+        int[] adjScratch = new int[64]; // grow-if-needed for adjusted field offsets per ancestor
         for (int ci = 0; ci < n; ci++) {
             ClassRecord cr = graph.classList.get(ci);
             if (cr.classId() == 0L) continue; // synthesized array class, no instance fields
             // Walk the class hierarchy: subclass fields first, then super, super-super, ...
-            java.util.List<short[]> nameChunks = new java.util.ArrayList<>();
-            java.util.List<int[]> offsetChunks = new java.util.ArrayList<>();
+            nameChunks.clear();
+            offsetChunks.clear();
             int baseOffset = 0;
             ClassRecord cur = cr;
             int guard = 0;
@@ -324,10 +329,10 @@ public final class HeapGraphBuilder {
                 short[] names = cur.objectFieldNameIds();
                 int[]   offs  = cur.objectFieldOffsets();
                 if (names.length > 0) {
-                    int[] adj = new int[offs.length];
-                    for (int k = 0; k < offs.length; k++) adj[k] = offs[k] + baseOffset;
+                    if (offs.length > adjScratch.length) adjScratch = new int[offs.length * 2];
+                    for (int k = 0; k < offs.length; k++) adjScratch[k] = offs[k] + baseOffset;
                     nameChunks.add(names);
-                    offsetChunks.add(adj);
+                    offsetChunks.add(java.util.Arrays.copyOf(adjScratch, offs.length));
                 }
                 baseOffset += cur.ownFieldsSize();
                 if (cur.superClassId() == 0L) break;
@@ -580,7 +585,8 @@ public final class HeapGraphBuilder {
 
         // Instance fields — collect OBJECT-type fields, and total own-fields size
         int ifCount = p.readU2(); consumed += 2;
-        List<long[]> objFields = new ArrayList<>(); // [nameId, offset]
+        long[] objFieldsBuf = null; // flat [nameId0,off0, nameId1,off1, ...]; sized at end
+        int objFieldCount = 0;
         int offset = 0;
         int ownObjectFieldCount = 0;
         int ownPrimitiveFieldBytes = 0;
@@ -589,14 +595,20 @@ public final class HeapGraphBuilder {
             int type = p.readU1(); consumed += 1;
             int ts = typeSize(type, ids);
             if (type == HPROF_TYPE_OBJECT) {
-                objFields.add(new long[]{nameId, offset});
+                if (objFieldsBuf == null) objFieldsBuf = new long[Math.max(ifCount, 4) * 2];
+                else if (objFieldCount * 2 + 2 > objFieldsBuf.length) objFieldsBuf = Arrays.copyOf(objFieldsBuf, objFieldsBuf.length * 2);
+                objFieldsBuf[objFieldCount * 2]     = nameId;
+                objFieldsBuf[objFieldCount * 2 + 1] = offset;
+                objFieldCount++;
                 ownObjectFieldCount++;
             } else {
                 ownPrimitiveFieldBytes += ts;
             }
             offset += ts;
         }
-        state.classObjFields.put(classId, objFields);
+        if (objFieldCount > 0) {
+            state.classObjFields.put(classId, Arrays.copyOf(objFieldsBuf, objFieldCount * 2));
+        }
         state.classOwnFieldsSizes.put(classId, offset);
         state.classOwnObjectFieldCount.put(classId, ownObjectFieldCount);
         state.classOwnPrimitiveFieldBytes.put(classId, ownPrimitiveFieldBytes);
@@ -1221,7 +1233,7 @@ public final class HeapGraphBuilder {
         final LongLongHashMap classLoaderIds = new LongLongHashMap();
         final LongLongHashMap classSuperIds = new LongLongHashMap();
         final LongIntHashMap classSerialByClassId = new LongIntHashMap();
-        final Map<Long, List<long[]>> classObjFields = new HashMap<>(); // classId → [[nameId,offset]]
+        final LongObjectHashMap<long[]> classObjFields = new LongObjectHashMap<>(); // classId → [nameId0,off0, nameId1,off1, ...]
         final List<Long> classDumpIds = new ArrayList<>();   // all classId values from CLASS_DUMP records
 
         // Synthesized array class maps (built in buildClassList second pass)
@@ -1340,14 +1352,15 @@ public final class HeapGraphBuilder {
                 long superId = classSuperIds.getIfAbsent(classId, 0L);
                 int instSize = classInstanceSizes.getIfAbsent(classId, 0);
                 int ownFieldsSize = classOwnFieldsSizes.getIfAbsent(classId, 0);
-                List<long[]> objFields = classObjFields.getOrDefault(classId, List.of());
+                long[] objFields = classObjFields.getIfAbsent(classId, null);
+                int objFieldCount2 = objFields != null ? objFields.length / 2 : 0;
 
-                short[] nameIds = new short[objFields.size()];
-                int[] offsets = new int[objFields.size()];
-                for (int i = 0; i < objFields.size(); i++) {
-                    long fieldNameId = objFields.get(i)[0];
+                short[] nameIds = new short[objFieldCount2];
+                int[] offsets = new int[objFieldCount2];
+                for (int i = 0; i < objFieldCount2; i++) {
+                    long fieldNameId = objFields[i * 2];
                     nameIds[i] = graph.internFieldName(fieldNameId);
-                    offsets[i] = (int) objFields.get(i)[1];
+                    offsets[i] = (int) objFields[i * 2 + 1];
                 }
 
                 int classIdx = graph.classList.size();
