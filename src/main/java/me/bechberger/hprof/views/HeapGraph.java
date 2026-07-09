@@ -58,7 +58,7 @@ public final class HeapGraph {
     byte[]  shallowSizeDiv8;         // 1 byte/obj; value×8 = shallow bytes; 0 = overflowSizes
     LongLongMap overflowSizes;       // objectId(int key) → long shallow size (for objects > 2040 B)
     short[] classIndex;              // index into classList; -1 = class object itself
-    final BitSet isGCRoot;
+    BitSet isGCRoot;
     int[] gcRootIds;                 // dense list of root object indices
     byte[] gcRootTypes;              // GC root type code per actual root
     int gcRootCount;

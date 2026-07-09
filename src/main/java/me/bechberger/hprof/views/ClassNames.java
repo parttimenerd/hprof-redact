@@ -57,7 +57,7 @@ final class ClassNames {
 
         StringBuilder sb = new StringBuilder(base.length() + 2 * dims);
         sb.append(base);
-        for (int i = 0; i < dims; i++) sb.append("[]");
+        sb.append("[]".repeat(dims));
         return sb.toString();
     }
 }
