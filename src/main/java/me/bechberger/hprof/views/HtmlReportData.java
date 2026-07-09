@@ -322,12 +322,15 @@ final class HtmlReportData {
         long threshold = (long) (totalShallow * 10.0 / 100.0);
         List<LeakSuspect> suspects = new ArrayList<>();
 
+        // Reused across suspects to avoid per-suspect BitSet(N) allocations.
+        int[] subtreeScratch = graph.phaseArrays != null ? graph.phaseArrays.take() : new int[graph.N];
+
         // Phase 1: single top-level dominators
         for (int i = 1; i < graph.N; i++) {
             if (graph.idom[i] != HeapGraph.VIRTUAL_ROOT) continue;
             long retained = graph.retainedSizeOf(i);
             if (retained < threshold) continue;
-            List<TopConsumer> topC = buildTopConsumers(graph, i);
+            List<TopConsumer> topC = buildTopConsumers(graph, i, subtreeScratch);
             suspects.add(new LeakSuspect(
                 className(graph, i), 1, retained, graph.shallowSizeOf(i),
                 totalShallow > 0 ? 100.0 * retained / totalShallow : 0.0,
@@ -372,27 +375,31 @@ final class HtmlReportData {
             }
         }
         suspects.sort(Comparator.comparingLong(LeakSuspect::retainedBytes).reversed());
+        if (graph.phaseArrays != null) graph.phaseArrays.donate(subtreeScratch);
         return suspects;
     }
 
-    /** Walk retained subtree of rootNode (single O(N) forward pass). */
-    private static List<TopConsumer> buildTopConsumers(HeapGraph graph, int rootNode) {
-        java.util.BitSet inSubtree = new java.util.BitSet(graph.N);
-        inSubtree.set(rootNode);
+    /** Walk retained subtree of rootNode (single O(N) forward pass).
+     *  subtreeScratch is an int[N] working array (must be zeroed on entry; zeroed on exit). */
+    private static List<TopConsumer> buildTopConsumers(HeapGraph graph, int rootNode, int[] subtreeScratch) {
+        subtreeScratch[rootNode] = 1;
         for (int v = 1; v < graph.N; v++) {
             int d = graph.idom[v];
-            if (d >= 0 && inSubtree.get(d)) inSubtree.set(v);
+            if (d >= 0 && subtreeScratch[d] == 1) subtreeScratch[v] = 1;
         }
         int classCount = graph.classList.size();
         long[] shallowByClass = new long[classCount];
         long[] countByClass   = new long[classCount];
-        for (int v = inSubtree.nextSetBit(1); v >= 0; v = inSubtree.nextSetBit(v + 1)) {
+        for (int v = 1; v < graph.N; v++) {
+            if (subtreeScratch[v] == 0) continue;
+            subtreeScratch[v] = 0; // zero as we go — array is zeroed by end
             short ci = graph.classIndex[v];
             if (ci >= 0 && ci < classCount) {
                 shallowByClass[ci] += graph.shallowSizeOf(v);
                 countByClass[ci]++;
             }
         }
+        subtreeScratch[rootNode] = 0; // zero the root too
         List<Integer> sorted = new ArrayList<>();
         for (int ci = 0; ci < classCount; ci++) if (countByClass[ci] > 0) sorted.add(ci);
         sorted.sort(Comparator.comparingLong((Integer ci) -> shallowByClass[ci]).reversed());

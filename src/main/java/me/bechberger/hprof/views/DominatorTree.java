@@ -51,7 +51,10 @@ final class DominatorTree {
         // In LT, dfsPar gives the DFS tree structure.  parent[d] = dfsPos[dfsPar[dfsOrd[d]]].
         // ----------------------------------------------------------------
 
-        int[] parent   = new int[reachable]; // DFS-tree parent DFS-position; -1 for root
+        // Lengauer-Tarjan arrays indexed by DFS pre-order position d (0..reachable-1).
+        // Take donated int[N] from phaseArrays (was dfsOrder, donated by freeRpoPos indirectly)
+        // as parent[] to avoid one N-element allocation. Falls back to fresh if slot empty.
+        int[] parent   = graph.phaseArrays != null ? graph.phaseArrays.take() : new int[reachable];
         int[] sdom     = new int[reachable]; // semi-dominator DFS-position
         int[] idomD    = new int[reachable]; // immediate dominator DFS-position (output); -1 = unset
         int[] label    = new int[reachable]; // union-find: min-sdom node on path to forest root
@@ -146,6 +149,14 @@ final class DominatorTree {
             bucket[par] = -1; // clear processed bucket
         }
 
+        // parent[], label[], ancestor[], bucket[], next[] are all dead after the main loop.
+        // Null them explicitly to release ~5×43 MB before step 4 and the idom translation.
+        parent   = null;
+        label    = null;
+        ancestor = null;
+        bucket   = null;
+        next     = null;
+
         // ----------------------------------------------------------------
         // Step 4: deferred idom adjustment in forward DFS order.
         // idomD[0] = 0 (virtual root is its own idom sentinel).
@@ -183,6 +194,10 @@ final class DominatorTree {
 
         graph.idom = idom;
         graph.dfsPos = null; // already repurposed as idom — freeRpoPos must not re-stash it
+
+        // sdom[] and idomD[] are dead after translation — release before depth pass.
+        sdom  = null;
+        idomD = null;
 
         // Take dfsParent directly as depth[] before freeRpoPos nulls it.
         // dfsParent is int[N], same size — reuse avoids a fresh allocation.
