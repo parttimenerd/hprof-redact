@@ -124,16 +124,20 @@ final class HtmlReportData {
     // -- Class-retained histogram (MAT semantics) --
     // For each class C, retained = sum of retainedSize(v) over all v of class C
     // that are "top ancestors" — i.e., no strict ancestor in the dominator tree
-    // is of class C. This mirrors MAT's getMinRetainedSize(all-instances-of-C).
-    // The hasSameClassAncestor bit is precomputed in RetainedSizes.
+    // is of class C or the class-object for C.
+    // Plus retainedSize(classObject(C)) — MAT's getMinRetainedSize includes both
+    // the class object and all instances in the input set.
+    // The hasSameClassAncestor bit (extended to include classObject domination)
+    // is precomputed in RetainedSizes.
 
     private static List<ClassHistogramEntry> buildHistogram(HeapGraph graph, long totalShallow) {
+        int N = graph.N;
         int classCount = graph.classList.size();
         long[] instanceCount = new long[classCount];
         long[] shallowTotal  = new long[classCount];
         long[] classRetained = new long[classCount];
 
-        for (int i = 1; i < graph.N; i++) {
+        for (int i = 1; i < N; i++) {
             short ci = graph.classIndex[i];
             if (ci < 0 || ci >= classCount) continue;
             if (graph.idom[i] == HeapGraph.UNDEFINED) continue; // unreachable: exclude from histogram
@@ -143,6 +147,16 @@ final class HtmlReportData {
             if (!graph.hasSameClassAncestor.get(i)) {
                 classRetained[ci] += graph.retainedSizeOf(i);
             }
+        }
+
+        // Add class-object retained to each class's retained (MAT parity).
+        for (int ci = 0; ci < classCount; ci++) {
+            long classId = graph.classList.get(ci).classId();
+            if (classId == 0L) continue;
+            int cdIdx = graph.idMap.indexOf(classId) + 1;
+            if (cdIdx <= 0 || cdIdx >= N) continue;
+            if (graph.idom[cdIdx] == HeapGraph.UNDEFINED) continue;
+            classRetained[ci] += graph.retainedSizeOf(cdIdx);
         }
 
         List<Integer> indices = new ArrayList<>(classCount);
@@ -480,6 +494,13 @@ final class HtmlReportData {
 
     static String className(HeapGraph graph, int idx) {
         if (idx <= 0 || idx >= graph.N) return "(unknown)";
+        // If this node IS a class object, show the class it represents (MAT parity)
+        if (graph.classObjClassIdx != null && idx < graph.classObjClassIdx.length) {
+            short representedCi = graph.classObjClassIdx[idx];
+            if (representedCi >= 0 && representedCi < graph.classList.size()) {
+                return ClassNames.pretty(graph.classList.get(representedCi).name());
+            }
+        }
         short ci = graph.classIndex[idx];
         if (ci < 0 || ci >= graph.classList.size()) return "(class object)";
         return ClassNames.pretty(graph.classList.get(ci).name());

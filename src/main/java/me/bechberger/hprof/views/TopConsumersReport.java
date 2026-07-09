@@ -162,6 +162,13 @@ final class TopConsumersReport {
     }
 
     private String classNameOf(int idx) {
+        // If this node IS a class object, show the class it represents (MAT parity)
+        if (graph.classObjClassIdx != null && idx < graph.classObjClassIdx.length) {
+            short representedCi = graph.classObjClassIdx[idx];
+            if (representedCi >= 0 && representedCi < graph.classList.size()) {
+                return ClassNames.pretty(graph.classList.get(representedCi).name());
+            }
+        }
         short ci = graph.classIndex[idx];
         if (ci < 0 || ci >= graph.classList.size()) return "(class object)";
         return ClassNames.pretty(graph.classList.get(ci).name());

@@ -65,7 +65,8 @@ final class SystemOverviewReport {
 
         // MAT class-retained: for class C, sum retainedSize(v) over v of class C
         // that are "top ancestors" (no strict dom-tree ancestor is of class C).
-        // Equivalent to MAT's getMinRetainedSize(all_instances_of_C).
+        // Also include the class object itself (MAT includes classObject + instances
+        // in getMinRetainedSize, so the class object's retained is attributed to its class).
         for (int i = 1; i < N; i++) {
             short ci = graph.classIndex[i];
             if (ci < 0 || ci >= classCount) continue;
@@ -75,6 +76,18 @@ final class SystemOverviewReport {
             if (!graph.hasSameClassAncestor.get(i)) {
                 classRetained[ci] += graph.retainedSizeOf(i);
             }
+        }
+
+        // Add class-object retained to each class (MAT parity: histogram row includes
+        // getMinRetainedSize(classObject + allInstances), so class object's retained
+        // is counted in the class row, not in java.lang.Class).
+        for (int ci = 0; ci < classCount; ci++) {
+            long classId = graph.classList.get(ci).classId();
+            if (classId == 0L) continue;
+            int cdIdx = graph.idMap.indexOf(classId) + 1;
+            if (cdIdx <= 0 || cdIdx >= N) continue;
+            if (graph.idom[cdIdx] == HeapGraph.UNDEFINED) continue;
+            classRetained[ci] += graph.retainedSizeOf(cdIdx);
         }
 
         // sort by retained desc
@@ -93,10 +106,10 @@ final class SystemOverviewReport {
         for (int ci : indices) {
             if (rank > 50) { out.println("| ... | *(top 50 shown)* | | | |"); break; }
             String name = ClassNames.pretty(graph.classList.get(ci).name());
-            out.printf("| %d | `%s` | %,d | %s | %s |%n",
+            out.printf("| %d | `%s` | %,d | %s | %,d |%n",
                     rank++, name, instanceCount[ci],
                     formatBytes(shallowTotal[ci]),
-                    formatBytes(classRetained[ci]));
+                    classRetained[ci]);
         }
     }
 

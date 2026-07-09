@@ -217,18 +217,39 @@ def _parse_mat_overview_zip(zip_path: Path) -> MatReport:
 
     html = read_zip_member(zip_path, r'Top_Consumers')
     if html:
-        text = strip_html(html)
-        obj_end = text.find('Biggest Top-Level Dominator Classes')
-        obj_text = text[:obj_end] if obj_end > 0 else text
-        for m in re.finditer(
-            r'([\w.$\[\]]+)\s+@\s+0x[0-9a-f]+[^0-9]+([\d,]+)\s+([\d,]+)',
-            obj_text
-        ):
-            r.top_objects.append(TopObject(
-                cls=m.group(1),
-                shallow=int(m.group(2).replace(',', '')),
-                retained=int(m.group(3).replace(',', '')),
-            ))
+        # Find the Biggest Objects table (before Biggest Top-Level Dominator Classes)
+        obj_end_idx = html.find('Biggest Top-Level Dominator Classes')
+        obj_html = html[:obj_end_idx] if obj_end_idx > 0 else html
+
+        # Parse table rows: each row has <td> with the anchor, <td>shallow</td>, <td>retained</td>
+        # The anchor text is like:
+        #   "java.util.concurrent.ForkJoinWorkerThread @ 0xc0303be0  ForkJoinPool.commonPool-worker-16"
+        #   "class scala.runtime.LazyVals$ @ 0xce724538"
+        for row_m in re.finditer(r'<tr>(.*?)</tr>', obj_html, re.DOTALL):
+            row = row_m.group(1)
+            # Extract the href anchor text (object description)
+            href_m = re.search(r'<a href="mat://object/0x[0-9a-f]+">(.*?)</a>', row, re.DOTALL)
+            if not href_m:
+                continue
+            anchor = strip_html(href_m.group(1)).strip()
+            # anchor: "ClassName @ 0xHEX  optional-name" or "class ClassName @ 0xHEX"
+            # Strip "class " prefix for class objects
+            if anchor.startswith('class '):
+                anchor = anchor[6:]
+            cls_m = re.match(r'([\w.$\[\]]+)\s+@\s+0x', anchor)
+            if not cls_m:
+                continue
+            cls = cls_m.group(1)
+            # Extract the two numeric <td align="right"> cells (shallow, retained)
+            nums = re.findall(r'<td align="right">([\d,]*)</td>', row)
+            if len(nums) < 2:
+                continue
+            try:
+                shallow  = int(nums[0].replace(',', '')) if nums[0] else 0
+                retained = int(nums[1].replace(',', '')) if nums[1] else 0
+            except ValueError:
+                continue
+            r.top_objects.append(TopObject(cls=cls, shallow=shallow, retained=retained))
 
     return r
 
@@ -425,8 +446,12 @@ def compare(mat: MatReport, our: OurReport) -> list[Check]:
 
     mat_n = min(5, len(mat.top_objects))
     if mat_n > 0:
-        mat_cls = Counter(o.cls for o in mat.top_objects[:mat_n])
-        our_cls = Counter(o.cls for o in our.top_objects[:mat_n])
+        # Normalize array class names: MAT may show "ClassName[N]" (with array length N)
+        # while we show "ClassName[]" (without length). Strip trailing [N] for comparison.
+        def norm_cls(name: str) -> str:
+            return re.sub(r'\[\d+\]', '[]', name)
+        mat_cls = Counter(norm_cls(o.cls) for o in mat.top_objects[:mat_n])
+        our_cls = Counter(norm_cls(o.cls) for o in our.top_objects[:mat_n])
         overlap = sum((mat_cls & our_cls).values())
         checks.append(_c('top_objects/top5_class_overlap', mat_n, overlap))
     if mat.top_objects and our.top_objects:
@@ -490,6 +515,8 @@ def main():
     ap.add_argument('--jar',           required=True, type=Path,
                     help='hprof-redact fat jar')
     ap.add_argument('--dump',          help='Limit to one dump stem, e.g. dump_2_scala-doku')
+    ap.add_argument('--skip',          action='append', default=[],
+                    metavar='STEM',    help='Skip this dump stem (repeatable)')
     ap.add_argument('--rerun',         action='store_true',
                     help='Re-run hprof-redact even if _ours.md already exists')
     ap.add_argument('--failures-only', action='store_true',
@@ -508,10 +535,10 @@ def main():
         sys.exit(1)
     print(f"Found {len(mat_reports)} MAT report(s): {', '.join(mat_reports)}")
 
-    # Filter to requested dump if --dump given
+    # Filter to requested dump if --dump given; exclude --skip dumps
     stems_to_run = sorted(
         s for s in mat_reports
-        if not args.dump or s == args.dump
+        if (not args.dump or s == args.dump) and s not in args.skip
     )
 
     # Collect stems that need (re)generation
