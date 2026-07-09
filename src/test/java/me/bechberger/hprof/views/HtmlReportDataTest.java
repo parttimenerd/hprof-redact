@@ -16,7 +16,11 @@ class HtmlReportDataTest {
      * Chain A->B->C, all same class.
      * idom: A=VRoot, B=A, C=B
      * groupRetained[class] = sum shallowSize[v] where classOf(idom[v]) == class
-     *   = shallowSize[B] + shallowSize[C] = 16 + 16 = 32
+     *   = shallowSize[B] + shallowSize[C]
+     * MAT-parity: Node has super=0 (root class), so calculateSizeRecursive returns
+     *   pointerSize + refSize = 4 + 4 = 8 (with idSize=4 test setup).
+     *   alignUp(8, 8) = 8 per instance.
+     *   groupRetained = 8 + 8 = 16.
      * (A's idom is VRoot, not the class, so A is NOT attributed to the class)
      */
     @Test
@@ -39,8 +43,8 @@ class HtmlReportDataTest {
                 .filter(e -> e.className().equals("com.example.Node"))
                 .findFirst().orElseThrow();
 
-        assertEquals(32L, entry.groupRetainedBytes(),
-                "groupRetained = shallowSize[B]+shallowSize[C] = 32, not sum of individual retained");
+        assertEquals(16L, entry.groupRetainedBytes(),
+                "MAT-parity: super=0 → per-instance = alignUp(pointerSize+refSize, 8) = 8; B+C = 16");
     }
 
     @Test

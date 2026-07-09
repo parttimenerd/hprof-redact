@@ -43,6 +43,52 @@ public final class HeapGraphBuilder {
 
     private static final int BUFFER_SIZE = 1 << 20; // 1 MB direct buffer per pass
 
+    /** Round {@code n} up to a multiple of {@code align}. */
+    private static int alignUp(int n, int align) {
+        int r = n % align;
+        return r == 0 ? n : n + align - r;
+    }
+
+    /**
+     * MAT-parity per-class instance size — mirrors MAT's calculateInstanceSize + calculateSizeRecursive.
+     * Caches results in {@code cache}; recurses through superclass chain via {@code classSuperIds}.
+     */
+    private static int computeMatInstanceSize(long classId,
+                                              LongIntHashMap cache,
+                                              LongLongHashMap classSuperIds,
+                                              LongIntHashMap ownObjectFieldCount,
+                                              LongIntHashMap ownPrimitiveFieldBytes,
+                                              int pointerSize, int refSize, int objectAlign) {
+        int cached = cache.getIfAbsent(classId, -1);
+        if (cached >= 0) return cached;
+        int recursive = computeMatSizeRecursive(classId,
+                classSuperIds, ownObjectFieldCount, ownPrimitiveFieldBytes,
+                pointerSize, refSize);
+        int result = alignUp(recursive, objectAlign);
+        cache.put(classId, result);
+        return result;
+    }
+
+    /** MAT's calculateSizeRecursive: walk super chain, aligning at refSize each step. */
+    private static int computeMatSizeRecursive(long classId,
+                                                LongLongHashMap classSuperIds,
+                                                LongIntHashMap ownObjectFieldCount,
+                                                LongIntHashMap ownPrimitiveFieldBytes,
+                                                int pointerSize, int refSize) {
+        long superId = classSuperIds.getIfAbsent(classId, 0L);
+        if (superId == 0L) {
+            // Terminal case: pointerSize + refSize (object header)
+            return pointerSize + refSize;
+        }
+        int ownObj = ownObjectFieldCount.getIfAbsent(classId, 0);
+        int ownPrim = ownPrimitiveFieldBytes.getIfAbsent(classId, 0);
+        int ownFieldsSize = ownObj * refSize + ownPrim;
+        int superSize = computeMatSizeRecursive(superId,
+                classSuperIds, ownObjectFieldCount, ownPrimitiveFieldBytes,
+                pointerSize, refSize);
+        return alignUp(ownFieldsSize + superSize, refSize);
+    }
+
     private final Path path;
     private final long fileSize;
     private final boolean gzipped;
@@ -180,6 +226,12 @@ public final class HeapGraphBuilder {
             idMap.sort();
             int N = 1 + idMap.size(); // slot 0 = virtual root
             graph.N = N;
+
+            // Propagate compressed-OOPS detection to the graph so MAT-parity size formulas
+            // downstream (shallow sizes, class-object sizes) use refSize=4 instead of 8.
+            if (state.foundCompressed) {
+                graph.refSize = 4;
+            }
 
             // --- Allocate per-object arrays ---
             graph.shallowSizeDiv8 = state.flushShallowSizes(N);
@@ -381,14 +433,12 @@ public final class HeapGraphBuilder {
                     long dataLen = p.readU4(); p.skipFully(dataLen);
                     remaining -= ids + 4 + ids + 4 + (int) dataLen;
                     state.appendAddress(objId);
-                    // shallowSize is the instance data length + object header
-                    // We approximate: store dataLen / 8 (will be corrected from instanceSize if available)
-                    // Actually HPROF doesn't give us exact shallow size for instances in INSTANCE_DUMP;
-                    // we get the *data bytes* (excluding header overhead). Use classRecord.instanceSize
-                    // which is recorded in CLASS_DUMP. For now, store 0 (will be set in phaseA2 once
-                    // classes are resolved). Better: record (dataLen + headerSize) here.
-                    // JVM object header is typically 12-16 bytes. We'll use 16 (2 words, uncompressed).
-                    int shallowBytes = (int) dataLen + 16; // approximate until class is known
+                    // shallowSize is the instance data length + object header (12 or 16 bytes).
+                    // We defer computation to flush time (buildClassList) where we know refSize
+                    // (may be 4 with compressed OOPS). MAT's formula:
+                    //   alignUp(fieldBytes(all inherited) + pointerSize + refSize, objectAlign)
+                    // where fieldBytes = HPROF instsize (from CLASS_DUMP). Store 0 as sentinel.
+                    int shallowBytes = 0;
                     state.appendShallowSize(objId, shallowBytes);
                     state.appendClassId(objId, classId);
                 }
@@ -396,10 +446,23 @@ public final class HeapGraphBuilder {
                     long objId = p.readId(); p.readU4(); int numElem = (int) p.readU4();
                     long elemClassId = p.readId(); p.skipFully((long) numElem * ids);
                     remaining -= ids + 4 + 4 + ids + (long) numElem * ids;
+
+                    // Compressed-OOPS detection (mirrors MAT's Pass1Parser.readObjectArrayDump).
+                    // If the next array's address falls inside the "uncompressed end" region of the
+                    // previous array, the previous array actually took less space than 8-byte refs
+                    // would require → references are compressed to 4 bytes.
+                    if (!state.foundCompressed && ids == 8
+                            && objId > state.previousArrayStart
+                            && objId < state.previousArrayUncompressedEnd) {
+                        state.foundCompressed = true;
+                    }
+                    state.previousArrayStart = objId;
+                    state.previousArrayUncompressedEnd = objId + 16 + (long) numElem * 8;
+
                     state.appendAddress(objId);
-                    // Shallow size: header + ref-size * numElem (approx 16 byte header)
-                    int shallowBytes = 16 + numElem * ids;
-                    state.appendShallowSize(objId, shallowBytes);
+                    // Store numElem in shallowBuf slot for arrays; final byte size computed in flush
+                    // once compressed-OOPS is known.
+                    state.appendShallowSize(objId, numElem);
                     state.appendClassId(objId, elemClassId); // element class (used to synthesize array class)
                     state.appendArrayType(objId, (byte) -1); // mark as object array
                 }
@@ -414,8 +477,8 @@ public final class HeapGraphBuilder {
                     p.skipFully(dataBytes);
                     remaining -= ids + 4 + 4 + 1 + (int) dataBytes;
                     state.appendAddress(objId);
-                    int shallowBytes = 16 + numElem * elemSize;
-                    state.appendShallowSize(objId, shallowBytes);
+                    // Store numElem; final byte size computed in flush.
+                    state.appendShallowSize(objId, numElem);
                     state.appendArrayType(objId, (byte) elemType);
                 }
                 default -> throw new IOException("Unknown heap sub-record tag: 0x" + Integer.toHexString(subTag)
@@ -450,12 +513,21 @@ public final class HeapGraphBuilder {
             p.skipFully(valSize); consumed += valSize;
         }
 
-        // Static fields (skip values, just read types for size)
+        // Static fields (skip values, but count size components for class-object shallow calc).
+        // MAT's calculateClassSize: alignUp(sum of static field sizes, objectAlign),
+        // where OBJECT fields count as refSize bytes (4 with compressed OOPS).
         int sfCount = p.readU2(); consumed += 2;
+        int staticObjectFieldCount = 0;
+        int staticPrimitiveFieldBytes = 0;
         for (int i = 0; i < sfCount; i++) {
             p.skipFully(ids); consumed += ids; // name id
             int type = p.readU1(); consumed += 1;
             int valSize = typeSize(type, ids);
+            if (type == HPROF_TYPE_OBJECT) {
+                staticObjectFieldCount++;
+            } else {
+                staticPrimitiveFieldBytes += valSize;
+            }
             p.skipFully(valSize); consumed += valSize;
         }
 
@@ -463,18 +535,28 @@ public final class HeapGraphBuilder {
         int ifCount = p.readU2(); consumed += 2;
         List<long[]> objFields = new ArrayList<>(); // [nameId, offset]
         int offset = 0;
+        int ownObjectFieldCount = 0;
+        int ownPrimitiveFieldBytes = 0;
         for (int i = 0; i < ifCount; i++) {
             long nameId = p.readId(); consumed += ids;
             int type = p.readU1(); consumed += 1;
+            int ts = typeSize(type, ids);
             if (type == HPROF_TYPE_OBJECT) {
                 objFields.add(new long[]{nameId, offset});
+                ownObjectFieldCount++;
+            } else {
+                ownPrimitiveFieldBytes += ts;
             }
-            offset += typeSize(type, ids);
+            offset += ts;
         }
         state.classObjFields.put(classId, objFields);
         state.classOwnFieldsSizes.put(classId, offset);
-        // Approximate shallow size from instanceSize
-        state.appendShallowSize(classId, instanceSize > 0 ? instanceSize : 16);
+        state.classOwnObjectFieldCount.put(classId, ownObjectFieldCount);
+        state.classOwnPrimitiveFieldBytes.put(classId, ownPrimitiveFieldBytes);
+        state.classStaticObjectFieldCount.put(classId, staticObjectFieldCount);
+        state.classStaticPrimitiveFieldBytes.put(classId, staticPrimitiveFieldBytes);
+        // Placeholder — real class-object shallow size computed at flush (needs refSize)
+        state.appendShallowSize(classId, 0);
         return consumed;
     }
 
@@ -1139,6 +1221,12 @@ public final class HeapGraphBuilder {
         final LongIntHashMap classIdToSerial = new LongIntHashMap();
         final LongIntHashMap classInstanceSizes = new LongIntHashMap();
         final LongIntHashMap classOwnFieldsSizes = new LongIntHashMap(); // sum of own fields' typeSize
+        // MAT-parity components: per-class own field breakdown for calculateInstanceSize
+        final LongIntHashMap classOwnObjectFieldCount = new LongIntHashMap();   // # OBJECT fields (own)
+        final LongIntHashMap classOwnPrimitiveFieldBytes = new LongIntHashMap(); // primitive field bytes (own)
+        // Static field breakdown for calculateClassSize (class-object shallow size)
+        final LongIntHashMap classStaticObjectFieldCount = new LongIntHashMap();
+        final LongIntHashMap classStaticPrimitiveFieldBytes = new LongIntHashMap();
         final LongLongHashMap classLoaderIds = new LongLongHashMap();
         final LongLongHashMap classSuperIds = new LongLongHashMap();
         final LongIntHashMap classSerialByClassId = new LongIntHashMap();
@@ -1156,6 +1244,11 @@ public final class HeapGraphBuilder {
 
         // threadSerial → packed list of local object addresses (for synthetic thread→local edges)
         final Map<Integer, List<Long>> threadLocalsBySerial = new HashMap<>();
+
+        // Compressed-OOPS detection (mirrors MAT's Pass1Parser heuristic on OBJ_ARRAY_DUMP records)
+        long previousArrayStart;
+        long previousArrayUncompressedEnd;
+        boolean foundCompressed;
 
         // Frames and traces
         final LongLongHashMap frames = new LongLongHashMap(); // frameId → methodNameId
@@ -1305,26 +1398,69 @@ public final class HeapGraphBuilder {
                 }
             }
 
+            // Precompute MAT-parity per-instance size for every class using calculateInstanceSize:
+            //   alignUp(calculateSizeRecursive(clazz), objectAlign=8)
+            //   calculateSizeRecursive(c) =
+            //     (c has no super) ? pointerSize + refSize
+            //                      : alignUp(ownFieldsSizeMAT(c) + calculateSizeRecursive(super), refSize)
+            //   ownFieldsSizeMAT(c) = ownObjectFieldCount(c)*refSize + ownPrimitiveFieldBytes(c)
+            final int pointerSize = graph.pointerSize;
+            final int refSize = graph.refSize;
+            final int objectAlign = graph.objectAlign;
+            final LongIntHashMap matInstanceSize = new LongIntHashMap();
+            classSuperIds.forEachKey(classId ->
+                    computeMatInstanceSize(classId, matInstanceSize,
+                            classSuperIds, classOwnObjectFieldCount, classOwnPrimitiveFieldBytes,
+                            pointerSize, refSize, objectAlign));
+            // Also compute for class-objects themselves: alignUp(staticFieldBytesMAT, objectAlign)
+            //   staticFieldBytesMAT = staticObjectFieldCount * refSize + staticPrimitiveFieldBytes
+            final LongIntHashMap matClassSize = new LongIntHashMap();
+            classSuperIds.forEachKey(classId -> {
+                int sfObj = classStaticObjectFieldCount.getIfAbsent(classId, 0);
+                int sfPrim = classStaticPrimitiveFieldBytes.getIfAbsent(classId, 0);
+                int sfBytes = sfObj * refSize + sfPrim;
+                matClassSize.put(classId, alignUp(sfBytes, objectAlign));
+            });
+
             // Fill shallowSizeDiv8 and classIndex for all objects
             for (int i = 0; i < count; i++) {
                 int objIdx = objectIndex(idMap, addrBuf[i]);
                 if (objIdx < 0) continue;
-                // Shallow size
                 long cid = classIdBuf[i];
                 byte atype = arrayTypeBuf[i];
-                int bytes = shallowBuf[i];
-                if (atype == 0 && cid != 0) {
-                    // For non-array instance objects, prefer the instanceSize from CLASS_DUMP
-                    // over the approximation stored in shallowBuf (dataLen + header).
-                    int exactSize = classInstanceSizes.getIfAbsent(cid, 0);
-                    if (exactSize > 0) bytes = exactSize;
+                int rawShallow = shallowBuf[i]; // for arrays: numElem; for instances: 0 (unused); for class objs: 0
+                int bytes;
+                if (atype == (byte) -1) {
+                    // Object array: MAT formula
+                    //   alignUp(pointerSize + refSize + 4 + numElem * refSize, objectAlign)
+                    bytes = alignUp(pointerSize + refSize + 4 + rawShallow * refSize, objectAlign);
+                } else if (atype != 0) {
+                    // Primitive array: MAT formula
+                    //   alignUp(alignUp(pointerSize + refSize + 4, refSize) + numElem * elemSize, objectAlign)
+                    int elemSize = primTypeSize(atype & 0xFF);
+                    bytes = alignUp(alignUp(pointerSize + refSize + 4, refSize) + rawShallow * elemSize, objectAlign);
+                } else if (cid != 0) {
+                    // Non-array: either an instance object (has class registered in matInstanceSize)
+                    // or a class-object (registered in matClassSize).
+                    // A class-object appears in classDumpIds; its classId points to itself.
+                    int v = matInstanceSize.getIfAbsent(cid, -1);
+                    if (v >= 0) {
+                        bytes = v;
+                    } else {
+                        // Class object: cid IS the class's own id → use matClassSize
+                        int cv = matClassSize.getIfAbsent(cid, -1);
+                        bytes = cv >= 0 ? cv : alignUp(pointerSize + refSize, objectAlign);
+                    }
+                } else {
+                    // No class id (should be rare — class-dump self entry)
+                    int cv = matClassSize.getIfAbsent(addrBuf[i], -1);
+                    bytes = cv >= 0 ? cv : alignUp(pointerSize + refSize, objectAlign);
                 }
-                // For arrays, shallowBuf already holds the correct shallow size from the array dump
                 if (bytes > 0) {
                     int div8 = bytes / 8;
                     if (div8 > 0 && div8 <= 255) {
                         graph.shallowSizeDiv8[objIdx] = (byte) div8;
-                    } else if (bytes > 0) {
+                    } else {
                         if (graph.overflowSizes == null) graph.overflowSizes = new HeapGraph.LongLongMap(64);
                         graph.overflowSizes.put(objIdx, bytes);
                     }

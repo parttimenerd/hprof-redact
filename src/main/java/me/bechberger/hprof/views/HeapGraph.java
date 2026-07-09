@@ -34,6 +34,12 @@ public final class HeapGraph {
     // ---- Identity / file info ----
     final Path sourcePath;
     final int idSize;                // 4 or 8
+    /** Object header pointer size. Same as idSize. */
+    int pointerSize;
+    /** Object reference size. Equals idSize unless compressed OOPS is detected (then 4). */
+    int refSize;
+    /** Object alignment in bytes (always 8 on 64-bit JVMs). */
+    int objectAlign = 8;
     final long heapTotalBytes;       // sum of all object shallow sizes
     final String hprofFormat;        // e.g. "JAVA PROFILE 1.0.2"
     final long fileSize;
@@ -115,6 +121,8 @@ public final class HeapGraph {
     HeapGraph(Path sourcePath, int idSize, long fileSize, String hprofFormat, IdMap idMap) {
         this.sourcePath = sourcePath;
         this.idSize = idSize;
+        this.pointerSize = idSize;
+        this.refSize = idSize; // may be lowered to 4 on compressed-OOPS detection
         this.fileSize = fileSize;
         this.hprofFormat = hprofFormat;
         this.idMap = idMap;
