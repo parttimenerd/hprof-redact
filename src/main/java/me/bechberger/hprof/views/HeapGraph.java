@@ -13,6 +13,9 @@ import java.util.List;
 import java.util.Map;
 import org.eclipse.collections.impl.map.mutable.primitive.LongIntHashMap;
 import org.eclipse.collections.impl.map.mutable.primitive.IntLongHashMap;
+import org.eclipse.collections.impl.map.mutable.primitive.IntIntHashMap;
+import org.eclipse.collections.impl.map.mutable.primitive.LongShortHashMap;
+import org.eclipse.collections.impl.map.mutable.primitive.LongObjectHashMap;
 
 /**
  * Container for all in-memory structures built from an HPROF file.
@@ -40,7 +43,7 @@ public final class HeapGraph {
     int refSize;
     /** Object alignment in bytes (always 8 on 64-bit JVMs). */
     int objectAlign = 8;
-    final long heapTotalBytes;       // sum of all object shallow sizes
+    long heapTotalBytes;             // sum of all object shallow sizes
     final String hprofFormat;        // e.g. "JAVA PROFILE 1.0.2"
     final long fileSize;
 
@@ -71,8 +74,13 @@ public final class HeapGraph {
     int[] idom;                      // immediate dominator; UNDEFINED=-1; 0=virtual root
 
     // ---- RPO traversal arrays (freed after use) ----
-    int[] rpoPos;                    // RPO position of each node (freed after CHK)
     int[] rpoOrder;                  // node at each RPO position (freed after retained sizes)
+    /** DFS pre-order position (order of first visit). Freed after DOM. */
+    int[] dfsPos;
+    /** Node at each DFS pre-order position. Freed after DOM. */
+    int[] dfsOrder;
+    /** DFS spanning-tree parent of each node (node index; -1 for virtual root). Freed after DOM. */
+    int[] dfsParent;
 
     // ---- Retained heap sizes ----
     int[] retainedSize;              // unsigned int per obj; query via retainedSizeOf()
@@ -103,15 +111,15 @@ public final class HeapGraph {
     // ---- Class table ----
     final List<ClassRecord> classList;
     final LongIntHashMap classIdToIndex;         // classId → index in classList
-    final Map<Integer, Integer> classSerialToIndex; // classSerial → index in classList (keep boxed, small)
+    final IntIntHashMap classSerialToIndex;       // classSerial → index in classList
 
     // ---- Interned field names ----
     /** Maps HPROF nameId → short intern index (0 = no-name sentinel; real names start at 1). */
-    final Map<Long, Short> fieldNameIntern;
+    final LongShortHashMap fieldNameIntern;
     final List<String> fieldNames;   // index = intern index; fieldNames.get(0) = "" (sentinel)
 
     // ---- UTF-8 strings from HPROF ----
-    final Map<Long, String> utf8Strings;         // nameId → decoded string
+    final LongObjectHashMap<String> utf8Strings; // nameId → decoded string; cleared after build
 
     // ---- Thread / frame info (for thread_overview) ----
     /** threadSerial → list of frame method nameIds */
@@ -143,11 +151,11 @@ public final class HeapGraph {
         this.isGCRoot = new BitSet();
         this.classList = new ArrayList<>();
         this.classIdToIndex = new LongIntHashMap();
-        this.classSerialToIndex = new HashMap<>();
-        this.fieldNameIntern = new HashMap<>();
+        this.classSerialToIndex = new IntIntHashMap();
+        this.fieldNameIntern = new LongShortHashMap();
         this.fieldNames = new ArrayList<>();
         this.fieldNames.add(""); // index 0 = no-name sentinel
-        this.utf8Strings = new HashMap<>();
+        this.utf8Strings = new LongObjectHashMap<>();
         this.traceFrames = new HashMap<>();
         this.threadSerialToObjectId = new IntLongHashMap();
         // allocate a small initial capacity for GC roots (grow on demand)
@@ -161,14 +169,13 @@ public final class HeapGraph {
     /** Intern a field nameId, returning a short index (0 = no-name). */
     short internFieldName(long nameId) {
         if (nameId == 0) return ClassRecord.NO_NAME;
-        Short existing = fieldNameIntern.get(nameId);
-        if (existing != null) return existing;
+        if (fieldNameIntern.containsKey(nameId)) return fieldNameIntern.get(nameId);
         if (fieldNames.size() > Short.MAX_VALUE) {
             // Overflow: reuse 0 sentinel (field name filtering won't work for this name)
             return ClassRecord.NO_NAME;
         }
         short idx = (short) fieldNames.size();
-        fieldNames.add(utf8Strings.getOrDefault(nameId, "?"));
+        fieldNames.add(utf8Strings.getIfAbsent(nameId, () -> "?"));
         fieldNameIntern.put(nameId, idx);
         return idx;
     }
@@ -245,15 +252,12 @@ public final class HeapGraph {
 
     /** Total heap bytes (sum of all shallow sizes, excluding virtual root). */
     long totalHeapBytes() {
-        long total = 0;
-        for (int i = 1; i < N; i++) total += shallowSizeOf(i);
-        return total;
+        return heapTotalBytes;
     }
 
     // ---- Transient forward CSR (built in Phase A.2, freed after RPO DFS) ----
     int[] fwdOffsets;
     int[] fwdTargets;
-    int totalEdges; // total inbound edges (for Phase B allocation)
 
     void computeUnreachableStats() {
         unreachableCount = 0;
@@ -275,7 +279,7 @@ public final class HeapGraph {
         return count;
     }
 
-    void freeRpoPos()   { rpoPos   = null; }
+    void freeRpoPos()   { dfsPos = null; dfsOrder = null; dfsParent = null; }
     void freeRpoOrder() { rpoOrder = null; }
     void freeFwdCsr()   { fwdOffsets = null; fwdTargets = null; }
 

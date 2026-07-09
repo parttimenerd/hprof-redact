@@ -25,6 +25,7 @@ import java.util.Map;
 import org.eclipse.collections.impl.map.mutable.primitive.LongIntHashMap;
 import org.eclipse.collections.impl.map.mutable.primitive.LongLongHashMap;
 import org.eclipse.collections.impl.map.mutable.primitive.IntLongHashMap;
+import org.eclipse.collections.impl.map.mutable.primitive.IntObjectHashMap;
 
 import static me.bechberger.hprof.core.HprofConstants.*;
 
@@ -92,6 +93,7 @@ public final class HeapGraphBuilder {
     private final Path path;
     private final long fileSize;
     private final boolean gzipped;
+    private byte[] instanceDataBuf = new byte[256];
 
     public HeapGraphBuilder(Path path) throws IOException {
         this.path = path;
@@ -117,17 +119,25 @@ public final class HeapGraphBuilder {
         return new Parser(path);
     }
 
-    /** Run all three phases and return the fully-populated HeapGraph. */
+    /** Run all phases and return the fully-populated HeapGraph. */
     public HeapGraph build() throws IOException {
         IdMap idMap = new IdMap();
+        long t0 = System.currentTimeMillis();
         HeapGraph graph = phaseA1(idMap);
+        long t1 = System.currentTimeMillis();
         phaseA2(graph);
+        long t2 = System.currentTimeMillis();
         RpoDfs.compute(graph);
-        phaseB(graph);
+        long t3 = System.currentTimeMillis();
         DominatorTree.compute(graph);
+        long t4 = System.currentTimeMillis();
         graph.computeUnreachableStats();
         buildClassObjClassIdx(graph);
         RetainedSizes.compute(graph);
+        long t5 = System.currentTimeMillis();
+        graph.heapTotalBytes = graph.totalHeapBytes();
+        System.err.printf("  phases: A1=%.1fs  A2=%.1fs  RPO=%.1fs  DOM=%.1fs  retained=%.1fs%n",
+                (t1-t0)/1e3, (t2-t1)/1e3, (t3-t2)/1e3, (t4-t3)/1e3, (t5-t4)/1e3);
         return graph;
     }
 
@@ -184,7 +194,7 @@ public final class HeapGraphBuilder {
                         p.readU4(); // stack trace serial
                         long nameId = p.readId();
                         state.classSerialToId.put(serial, classId);
-                        graph.utf8Strings.putIfAbsent(nameId, "?");
+                        graph.utf8Strings.getIfAbsentPut(nameId, "?");
                         // Will link classId→name later from utf8Strings
                         state.classIdToNameId.put(classId, nameId);
                         state.classIdToSerial.put(classId, serial);
@@ -261,6 +271,9 @@ public final class HeapGraphBuilder {
 
             // Resolve exclude pairs
             resolveExcludePairs(graph);
+
+            // Free large A1State maps no longer needed after build
+            graph.utf8Strings.clear();
 
             return graph;
         }
@@ -362,23 +375,33 @@ public final class HeapGraphBuilder {
         }
     }
 
-    private static Map<Integer, int[]> buildSyntheticEdges(A1State state, HeapGraph graph, IdMap idMap) {        Map<Integer, int[]> result = new HashMap<>();
-        for (Map.Entry<Integer, List<Long>> entry : state.threadLocalsBySerial.entrySet()) {
-            int threadSerial = entry.getKey();
+    private static void appendThreadLocal(IntObjectHashMap<long[]> map, int threadSerial, long localId) {
+        long[] existing = map.get(threadSerial);
+        if (existing == null) {
+            map.put(threadSerial, new long[]{localId});
+        } else {
+            long[] grown = Arrays.copyOf(existing, existing.length + 1);
+            grown[existing.length] = localId;
+            map.put(threadSerial, grown);
+        }
+    }
+
+    private static Map<Integer, int[]> buildSyntheticEdges(A1State state, HeapGraph graph, IdMap idMap) {
+        Map<Integer, int[]> result = new HashMap<>();
+        state.threadLocalsBySerial.forEachKeyValue((threadSerial, localIds) -> {
             long threadObjId = graph.threadSerialToObjectId.getIfAbsent(threadSerial, 0L);
-            if (threadObjId == 0L) continue;
+            if (threadObjId == 0L) return;
             int threadIdx = idMap.indexOf(threadObjId);
-            if (threadIdx < 0) continue;
-            int threadIdxAdjusted = threadIdx + 1; // +1 for virtual root offset
-            List<Long> localIds = entry.getValue();
-            int[] localIdxArr = new int[localIds.size()];
+            if (threadIdx < 0) return;
+            int threadIdxAdjusted = threadIdx + 1;
+            int[] localIdxArr = new int[localIds.length];
             int count = 0;
-            for (Long localId : localIds) {
+            for (long localId : localIds) {
                 int localIdx = idMap.indexOf(localId);
                 if (localIdx >= 0) { localIdxArr[count++] = localIdx + 1; }
             }
             if (count > 0) { result.put(threadIdxAdjusted, java.util.Arrays.copyOf(localIdxArr, count)); }
-        }
+        });
         return result;
     }
 
@@ -415,7 +438,7 @@ public final class HeapGraphBuilder {
                     remaining -= ids + 8;
                     state.appendAddressToIdMapOnly(localId);  // still needs to be in IdMap
                     // NOT a GC root — will be synthetic edge from thread to local
-                    state.threadLocalsBySerial.computeIfAbsent(threadSerial, k -> new ArrayList<>()).add(localId);
+                    appendThreadLocal(state.threadLocalsBySerial, threadSerial, localId);
                 }
                 case HPROF_GC_ROOT_NATIVE_STACK, HPROF_GC_ROOT_THREAD_BLOCK -> {
                     long localId = p.readId();
@@ -423,7 +446,7 @@ public final class HeapGraphBuilder {
                     remaining -= ids + 4;
                     state.appendAddressToIdMapOnly(localId);  // still needs to be in IdMap
                     // NOT a GC root — will be synthetic edge from thread to local
-                    state.threadLocalsBySerial.computeIfAbsent(threadSerial, k -> new ArrayList<>()).add(localId);
+                    appendThreadLocal(state.threadLocalsBySerial, threadSerial, localId);
                 }
                 case HPROF_GC_CLASS_DUMP -> {
                     int consumed = scanClassDumpA1(p, graph, state, ids);
@@ -569,28 +592,17 @@ public final class HeapGraphBuilder {
         int N = graph.N;
         int ids = graph.idSize;
         IdMap idMap = graph.idMap;
-        int eEst = Math.max(N * 2, 64);
 
-        // Allocate forward CSR + inDegree
-        int[] fwdOffsets = new int[N + 1];
-        int[] fwdCursor  = new int[N]; // write cursor for fwdTargets per src
-        int[] inDegree   = new int[N];
+        int[] outDegree = new int[N];
+        int[] inDegree  = new int[N];
 
-        // Two-pass forward CSR: first pass just counts per-src out-degree
-        // Then allocate fwdTargets, second fill pass.
-        // For memory efficiency, do a single combined scan: count edges for inDegree
-        // and fwdDegree in one pass, then fill in a second pass.
-        // Actually three sub-passes: (1) count, (2) alloc+fill.
-        // We do them as a single re-opened file scan that counts first, then
-        // a second re-opened scan that fills. This is 2 file reads total for A.2.
-
-        // --- Sub-pass A.2a: count edges ---
-        final int[] outDegree = new int[N];
-        final int[] inDegreeCount = inDegree; // effectively-final alias for lambda capture
+        // --- Sub-pass A.2a: count out-degree and in-degree ---
+        final int[] outDegreeF = outDegree;
+        final int[] inDegreeF  = inDegree;
         try (Parser p = openParser()) {
             scanEdges(p, graph, (srcIdx, dstIdx, nameId) -> {
-                outDegree[srcIdx]++;
-                inDegreeCount[dstIdx]++;
+                outDegreeF[srcIdx]++;
+                inDegreeF[dstIdx]++;
             });
         }
         // Count synthetic thread→local edges
@@ -599,60 +611,72 @@ public final class HeapGraphBuilder {
                 int threadIdx = e.getKey();
                 if (threadIdx < N) {
                     int[] locals = e.getValue();
-                    outDegree[threadIdx] += locals.length;
+                    outDegreeF[threadIdx] += locals.length;
                     for (int localIdx : locals) {
-                        if (localIdx < N) inDegreeCount[localIdx]++;
+                        if (localIdx < N) inDegreeF[localIdx]++;
                     }
                 }
             }
         }
 
-        // Prefix-sum outDegree → fwdOffsets (for fwdTargets allocation)
-        int totalEdges = 0;
+        // Prefix-sum outDegree → fwdOffsets; inDegree → inboundOffsets
+        int[] fwdOffsets      = new int[N + 1];
+        int[] inboundOffsets  = new int[N + 1];
+        int totalFwdEdges = 0, totalInbEdges = 0;
         for (int i = 0; i < N; i++) {
-            fwdOffsets[i] = totalEdges;
-            totalEdges += outDegree[i];
+            fwdOffsets[i]     = totalFwdEdges; totalFwdEdges += outDegree[i];
+            inboundOffsets[i] = totalInbEdges; totalInbEdges += inDegree[i];
         }
-        fwdOffsets[N] = totalEdges;
-        int[] fwdTargets = new int[totalEdges];
-        System.arraycopy(fwdOffsets, 0, fwdCursor, 0, N); // cursor starts at row start
+        fwdOffsets[N]     = totalFwdEdges;
+        inboundOffsets[N] = totalInbEdges;
 
-        // Prefix-sum inDegree → inboundOffsets
-        int[] inboundOffsets = new int[N + 1];
-        int ibTotal = 0;
-        for (int i = 0; i < N; i++) {
-            inboundOffsets[i] = ibTotal;
-            ibTotal += inDegree[i];
-        }
-        inboundOffsets[N] = ibTotal;
+        int[] fwdTargets      = new int[totalFwdEdges];
+        int[] inboundTargets  = new int[totalInbEdges];
 
-        // --- Sub-pass A.2b: fill forward CSR ---
-        // (Inbound CSR fill is deferred to Phase B — RPO DFS only needs fwd CSR)
-        final int[] fwdTargetsFinal = fwdTargets;
-        final int[] fwdCursorFinal = fwdCursor;
+        // Repurpose outDegree and inDegree as write cursors (copy prefix sums into them)
+        System.arraycopy(fwdOffsets,     0, outDegree, 0, N);
+        System.arraycopy(inboundOffsets, 0, inDegree,  0, N);
+
+        // --- Sub-pass A.2b: combined fill of fwdTargets and inboundTargets ---
+        // Uses scanEdgesWithNames so we also get nameIdx and srcClassIdx for inbound exclude logic.
+        short[][] excludePairs = graph.excludePairs;
+        final int[] fwdCursor = outDegree;   // write cursor for forward CSR
+        final int[] ibCursor  = inDegree;    // write cursor for inbound CSR
+        final int[] fwdT      = fwdTargets;
+        final int[] ibT       = inboundTargets;
         try (Parser p = openParser()) {
-            scanEdges(p, graph, (srcIdx, dstIdx, nameId) -> {
-                fwdTargetsFinal[fwdCursorFinal[srcIdx]++] = dstIdx;
+            scanEdgesWithNames(p, graph, (srcIdx, dstIdx, nameIdx, srcClassIdx) -> {
+                fwdT[fwdCursor[srcIdx]++] = dstIdx;
+                boolean excluded = isExcluded(excludePairs, srcClassIdx, nameIdx);
+                ibT[ibCursor[dstIdx]] = excluded ? (srcIdx | Integer.MIN_VALUE) : srcIdx;
+                ibCursor[dstIdx]++;
             });
         }
-        // Fill synthetic thread→local edges into forward CSR
+        // Fill synthetic thread→local edges into both CSRs (not excluded)
         if (graph.syntheticThreadEdges != null) {
             for (Map.Entry<Integer, int[]> e : graph.syntheticThreadEdges.entrySet()) {
                 int threadIdx = e.getKey();
                 if (threadIdx < N) {
-                    int[] locals = e.getValue();
-                    for (int localIdx : locals) {
-                        if (localIdx < N) fwdTargetsFinal[fwdCursorFinal[threadIdx]++] = localIdx;
+                    for (int localIdx : e.getValue()) {
+                        if (localIdx < N) {
+                            fwdT[fwdCursor[threadIdx]++] = localIdx;
+                            ibT[ibCursor[localIdx]++] = threadIdx; // not excluded
+                        }
                     }
                 }
             }
+            graph.syntheticThreadEdges = null;
         }
 
-        // Store forward CSR for RPO DFS; store totalEdges for Phase B pre-allocation
+        // Store forward CSR for RPO DFS
         graph.fwdOffsets = fwdOffsets;
         graph.fwdTargets = fwdTargets;
-        graph.totalEdges = ibTotal;
-        // Note: graph.syntheticThreadEdges is kept alive for Phase B (inbound CSR)
+
+        // VByte-encode inbound CSR (inboundOffsets is the correct prefix sum)
+        graph.inboundOffsets = inboundOffsets;
+        CsrBuilderEncoder encoder = new CsrBuilderEncoder(graph, inboundTargets, inboundOffsets, N);
+        encoder.encodeVByte();
+        // inboundTargets freed inside encoder
     }
 
     @FunctionalInterface
@@ -708,7 +732,9 @@ public final class HeapGraphBuilder {
                     // Emit edges for each OBJECT-type field
                     int classIdx = graph.classIdToIndex.getIfAbsent(classId, -1);
                     ClassRecord cr = classIdx >= 0 ? graph.classList.get(classIdx) : null;
-                    byte[] data = p.readBytes(dataLen); remaining -= dataLen;
+                    if (dataLen > instanceDataBuf.length) instanceDataBuf = new byte[dataLen];
+                    p.readBytesInto(instanceDataBuf, dataLen); remaining -= dataLen;
+                    byte[] data = instanceDataBuf;
                     if (cr != null) {
                         for (int fi = 0; fi < cr.objectFieldOffsets().length; fi++) {
                             int off = cr.objectFieldOffsets()[fi];
@@ -932,72 +958,6 @@ public final class HeapGraphBuilder {
         return consumed;
     }
 
-    // =========================================================
-    // Phase B: fill inbound CSR targets + VByte encode
-    // =========================================================
-
-    private void phaseB(HeapGraph graph) throws IOException {
-        int N = graph.N;
-        int ids = graph.idSize;
-        int totalEdges = graph.totalEdges;
-        IdMap idMap = graph.idMap;
-
-        // Allocate inbound targets + offsets
-        int[] inboundOffsets = new int[N + 1];
-        // Re-count inDegree (one more sequential scan; cheap for linear file read)
-        final int[] inDegree = new int[N];
-        try (Parser p = openParser()) {
-            scanEdges(p, graph, (src, dst, nameId) -> inDegree[dst]++);
-        }
-        // Also count synthetic thread→local edges for inbound
-        if (graph.syntheticThreadEdges != null) {
-            for (Map.Entry<Integer, int[]> e : graph.syntheticThreadEdges.entrySet()) {
-                for (int localIdx : e.getValue()) {
-                    if (localIdx < N) inDegree[localIdx]++;
-                }
-            }
-        }
-        int total = 0;
-        for (int i = 0; i < N; i++) { inboundOffsets[i] = total; total += inDegree[i]; }
-        inboundOffsets[N] = total;
-        final int[] inboundTargets = new int[total];
-        System.arraycopy(inboundOffsets, 0, inDegree, 0, N); // repurpose as write cursor
-        graph.inboundOffsets = inboundOffsets;
-
-        // Resolve exclude pairs so CsrBuilder can evaluate them
-        // (already done in phaseA1 → resolveExcludePairs)
-        short[][] excludePairs = graph.excludePairs;
-
-        try (Parser p = openParser()) {
-            scanEdgesWithNames(p, graph, (srcIdx, dstIdx, nameIdx, srcClassIdx) -> {
-                int pos = inDegree[dstIdx];
-                boolean excluded = isExcluded(excludePairs, srcClassIdx, nameIdx);
-                inboundTargets[pos] = excluded ? (srcIdx | Integer.MIN_VALUE) : srcIdx;
-                inDegree[dstIdx]++;
-            });
-        }
-        // Fill synthetic thread→local edges into inbound CSR (not excluded)
-        if (graph.syntheticThreadEdges != null) {
-            for (Map.Entry<Integer, int[]> e : graph.syntheticThreadEdges.entrySet()) {
-                int threadIdx = e.getKey();
-                for (int localIdx : e.getValue()) {
-                    if (localIdx < N) {
-                        int pos = inDegree[localIdx];
-                        inboundTargets[pos] = threadIdx; // not excluded
-                        inDegree[localIdx]++;
-                    }
-                }
-            }
-        }
-        // Free synthetic edges — no longer needed
-        graph.syntheticThreadEdges = null;
-
-        // VByte encode (inboundOffsets is already the correct prefix sum)
-        CsrBuilderEncoder encoder = new CsrBuilderEncoder(graph, inboundTargets, inboundOffsets, N);
-        encoder.encodeVByte();
-        // inboundTargets is freed inside encoder
-    }
-
     @FunctionalInterface
     private interface NamedEdgeConsumer {
         void accept(int srcIdx, int dstIdx, short nameIdx, short srcClassIdx) throws IOException;
@@ -1046,7 +1006,9 @@ public final class HeapGraphBuilder {
                     int srcIdx = objectIndex(idMap, objId);
                     int classIdx = graph.classIdToIndex.getIfAbsent(classId, -1);
                     ClassRecord cr = classIdx >= 0 ? graph.classList.get(classIdx) : null;
-                    byte[] data = p.readBytes(dataLen); remaining -= dataLen;
+                    if (dataLen > instanceDataBuf.length) instanceDataBuf = new byte[dataLen];
+                    p.readBytesInto(instanceDataBuf, dataLen); remaining -= dataLen;
+                    byte[] data = instanceDataBuf;
                     if (srcIdx >= 0) {
                         short srcClassIdx = classIdx >= 0 ? (short) classIdx : 0;
                         // Emit <class> edge: instance → its class object (MAT-compatible, always excluded)
@@ -1104,26 +1066,6 @@ public final class HeapGraphBuilder {
     // =========================================================
     // Helpers
     // =========================================================
-
-    private static void skipToHeapSection(Parser p) throws IOException {
-        while (true) {
-            int tag = p.readTag();
-            if (tag < 0) break;
-            p.readU4();
-            long length = p.readU4();
-            if (tag == HPROF_HEAP_DUMP || tag == HPROF_HEAP_DUMP_SEGMENT) {
-                // Found first heap dump record — caller processes from here
-                // We push back the length by storing it; but Parser doesn't support unread.
-                // Solution: put the length back as context.
-                // Actually, we need to handle the segment content starting here.
-                // We redesign: return the *first segment length* and let the caller handle it.
-                // For simplicity, re-scan from file start instead. The actual segments are
-                // processed in scanEdges which handles the top-level loop itself.
-                return;
-            }
-            p.skipFully(length);
-        }
-    }
 
     private static int objectIndex(IdMap idMap, long objId) {
         int idx = idMap.indexOf(objId);
@@ -1192,15 +1134,15 @@ public final class HeapGraphBuilder {
                 }
             }
             if (classIdx < 0) continue;
-            // Find fieldNameIdx
-            Short nameIdx = null;
-            for (Map.Entry<Long, Short> e : graph.fieldNameIntern.entrySet()) {
-                if (fieldName.equals(graph.fieldNameFor(e.getValue()))) {
-                    nameIdx = e.getValue();
+            // Find fieldNameIdx by iterating the fieldNames list (faster than entrySet iteration)
+            short nameIdx = ClassRecord.NO_NAME;
+            for (int fi = 1; fi < graph.fieldNames.size(); fi++) {
+                if (fieldName.equals(graph.fieldNames.get(fi))) {
+                    nameIdx = (short) fi;
                     break;
                 }
             }
-            if (nameIdx == null) continue;
+            if (nameIdx == ClassRecord.NO_NAME) continue;
             resolved.add(new short[]{classIdx, nameIdx});
         }
         graph.excludePairs = resolved.toArray(new short[0][]);
@@ -1246,7 +1188,7 @@ public final class HeapGraphBuilder {
         private int gcRootCount;
 
         // threadSerial → packed list of local object addresses (for synthetic thread→local edges)
-        final Map<Integer, List<Long>> threadLocalsBySerial = new HashMap<>();
+        final IntObjectHashMap<long[]> threadLocalsBySerial = new IntObjectHashMap<>();
 
         // Compressed-OOPS detection (mirrors MAT's Pass1Parser heuristic on OBJ_ARRAY_DUMP records)
         long previousArrayStart;
@@ -1255,7 +1197,7 @@ public final class HeapGraphBuilder {
 
         // Frames and traces
         final LongLongHashMap frames = new LongLongHashMap(); // frameId → methodNameId
-        final Map<Integer, long[]> traces = new HashMap<>(); // traceSerial → frameIds
+        final IntObjectHashMap<long[]> traces = new IntObjectHashMap<>(); // traceSerial → frameIds
         final IntLongHashMap threadSerialToObjId = new IntLongHashMap();
 
         A1State(int est, IdMap idMap) {
@@ -1347,7 +1289,7 @@ public final class HeapGraphBuilder {
             // Build ClassRecord for each class (with own-only field offsets initially)
             classSerialByClassId.forEachKeyValue((classId, serial) -> {
                 long nameId = classIdToNameId.getIfAbsent(classId, 0L);
-                String name = nameId != 0L ? graph.utf8Strings.getOrDefault(nameId, "?") : "?";
+                String name = nameId != 0L ? graph.utf8Strings.getIfAbsent(nameId, () -> "?") : "?";
                 long loaderId = classLoaderIds.getIfAbsent(classId, 0L);
                 long superId = classSuperIds.getIfAbsent(classId, 0L);
                 int instSize = classInstanceSizes.getIfAbsent(classId, 0);
@@ -1511,17 +1453,18 @@ public final class HeapGraphBuilder {
                     graph.classIndex[objIdx] = (short) cidx2;
                 }
             }
+            // Free large A1State scan buffers — no longer needed after class/object metadata is built
+            addrBuf = null; shallowBuf = null; classIdBuf = null; arrayTypeBuf = null;
         }
 
         void buildTraceFrames(HeapGraph graph) {
-            for (Map.Entry<Integer, long[]> e : traces.entrySet()) {
-                long[] frameIds = e.getValue();
+            traces.forEachKeyValue((traceSerial, frameIds) -> {
                 long[] methodNameIds = new long[frameIds.length];
                 for (int i = 0; i < frameIds.length; i++) {
                     methodNameIds[i] = frames.getIfAbsent(frameIds[i], 0L);
                 }
-                graph.traceFrames.put(e.getKey(), methodNameIds);
-            }
+                graph.traceFrames.put(traceSerial, methodNameIds);
+            });
         }
     }
 
@@ -1557,7 +1500,7 @@ public final class HeapGraphBuilder {
         static void sortAndEncode(int[] targets, int[] offsets, int n, HeapGraph graph) {
             int totalEdges = offsets[n];
             java.util.BitSet newExcluded = new java.util.BitSet(totalEdges);
-            byte[] stream = new byte[Math.max(totalEdges * 2, 16)];
+            byte[] stream = new byte[Math.max((int) Math.min((long) totalEdges + totalEdges / 2, Integer.MAX_VALUE - 8), 16)];
             int streamPos = 0;
             int logicalEdgeIdx = 0;
 
@@ -1709,6 +1652,17 @@ public final class HeapGraphBuilder {
                 offset += chunk;
             }
             return result;
+        }
+
+        void readBytesInto(byte[] dest, int len) throws IOException {
+            int offset = 0;
+            while (offset < len) {
+                int avail = buf.remaining();
+                if (avail == 0) { refill(); avail = buf.remaining(); }
+                int chunk = Math.min(avail, len - offset);
+                buf.get(dest, offset, chunk);
+                offset += chunk;
+            }
         }
 
         void skipFully(long n) throws IOException {

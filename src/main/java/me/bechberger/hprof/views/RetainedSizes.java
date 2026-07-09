@@ -4,6 +4,7 @@
  */
 package me.bechberger.hprof.views;
 
+import java.util.Arrays;
 import java.util.BitSet;
 
 /**
@@ -107,10 +108,14 @@ final class RetainedSizes {
         int[] classToLastDepth = new int[classCount + 1]; // +1 for -1 sentinel handling
         int[] classObjDepth    = new int[classCount + 1]; // depth of classObject(c) on stack (0 = none)
 
-        int[] stackNode = new int[N + 1];
-        int[] stackChildIdx = new int[N + 1];
-        int[] stackSavedDepth = new int[N + 1];    // saved classToLastDepth value to restore on pop
-        int[] stackSavedObjDepth = new int[N + 1]; // saved classObjDepth value to restore on pop
+        // Stack arrays: start small and grow on demand. Dominator-tree depth is typically
+        // much less than N (e.g., <1000 for most JVM heaps). Avoids allocating 4×N ints
+        // up-front, which wastes tens of MB for large heaps.
+        int stackCap = Math.min(N + 1, 4096);
+        int[] stackNode        = new int[stackCap];
+        int[] stackChildIdx    = new int[stackCap];
+        int[] stackSavedDepth  = new int[stackCap];
+        int[] stackSavedObjDepth = new int[stackCap];
         int sp = 0;
 
         stackNode[sp] = HeapGraph.VIRTUAL_ROOT;
@@ -152,6 +157,13 @@ final class RetainedSizes {
                 stackSavedDepth[sp] = savedDepth;
                 stackSavedObjDepth[sp] = savedObjDepth;
                 sp++;
+                if (sp == stackNode.length) {
+                    int newCap = sp * 2;
+                    stackNode        = Arrays.copyOf(stackNode,        newCap);
+                    stackChildIdx    = Arrays.copyOf(stackChildIdx,    newCap);
+                    stackSavedDepth  = Arrays.copyOf(stackSavedDepth,  newCap);
+                    stackSavedObjDepth = Arrays.copyOf(stackSavedObjDepth, newCap);
+                }
             } else {
                 // Leave v: restore classToLastDepth and classObjDepth
                 short cls = (v == HeapGraph.VIRTUAL_ROOT) ? -1 : classIndex[v];
@@ -168,6 +180,8 @@ final class RetainedSizes {
         }
         graph.hasSameClassAncestor = hasSameClassAncestor;
 
+        // classObjClassIdx only used here; classIndex still needed by report writers
+        graph.classObjClassIdx = null;
         graph.freeRpoOrder(); // rpoOrder no longer needed
     }
 }

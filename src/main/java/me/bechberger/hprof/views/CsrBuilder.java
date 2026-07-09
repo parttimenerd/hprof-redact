@@ -231,7 +231,8 @@ final class CsrBuilder {
         int totalEdges = offsets[n];
 
         BitSet newExcluded = new BitSet(totalEdges);
-        byte[] stream = new byte[Math.max(totalEdges * 2, 16)];
+        // VByte average for heap-graph deltas is ~1.2 bytes/edge; allocate 1.5× for headroom
+        byte[] stream = new byte[Math.max((int) Math.min((long) totalEdges + totalEdges / 2, Integer.MAX_VALUE - 8), 16)];
         int streamPos = 0;
         int logicalEdgeIdx = 0;
 
@@ -288,33 +289,19 @@ final class CsrBuilder {
                 arr[j + 1] = key;
             }
         } else {
-            // For larger rows: strip the flag bit, sort numerically, re-apply flags.
-            // The sign bit encodes the exclude flag; strip before sorting, restore after.
-            int[] stripped = new int[len];
-            for (int i = 0; i < len; i++) stripped[i] = arr[lo + i] & Integer.MAX_VALUE;
-            Arrays.sort(stripped);
-            // Rebuild arr[lo..hi) with flags: match stripped values to originals
-            // Since values are unique (each src appears once per dst), use a flag array.
-            boolean[] flags = new boolean[len];
+            long[] packed = new long[len];
             for (int i = 0; i < len; i++) {
-                flags[i] = (arr[lo + i] & Integer.MIN_VALUE) != 0;
+                int raw = arr[lo + i];
+                int src = raw & Integer.MAX_VALUE;
+                int excl = (raw >>> 31) & 1;
+                packed[i] = ((long) src << 1) | excl;
             }
-            // Sort flags array alongside stripped by rebuilding a combined long[] sort
-            // Simpler: re-extract the exclude flag from original via linear scan per stripped value.
-            // O(n²) but only for rows > 16 that need flag bits. In practice, excluded edges are
-            // extremely rare (< 3 per heap), so most large rows have no flags at all.
+            Arrays.sort(packed);
             for (int i = 0; i < len; i++) {
-                int src = stripped[i];
-                // Find original position (linear scan — correct but O(n); good enough for rare case)
-                boolean excluded = false;
-                for (int j = 0; j < len; j++) {
-                    if ((arr[lo + j] & Integer.MAX_VALUE) == src) {
-                        excluded = (arr[lo + j] & Integer.MIN_VALUE) != 0;
-                        arr[lo + j] = Integer.MIN_VALUE; // mark used
-                        break;
-                    }
-                }
-                arr[lo + i] = excluded ? (src | Integer.MIN_VALUE) : src;
+                long p = packed[i];
+                int src  = (int) (p >>> 1);
+                int excl = (int) (p & 1);
+                arr[lo + i] = excl != 0 ? (src | Integer.MIN_VALUE) : src;
             }
         }
     }

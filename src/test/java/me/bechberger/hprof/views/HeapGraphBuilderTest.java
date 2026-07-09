@@ -145,8 +145,8 @@ class HeapGraphBuilderTest {
 
         HeapGraph graph = new HeapGraphBuilder(hprof).build();
 
-        // RPO arrays are freed after use (rpoPos after CHK, rpoOrder after retained sizes)
-        assertNull(graph.rpoPos,   "rpoPos should be freed after dominator tree");
+        // RPO/DFS arrays are freed after use (dfsPos/dfsOrder/dfsParent after DOM, rpoOrder after retained sizes)
+        assertNull(graph.dfsPos,   "dfsPos should be freed after dominator tree");
         assertNull(graph.rpoOrder, "rpoOrder should be freed after retained sizes");
 
         // Dominator tree proves RPO was computed: idom[A] = VRoot, idom[B] = A
