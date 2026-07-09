@@ -165,8 +165,11 @@ public final class HeapGraph {
         return fieldNames.get(internIdx);
     }
 
-    /** Add a GC root object index and type code. */
+    /** Add a GC root object index and type code.
+     *  MAT parity: gcRoots is deduplicated by objIdx — an object appearing as a root
+     *  multiple times (e.g., SYSTEM_CLASS + JNI_GLOBAL) counts once. */
     void addGCRoot(int objIdx, byte rootType) {
+        if (isGCRoot.get(objIdx)) return; // already a root
         isGCRoot.set(objIdx);
         if (gcRootCount == gcRootIds.length) {
             gcRootIds  = Arrays.copyOf(gcRootIds, gcRootCount * 2);

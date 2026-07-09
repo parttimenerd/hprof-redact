@@ -1422,6 +1422,15 @@ public final class HeapGraphBuilder {
                 matClassSize.put(classId, alignUp(sfBytes, objectAlign));
             });
 
+            // Look up java.lang.Class classIdx — for attributing class-object shallow to it (MAT parity).
+            int javaLangClassIdx = -1;
+            for (int ci = 0; ci < graph.classList.size(); ci++) {
+                if ("java/lang/Class".equals(graph.classList.get(ci).name())) {
+                    javaLangClassIdx = ci;
+                    break;
+                }
+            }
+
             // Fill shallowSizeDiv8 and classIndex for all objects
             for (int i = 0; i < count; i++) {
                 int objIdx = objectIndex(idMap, addrBuf[i]);
@@ -1430,6 +1439,7 @@ public final class HeapGraphBuilder {
                 byte atype = arrayTypeBuf[i];
                 int rawShallow = shallowBuf[i]; // for arrays: numElem; for instances: 0 (unused); for class objs: 0
                 int bytes;
+                boolean isClassObject = false;
                 if (atype == (byte) -1) {
                     // Object array: MAT formula
                     //   alignUp(pointerSize + refSize + 4 + numElem * refSize, objectAlign)
@@ -1450,11 +1460,13 @@ public final class HeapGraphBuilder {
                         // Class object: cid IS the class's own id → use matClassSize
                         int cv = matClassSize.getIfAbsent(cid, -1);
                         bytes = cv >= 0 ? cv : alignUp(pointerSize + refSize, objectAlign);
+                        isClassObject = true;
                     }
                 } else {
                     // No class id (should be rare — class-dump self entry)
                     int cv = matClassSize.getIfAbsent(addrBuf[i], -1);
                     bytes = cv >= 0 ? cv : alignUp(pointerSize + refSize, objectAlign);
+                    isClassObject = true;
                 }
                 if (bytes > 0) {
                     int div8 = bytes / 8;
@@ -1465,13 +1477,16 @@ public final class HeapGraphBuilder {
                         graph.overflowSizes.put(objIdx, bytes);
                     }
                 }
-                // Class index: use synthesized array class for arrays
+                // Class index: use synthesized array class for arrays;
+                // MAT parity: class-objects are attributed to java.lang.Class, not their own class.
                 int cidx2;
                 if (atype == (byte) -1) {
                     cidx2 = objArrayElemToClassIdx.getIfAbsent(cid, -1);
                 } else if (atype != 0) {
                     int typeCode = atype & 0xFF;
                     cidx2 = (typeCode < primArrayClassIdx.length) ? primArrayClassIdx[typeCode] - 1 : -1;
+                } else if (isClassObject) {
+                    cidx2 = javaLangClassIdx; // attribute all class-objects to java.lang.Class
                 } else {
                     cidx2 = graph.classIdToIndex.getIfAbsent(cid, -1);
                 }
