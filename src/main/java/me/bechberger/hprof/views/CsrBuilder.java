@@ -144,8 +144,8 @@ final class CsrBuilder {
         // Temporary new BitSet for re-indexed exclude flags
         BitSet newExcluded = graph.excludedEdge != null ? new BitSet(totalEdges) : null;
 
-        // Estimate stream capacity: ~1.5 bytes/edge average
-        byte[] stream = new byte[Math.max(totalEdges * 2, 16)];
+        // Estimate stream capacity: ~1.25 bytes/edge average; grow on overflow.
+        byte[] stream = new byte[Math.max(totalEdges + totalEdges / 4, 16)];
         int streamPos = 0;
         byte[] encodeBuf = new byte[8];
 
@@ -205,7 +205,9 @@ final class CsrBuilder {
 
         offsets[n] = streamPos;
         targets = null; // free int[] inboundTargets
-        graph.inboundStream = streamPos < stream.length ? Arrays.copyOf(stream, streamPos) : stream;
+        // Trim only if >50% of the buffer is wasted — avoids a multi-GB copy for typical heaps
+        // where streamPos ≈ stream.length (1.25× estimate is tight).
+        graph.inboundStream = (streamPos < stream.length / 2) ? Arrays.copyOf(stream, streamPos) : stream;
         if (newExcluded != null) graph.excludedEdge = newExcluded;
     }
 
@@ -221,8 +223,8 @@ final class CsrBuilder {
         int totalEdges = offsets[n];
 
         BitSet newExcluded = new BitSet(totalEdges);
-        // VByte average for heap-graph deltas is ~1.2 bytes/edge; allocate 1.5× for headroom
-        byte[] stream = new byte[Math.max((int) Math.min((long) totalEdges + totalEdges / 2, Integer.MAX_VALUE - 8), 16)];
+        // Allocate 1.25× headroom; grow on overflow; trim only if >50% wasted.
+        byte[] stream = new byte[Math.max((int) Math.min((long) totalEdges + totalEdges / 4, Integer.MAX_VALUE - 8), 16)];
         int streamPos = 0;
         int logicalEdgeIdx = 0;
 
@@ -256,7 +258,7 @@ final class CsrBuilder {
 
         offsets[n] = streamPos;
         targets = null;
-        graph.inboundStream = streamPos < stream.length ? Arrays.copyOf(stream, streamPos) : stream;
+        graph.inboundStream = (streamPos < stream.length / 2) ? Arrays.copyOf(stream, streamPos) : stream;
         graph.excludedEdge = newExcluded;
     }
 

@@ -684,10 +684,10 @@ public final class HeapGraphBuilder {
         // fwdCursor: take donated array (was outDegree/inDegree, now zeroed), fill from fwdOffsets.
         int[] fwdTargets     = new int[totalFwdSlots];
         int[] inboundTargets = new int[totalInbEdges];
-        int[] fwdCursor = graph.phaseArrays.take(); // returns zeroed int[N]
+        int[] fwdCursor = graph.phaseArrays.takeRaw(); // will be fully overwritten by arraycopy
         System.arraycopy(fwdOffsets, 0, fwdCursor, 0, N);
-        // ibCursor: take donated array (fwdCursor-predecessor), fill from inboundOffsets start positions
-        int[] ibCursor = graph.phaseArrays.take(); // returns zeroed int[N]
+        // ibCursor: take donated array, fill from inboundOffsets start positions
+        int[] ibCursor = graph.phaseArrays.takeRaw(); // will be fully overwritten by arraycopy
         System.arraycopy(inboundOffsets, 0, ibCursor, 0, N);
 
         // --- Sub-pass A.2b: fill fwdTargets AND inboundTargets simultaneously ---
