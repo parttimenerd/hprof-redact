@@ -205,7 +205,7 @@ final class CsrBuilder {
 
         offsets[n] = streamPos;
         targets = null; // free int[] inboundTargets
-        graph.inboundStream = stream; // no trim copy; inboundOffsets[n] holds exact byte count
+        graph.inboundStream = streamPos < stream.length ? Arrays.copyOf(stream, streamPos) : stream;
         if (newExcluded != null) graph.excludedEdge = newExcluded;
     }
 
@@ -256,7 +256,7 @@ final class CsrBuilder {
 
         offsets[n] = streamPos;
         targets = null;
-        graph.inboundStream = stream; // no trim copy; inboundOffsets[n] holds exact byte count
+        graph.inboundStream = streamPos < stream.length ? Arrays.copyOf(stream, streamPos) : stream;
         graph.excludedEdge = newExcluded;
     }
 

@@ -52,8 +52,7 @@ final class IdMap {
      * right-shifting by 3, use int[] storage to halve memory consumption.
      */
     void sort() {
-        buf = Arrays.copyOf(buf, size);
-        Arrays.sort(buf);
+        Arrays.sort(buf, 0, size); // sort in-place up to size; no copy needed
         // Deduplicate (GC root addresses may duplicate object addresses)
         int unique = 0;
         for (int i = 0; i < size; i++) {
