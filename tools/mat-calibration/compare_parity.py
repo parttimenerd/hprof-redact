@@ -624,6 +624,8 @@ def compare(mat: MatReport, our: OurReport) -> list[Check]:
 
     our_histo = {row.name: row for row in our.histogram}
     for mat_row in mat.histogram:
+        if re.fullmatch(r'0x[0-9a-fA-F]+', mat_row.name):
+            continue  # skip rows MAT couldn't resolve to a class name
         our_row = our_histo.get(mat_row.name)
         p = f'hist/{mat_row.name}'
         if our_row is None:
