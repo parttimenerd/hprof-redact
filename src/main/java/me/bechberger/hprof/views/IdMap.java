@@ -74,12 +74,11 @@ final class IdMap {
     }
 
     private boolean canUseCompressedOops() {
+        if (size == 0) return false;
         for (int i = 0; i < size; i++) {
-            long addr = buf[i];
-            if ((addr & 0x7L) != 0) return false; // not 8-byte aligned
-            if ((addr >>> 3) > 0xFFFFFFFFL) return false; // doesn't fit in unsigned int
+            if ((buf[i] & 0x7L) != 0) return false; // not 8-byte aligned
         }
-        return true;
+        return (buf[size - 1] >>> 3) <= 0xFFFFFFFFL; // max fits in unsigned 32-bit → no overflow
     }
 
     private void buildSkipIndex() {

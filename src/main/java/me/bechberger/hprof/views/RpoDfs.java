@@ -13,11 +13,15 @@ import java.util.Arrays;
  *
  * After completion:
  * <ul>
- *   <li>{@code graph.rpoPos[v]} = RPO position of node v (0 = virtual root)</li>
  *   <li>{@code graph.rpoOrder[i]} = node at RPO position i</li>
+ *   <li>{@code graph.dfsPos[v]} = DFS pre-order visit number (0 = virtual root)</li>
+ *   <li>{@code graph.dfsOrder[i]} = node at DFS pre-order position i</li>
+ *   <li>{@code graph.dfsParent[v]} = DFS spanning-tree parent of v (-1 = virtual root has no parent)</li>
  * </ul>
  *
  * Frees {@code graph.fwdOffsets} and {@code graph.fwdTargets} after the DFS.
+ *
+ * Note: rpoPos[] is NOT produced here. Reachability is determined via dfsPos[v] >= 0.
  */
 final class RpoDfs {
 
@@ -28,31 +32,34 @@ final class RpoDfs {
         int[] fwdOffsets = graph.fwdOffsets;
         int[] fwdTargets = graph.fwdTargets;
 
-        int[] rpoPos   = new int[N];
         int[] rpoOrder = new int[N];
-        Arrays.fill(rpoPos, -1); // -1 = not yet visited; will be set to actual position
 
-        // Explicit DFS stack: three parallel stacks
-        // nodeStack[i]   = node being processed
-        // cursorStack[i] = next child index to visit (fwdOffsets[node] + cursor)
-        // For virtual root (0): children are all GC roots
+        // DFS pre-order: assigned when a node is first pushed onto the stack.
+        // dfsPos[v] = -1 means not yet visited; >= 0 means visited (also serves as visited-sentinel).
+        int[] dfsPos   = new int[N];
+        int[] dfsOrder = new int[N];
+        int[] dfsParent = new int[N];
+        Arrays.fill(dfsPos,    -1);
+        Arrays.fill(dfsParent, -1);
+
+        // Explicit DFS stack: parallel arrays for node and cursor
         int stackCap = Math.min(N, 1 << 16);
         int[] nodeStack   = new int[stackCap];
-        int[] cursorStack = new int[stackCap]; // index into fwdTargets for this node
+        int[] cursorStack = new int[stackCap];
         int top = -1;
 
         // Post-order sequence (collected in reverse)
         int[] postOrder = new int[N];
-        int postCount = 0;
+        int postCount  = 0;
+        int dfsCount   = 0; // pre-order counter
 
-        // Virtual root at index 0 has edges to all GC roots (stored in gcRootIds)
-        // We simulate virtual root's adjacency list as gcRootIds[]
-        rpoPos[HeapGraph.VIRTUAL_ROOT] = Integer.MAX_VALUE; // in-progress sentinel
+        // Push virtual root (use Integer.MIN_VALUE as in-progress sentinel in dfsPos
+        // to distinguish "on stack but not finished" from "not visited"; in practice
+        // dfsPos holds actual pre-order numbers, and the visited check is dfsPos[v] >= 0)
+        dfsPos[HeapGraph.VIRTUAL_ROOT]    = dfsCount;
+        dfsOrder[dfsCount++]              = HeapGraph.VIRTUAL_ROOT;
+        dfsParent[HeapGraph.VIRTUAL_ROOT] = -1;
         top++;
-        if (top == nodeStack.length) {
-            nodeStack   = Arrays.copyOf(nodeStack, top * 2);
-            cursorStack = Arrays.copyOf(cursorStack, top * 2);
-        }
         nodeStack[top]   = HeapGraph.VIRTUAL_ROOT;
         cursorStack[top] = 0;
 
@@ -61,14 +68,15 @@ final class RpoDfs {
             int cursor = cursorStack[top];
 
             boolean pushed = false;
-            // Get adjacency list for node
             int childCount = childCount(node, graph, fwdOffsets);
             while (cursor < childCount) {
                 int child = getChild(node, cursor, graph, fwdOffsets, fwdTargets);
                 cursor++;
                 if (child < 0 || child >= N) continue;
-                if (rpoPos[child] == -1) { // not yet visited
-                    rpoPos[child] = Integer.MAX_VALUE; // in-progress sentinel (overwritten at completion)
+                if (dfsPos[child] == -1) { // not yet visited
+                    dfsPos[child]  = dfsCount;
+                    dfsOrder[dfsCount++] = child;
+                    dfsParent[child]     = node;
                     cursorStack[top] = cursor;
                     top++;
                     if (top == nodeStack.length) {
@@ -82,8 +90,7 @@ final class RpoDfs {
                 }
             }
             if (!pushed) {
-                // Node fully explored: add to post-order
-                cursorStack[top] = cursor; // update (though we're popping)
+                cursorStack[top] = cursor;
                 if (postCount < N) postOrder[postCount++] = node;
                 top--;
             }
@@ -91,15 +98,14 @@ final class RpoDfs {
 
         // RPO = reverse of post-order
         for (int i = 0; i < postCount; i++) {
-            int node = postOrder[postCount - 1 - i];
-            rpoOrder[i] = node;
-            rpoPos[node] = i;
+            rpoOrder[i] = postOrder[postCount - 1 - i];
         }
 
-        graph.rpoPos   = rpoPos;
-        graph.rpoOrder = rpoOrder;
+        graph.rpoOrder  = rpoOrder;
+        graph.dfsPos    = dfsPos;
+        graph.dfsOrder  = dfsOrder;
+        graph.dfsParent = dfsParent;
 
-        // Free forward CSR — no longer needed after DFS
         graph.freeFwdCsr();
     }
 

@@ -432,12 +432,14 @@ def run_benchmark(args) -> None:
     mat_sh = args.mat_sh
     dumps_dir: Path = args.dumps_dir
 
-    # Collect hprof files (filtered by --dump / --skip)
+    # Collect hprof files (filtered by --dump / --skip / --max-size)
+    max_bytes = args.max_size * 1024 * 1024
     hprofs: list[Path] = sorted(dumps_dir.glob('*.hprof'))
     if args.dump:
         hprofs = [h for h in hprofs if h.stem == args.dump]
     if args.skip:
         hprofs = [h for h in hprofs if h.stem not in args.skip]
+    hprofs = [h for h in hprofs if os.path.getsize(h) <= max_bytes]
 
     if not hprofs:
         print("Benchmark: no .hprof files found — nothing to measure.")
@@ -445,112 +447,183 @@ def run_benchmark(args) -> None:
 
     @dataclass
     class BenchRow:
-        name: str
-        file_size: int
+        name: str        # display name (stem, no timestamp)
+        file_size: int   # bytes
+        objects: Optional[int]
         ours_rss: Optional[int]
         mat_rss: Optional[int]
         ours_t: Optional[float]
         mat_t: Optional[float]
 
-    rows: list[BenchRow] = []
+    import re as _re
 
-    print(f"\nRunning benchmarks on {len(hprofs)} dump(s) (sequential, cold start)…")
-    for hprof in hprofs:
+    def _read_object_count(md_path: Path) -> Optional[int]:
+        """Parse '| Total objects | 952,660 |' from ours.md."""
+        try:
+            for line in md_path.read_text().splitlines():
+                m = _re.search(r'Total objects\s*\|\s*([\d,]+)', line)
+                if m:
+                    return int(m.group(1).replace(',', ''))
+        except Exception:
+            pass
+        return None
+
+    def _fmt_objects(n: Optional[int]) -> str:
+        if n is None:
+            return '?'
+        if n >= 1_000_000:
+            return f"{n / 1_000_000:.1f}M"
+        if n >= 1_000:
+            return f"{n // 1000}K"
+        return str(n)
+
+    def _load_mat_bench_cache(hprof: Path, dumps_dir: Path) -> Optional[tuple[float, int]]:
+        cache_file = dumps_dir / f"{hprof.stem}_mat_bench_cache.json"
+        if not cache_file.exists():
+            return None
+        try:
+            stat = hprof.stat()
+            cached = json.loads(cache_file.read_text())
+            if (cached.get('hprof_mtime') == stat.st_mtime
+                    and cached.get('hprof_size') == stat.st_size):
+                return (cached['wall_seconds'], cached['rss_bytes'])
+        except Exception:
+            pass
+        return None
+
+    def _save_mat_bench_cache(hprof: Path, dumps_dir: Path, result: tuple[float, int]) -> None:
+        stat = hprof.stat()
+        cache_file = dumps_dir / f"{hprof.stem}_mat_bench_cache.json"
+        cache_file.write_text(json.dumps({
+            'wall_seconds': result[0],
+            'rss_bytes': result[1],
+            'hprof_mtime': stat.st_mtime,
+            'hprof_size': stat.st_size,
+        }))
+
+    def _display_name(hprof: Path) -> str:
+        """Strip trailing _PID_TIMESTAMP suffix if present."""
+        stem = hprof.stem
+        m = _re.match(r'^(.+?)_\d+_\d{8}_\d{6}$', stem)
+        return m.group(1) if m else stem
+
+    def _bench_one(hprof: Path) -> BenchRow:
         file_size = os.path.getsize(hprof)
-        print(f"  {hprof.name} ({_fmt_bytes_human(file_size)})")
+        name = _display_name(hprof)
 
-        # Our tool: java -jar <jar> views <hprof> /dev/null
-        print(f"    Running our tool…", end='', flush=True)
-        ours = measure_run(
-            ['java', '-jar', str(jar), 'views', str(hprof), '/dev/null']
-        )
-        if ours:
-            print(f" {ours[0]:.1f}s  RSS={_fmt_bytes_human(ours[1])}")
-        else:
-            print(" FAILED")
+        # Our tool
+        ours = measure_run(['java', '-jar', str(jar), 'views', str(hprof), '/dev/null'])
 
-        # MAT: <mat-sh> <hprof> org.eclipse.mat.api:overview
-        print(f"    Running MAT…", end='', flush=True)
-        mat = measure_run(
-            [str(mat_sh), str(hprof), 'org.eclipse.mat.api:overview']
-        )
-        if mat:
-            print(f" {mat[0]:.1f}s  RSS={_fmt_bytes_human(mat[1])}")
-        else:
-            print(" FAILED")
+        # Object count from cached ours.md (generated during parity check)
+        md_path = dumps_dir / f"{hprof.stem}_ours.md"
+        objects = _read_object_count(md_path)
 
-        rows.append(BenchRow(
-            name=hprof.name,
+        # MAT: cache-first
+        mat = _load_mat_bench_cache(hprof, dumps_dir)
+        if mat is None:
+            mat = measure_run([str(mat_sh), str(hprof), 'org.eclipse.mat.api:overview'])
+            if mat:
+                _save_mat_bench_cache(hprof, dumps_dir, mat)
+
+        return BenchRow(
+            name=name,
             file_size=file_size,
+            objects=objects,
             ours_rss=ours[1] if ours else None,
             mat_rss=mat[1] if mat else None,
             ours_t=ours[0] if ours else None,
             mat_t=mat[0] if mat else None,
-        ))
+        )
 
-    # ── print table ──────────────────────────────────────────────────────────
-    col_w = max(len(r.name) for r in rows) + 2
+    # Count cached vs uncached MAT runs for progress message
+    cached_count = sum(1 for h in hprofs if _load_mat_bench_cache(h, dumps_dir) is not None)
+    uncached_count = len(hprofs) - cached_count
+    print(f"\nRunning benchmarks on {len(hprofs)} dump(s) in parallel "
+          f"({cached_count} MAT cached, {uncached_count} MAT fresh)…")
 
-    total_w = col_w + 12 + 11 + 10 + 12 + 10 + 10 + 10 + 7
-    sep = '=' * total_w
-    dash = '-' * total_w
+    rows: list[BenchRow] = []
+    with ThreadPoolExecutor(max_workers=min(len(hprofs), 8)) as pool:
+        futures = {pool.submit(_bench_one, h): h for h in hprofs}
+        for fut in as_completed(futures):
+            hprof = futures[fut]
+            try:
+                row = fut.result()
+            except Exception as e:
+                row = BenchRow(
+                    name=_display_name(hprof),
+                    file_size=os.path.getsize(hprof),
+                    objects=None, ours_rss=None, mat_rss=None, ours_t=None, mat_t=None,
+                )
+                print(f"  ERROR {hprof.name}: {e}", file=sys.stderr)
+            rows.append(row)
+            status = (f"  ✓ {row.name:<30} "
+                      f"ours={row.ours_t:.1f}s/{row.ours_rss//1024//1024}MB  "
+                      f"MAT={row.mat_t:.1f}s/{row.mat_rss//1024//1024}MB"
+                      if row.ours_t and row.mat_t else f"  ✗ {row.name}")
+            print(status)
 
-    print(f"\nBenchmark Results")
-    print(sep)
-    hdr = (f" {'Dump':<{col_w}}{'File size':>12}{'Ours RSS':>11}{'MAT RSS':>10}"
-           f"{'RSS ratio':>12}{'Ours t':>10}{'MAT t':>10}{'Speedup':>10}  Goals")
-    print(hdr)
-    print(dash)
+    # Sort by file size; only show dumps ≥ 50 MB in the table
+    rows.sort(key=lambda r: r.file_size)
+    rows = [r for r in rows if r.file_size >= 50 * 1024 * 1024]
+    if not rows:
+        print("No dumps ≥ 50 MB — benchmark table omitted.")
+        return
 
-    for r in rows:
-        fs = _fmt_bytes_human(r.file_size)
+    # ── boxed table ───────────────────────────────────────────────────────────
+    col_w = max(len(r.name) for r in rows)
 
-        if r.ours_rss is not None:
-            ours_rss_s = _fmt_bytes_human(r.ours_rss)
-        else:
-            ours_rss_s = 'ERR'
+    def _mb(n: Optional[int]) -> str:
+        return f"{round(n / 1024 / 1024)} MB" if n is not None else '?'
 
-        if r.mat_rss is not None:
-            mat_rss_s = _fmt_bytes_human(r.mat_rss)
-        else:
-            mat_rss_s = 'ERR'
+    def _ts(t: Optional[float]) -> str:
+        return f"{t:.1f}s" if t is not None else '?'
 
-        if r.ours_rss and r.mat_rss:
-            rss_ratio_s = f"{r.mat_rss / r.ours_rss:.1f}x"
-        else:
-            rss_ratio_s = 'ERR'
+    H = ['Dump', 'MB', 'Objects', 'ours time', 'ours RSS', 'MAT time', 'MAT RSS']
+    widths = [
+        max(col_w, len(H[0])),
+        max(4, len(H[1])),
+        max(7, len(H[2])),
+        max(9, len(H[3])),
+        max(8, len(H[4])),
+        max(8, len(H[5])),
+        max(7, len(H[6])),
+    ]
 
-        if r.ours_t is not None:
-            ours_t_s = f"{r.ours_t:.1f}s"
-        else:
-            ours_t_s = 'ERR'
+    def _row_line(cols: list[str]) -> str:
+        return ('│ ' + ' │ '.join(c.rjust(w) if i > 0 else c.ljust(w)
+                                  for i, (c, w) in enumerate(zip(cols, widths))) + ' │')
 
-        if r.mat_t is not None:
-            mat_t_s = f"{r.mat_t:.1f}s"
-        else:
-            mat_t_s = 'ERR'
+    def _sep_line(left: str, mid: str, right: str) -> str:
+        return left + mid.join('─' * (w + 2) for w in widths) + right
 
-        if r.ours_t and r.mat_t:
-            speedup_s = f"{r.mat_t / r.ours_t:.1f}x"
-        else:
-            speedup_s = 'ERR'
+    print()
+    print(_sep_line('┌', '┬', '┐'))
+    print(_row_line(H))
+    print(_sep_line('├', '┼', '┤'))
 
-        # Goals
-        if r.ours_rss is not None:
-            rss_goal = '✓' if r.ours_rss <= r.file_size / 2 else '✗'
-        else:
-            rss_goal = '?'
-        if r.ours_t is not None and r.mat_t is not None:
-            speed_goal = '✓' if r.mat_t / r.ours_t >= 3.0 else '✗'
-        else:
-            speed_goal = '?'
-        goals = f"{rss_goal} {speed_goal}"
+    for i, r in enumerate(rows):
+        file_mb = str(round(r.file_size / 1024 / 1024))
+        cols = [
+            r.name,
+            file_mb,
+            _fmt_objects(r.objects),
+            _ts(r.ours_t),
+            _mb(r.ours_rss),
+            _ts(r.mat_t),
+            _mb(r.mat_rss),
+        ]
+        print(_row_line(cols))
+        if i < len(rows) - 1:
+            print(_sep_line('├', '┼', '┤'))
 
-        print(f" {r.name:<{col_w}}{fs:>12}{ours_rss_s:>11}{mat_rss_s:>10}"
-              f"{rss_ratio_s:>12}{ours_t_s:>10}{mat_t_s:>10}{speedup_s:>10}  {goals}")
+    print(_sep_line('└', '┴', '┘'))
 
-    print(dash)
-    print(f" Goals: RSS ≤ filesize/2 (col 1), speedup ≥ 3× (col 2)")
+    print()
+    # Goals summary
+    rss_pass = sum(1 for r in rows if r.ours_rss and r.file_size and r.ours_rss <= r.file_size / 2)
+    speed_pass = sum(1 for r in rows if r.ours_t and r.mat_t and r.mat_t / r.ours_t >= 3.0)
+    print(f" RSS goal  (ours ≤ filesize/2): {rss_pass}/{len(rows)}")
+    print(f" Speed goal (speedup ≥ 3×):     {speed_pass}/{len(rows)}")
     print()
 
 
@@ -732,6 +805,8 @@ def main():
                     help='Measure wall time and peak RSS for our tool and MAT')
     ap.add_argument('--mat-sh',        type=Path,
                     help='Path to MAT ParseHeapDump.sh (required with --benchmark)')
+    ap.add_argument('--max-size',      type=int, default=500,
+                    metavar='MB',      help='Skip dumps larger than this many MB (default: 500)')
     args = ap.parse_args()
 
     if args.benchmark:
@@ -748,10 +823,16 @@ def main():
         sys.exit(1)
     print(f"Found {len(mat_reports)} MAT report(s): {', '.join(mat_reports)}")
 
-    # Filter to requested dump if --dump given; exclude --skip dumps
+    # Filter to requested dump if --dump given; exclude --skip dumps; apply --max-size
+    max_bytes = args.max_size * 1024 * 1024
+    def _hprof_size(stem: str) -> int:
+        p = args.dumps_dir / f"{stem}.hprof"
+        return os.path.getsize(p) if p.exists() else 0
     stems_to_run = sorted(
         s for s in mat_reports
-        if (not args.dump or s == args.dump) and s not in args.skip
+        if (not args.dump or s == args.dump)
+        and s not in args.skip
+        and _hprof_size(s) <= max_bytes
     )
 
     # Collect stems that need (re)generation
