@@ -376,8 +376,9 @@ def measure_run(cmd: list, timeout: int = 600) -> 'tuple[float, int] | None':
     # Parse elapsed wall-clock time — two formats:
     #   "Elapsed (wall clock) time (h:mm:ss or m:ss): 0:14.12"
     #   "Elapsed (wall clock) time (h:mm:ss or m:ss): 0:01:04.53"
+    # Use a greedy match past the closing ')' to find the last ':' before the value.
     wall_seconds: Optional[float] = None
-    m = re.search(r'Elapsed \(wall clock\) time.*?:\s*(\S+)', stderr)
+    m = re.search(r'Elapsed \(wall clock\) time \([^)]+\):\s*(\S+)', stderr)
     if m:
         raw = m.group(1)
         parts = raw.split(':')
