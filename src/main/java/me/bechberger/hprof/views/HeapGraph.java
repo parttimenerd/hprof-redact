@@ -256,8 +256,8 @@ public final class HeapGraph {
     }
 
     // ---- Transient forward CSR (built in Phase A.2, freed after RPO DFS) ----
-    int[] fwdOffsets; // fwdOffsets[i] = start of node i's edge list in fwdTargets (upper-bound allocated)
-    int[] fwdEnds;    // fwdEnds[i] = actual end of node i's edge list (may be < fwdOffsets[i+1])
+    int[] fwdOffsets; // fwdOffsets[i+1] - fwdOffsets[i] = exact out-degree (compacted)
+    int[] fwdEnds;    // null after compaction (kept for potential future use)
     int[] fwdTargets;
 
     void computeUnreachableStats() {

@@ -10,23 +10,24 @@ import java.util.Arrays;
  * Sorted address → integer-index mapping for HPROF object IDs.
  *
  * Append all addresses during Phase A.1, call sort(), then use indexOf() for lookups.
- * Supports compressed OOPs: if addresses fit in 29 bits after right-shifting by 3, they are
- * stored as int[] to halve memory consumption.
+ * Supports compressed OOPs: addresses fit in 29 bits after right-shifting by 3 → int[] storage.
  *
- * Skip-index with SKIP_STRIDE=256 entries reduces binary search comparisons from ~log2(N) to
- * ~log2(256) + scan, keeping cache-line pressure low.
+ * Address-bucket index: the address range is divided into N/8 buckets; each bucket stores the
+ * first sorted-array position whose address falls in or after that bucket. indexOf() computes
+ * the bucket in O(1), then does a short sequential linear scan (~8 entries average).
  */
 final class IdMap {
     private static final int INITIAL_CAPACITY = 1 << 16;
-    private static final int SKIP_STRIDE = 256;
 
     private long[] buf;
     private int size;
     private boolean compressedOops;
-    // After sort: either buf (long[]) remains if !compressedOops, or intBuf (int[]) is used.
+    // After sort: either buf (long[]) or intBuf (int[], compressed-oops) holds sorted addresses.
     private int[] intBuf;
-    // Skip index: skipIndex[i] = value at position i*SKIP_STRIDE in the sorted array.
-    private long[] skipIndex;
+    // Bucket index: bucket[i] = first sorted-array index whose address ≥ bucketStart(i).
+    private int[] bucket;
+    private int bucketCount;
+    private long addrMin, addrRange; // for bucket computation
     private boolean sorted;
 
     IdMap() {
@@ -46,9 +47,9 @@ final class IdMap {
     int size() { return size; }
 
     /**
-     * Sort all appended addresses and build the skip index.
+     * Sort all appended addresses and build the bucket index.
      * Detects compressed OOPs: if all addresses are 8-byte aligned and fit in 32 bits after
-     * right-shifting by 3 (i.e., max address ≤ 0x7FFFFFF8L = ~2 GB * 8), use int[] storage.
+     * right-shifting by 3, use int[] storage to halve memory consumption.
      */
     void sort() {
         buf = Arrays.copyOf(buf, size);
@@ -69,7 +70,7 @@ final class IdMap {
             }
             buf = null; // free the long[]
         }
-        buildSkipIndex();
+        buildBucketIndex();
         sorted = true;
     }
 
@@ -78,15 +79,24 @@ final class IdMap {
         for (int i = 0; i < size; i++) {
             if ((buf[i] & 0x7L) != 0) return false; // not 8-byte aligned
         }
-        return (buf[size - 1] >>> 3) <= 0xFFFFFFFFL; // max fits in unsigned 32-bit → no overflow
+        return (buf[size - 1] >>> 3) <= 0xFFFFFFFFL; // max fits in unsigned 32-bit
     }
 
-    private void buildSkipIndex() {
-        int skipLen = (size / SKIP_STRIDE) + 1;
-        skipIndex = new long[skipLen];
-        for (int i = 0; i < skipLen; i++) {
-            int idx = Math.min(i * SKIP_STRIDE, size - 1);
-            skipIndex[i] = get(idx);
+    private void buildBucketIndex() {
+        if (size == 0) { bucket = new int[0]; bucketCount = 0; return; }
+        addrMin = get(0);
+        long addrMax = get(size - 1);
+        addrRange = addrMax - addrMin + 1;
+
+        // Use N/8 buckets → average 8 entries per bucket (sequential scan, cache-friendly)
+        bucketCount = Math.max(1, size / 8);
+        bucket = new int[bucketCount + 1];
+        // Sweep sorted array once to fill bucket start positions.
+        int arrIdx = 0;
+        for (int b = 0; b <= bucketCount; b++) {
+            long bStart = addrMin + (long) b * addrRange / bucketCount;
+            while (arrIdx < size && get(arrIdx) < bStart) arrIdx++;
+            bucket[b] = arrIdx;
         }
     }
 
@@ -110,38 +120,32 @@ final class IdMap {
      */
     int indexOf(long address) {
         if (!sorted) throw new IllegalStateException("sort() not yet called");
-        // Narrow search range using skip index
-        long searchAddr = address;
-        int lo = 0, hi = size;
+        if (size == 0) return -1;
+        if (address < addrMin) return -1;
+
+        // O(1) bucket lookup: compute bucket index from address
+        long off = address - addrMin;
+        int b = (int) Math.min((off * (long) bucketCount) / addrRange, bucketCount - 1);
+
+        int lo = bucket[b];
+        int hi = bucket[b + 1]; // exclusive upper bound
+
+        // Linear scan within the small window (~4 entries average)
         if (compressedOops) {
-            // search in intBuf
             int key = (int) (address >>> 3);
-            // Narrow via skip index
-            int skipLo = 0, skipHi = skipIndex.length - 1;
-            while (skipLo < skipHi) {
-                int mid = (skipLo + skipHi + 1) >>> 1;
-                long skipVal = skipIndex[mid]; // stored as unshifted address
-                if (skipVal <= address) skipLo = mid;
-                else skipHi = mid - 1;
+            for (int i = lo; i < hi; i++) {
+                int v = intBuf[i];
+                if (v == key) return i;
+                if (v > key) return -1;
             }
-            lo = skipLo * SKIP_STRIDE;
-            hi = Math.min(lo + SKIP_STRIDE + 1, size);
-            // Linear scan within small window, then binary for safety
-            int pos = Arrays.binarySearch(intBuf, lo, hi, key);
-            return pos >= 0 ? pos : -1;
         } else {
-            // Narrow via skip index
-            int skipLo = 0, skipHi = skipIndex.length - 1;
-            while (skipLo < skipHi) {
-                int mid = (skipLo + skipHi + 1) >>> 1;
-                if (skipIndex[mid] <= searchAddr) skipLo = mid;
-                else skipHi = mid - 1;
+            for (int i = lo; i < hi; i++) {
+                long v = buf[i];
+                if (v == address) return i;
+                if (v > address) return -1;
             }
-            lo = skipLo * SKIP_STRIDE;
-            hi = Math.min(lo + SKIP_STRIDE + 1, size);
-            int pos = Arrays.binarySearch(buf, lo, hi, searchAddr);
-            return pos >= 0 ? pos : -1;
         }
+        return -1;
     }
 
     boolean isCompressedOops() { return compressedOops; }
