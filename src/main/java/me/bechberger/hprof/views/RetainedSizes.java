@@ -51,8 +51,12 @@ final class RetainedSizes {
         }
 
         // Forward RPO pass: populate hasSameClassAncestor.
-        // Semantics: hasSameClassAncestor.get(v) == true iff some strict ancestor
-        // of v in the dominator tree has the same classIndex as v.
+        // Semantics: hasSameClassAncestor.get(v) == true iff either:
+        //   (a) some strict ancestor of v in the dominator tree has the same classIndex as v, OR
+        //   (b) the class-object for class(v) is a strict ancestor of v.
+        // This matches MAT's getTopAncestorsInDominatorTree semantics: for each class C,
+        // getMinRetainedSize([classObject(C), allInstances(C)]) treats classObject(C) as dominating
+        // any instance v of C that it strictly dominates in the dominator tree.
         //
         // We cannot compute this with a single-bit recurrence — the query is
         // per-class ("does v have an ancestor of class C=classIndex[v]?"), and
@@ -64,10 +68,14 @@ final class RetainedSizes {
         // set the bit; save the previous value, overwrite with depth[v].
         // On leave(v): restore the previous value.
         //
+        // Additionally maintain `classObjDepth[cls]`: the DFS depth at which classObject(cls)
+        // is currently on the stack. When entering v of class C, also check classObjDepth[C] > 0.
+        //
         // To DFS the dominator tree we build a children-CSR: for each node v,
         // enumerate {u : idom[u] == v}. Two-pass: count degrees, then fill.
         BitSet hasSameClassAncestor = new BitSet(N);
         short[] classIndex = graph.classIndex;
+        short[] classObjClassIdx = graph.classObjClassIdx; // node → classList index it represents; -1 if not class-obj
 
         int[] childDeg = new int[N];
         for (int u = 1; u < N; u++) {
@@ -92,19 +100,23 @@ final class RetainedSizes {
         childDeg = null;
 
         // Iterative DFS from virtual root. Stack entries are (node, childIter,
-        // savedDepthForClass). We use parallel int stacks.
+        // savedDepthForClass, savedClassObjDepth). We use parallel int stacks.
         // classToLastDepth[c] = depth of most-recent ancestor of class c (0 = none).
+        // classObjDepth[c] = depth at which classObject(c) was entered (0 = not on stack).
         int classCount = graph.classList.size();
         int[] classToLastDepth = new int[classCount + 1]; // +1 for -1 sentinel handling
+        int[] classObjDepth    = new int[classCount + 1]; // depth of classObject(c) on stack (0 = none)
 
         int[] stackNode = new int[N + 1];
         int[] stackChildIdx = new int[N + 1];
-        int[] stackSavedDepth = new int[N + 1]; // saved classToLastDepth value to restore on pop
+        int[] stackSavedDepth = new int[N + 1];    // saved classToLastDepth value to restore on pop
+        int[] stackSavedObjDepth = new int[N + 1]; // saved classObjDepth value to restore on pop
         int sp = 0;
 
         stackNode[sp] = HeapGraph.VIRTUAL_ROOT;
         stackChildIdx[sp] = childOff[HeapGraph.VIRTUAL_ROOT];
-        stackSavedDepth[sp] = 0; // virtual root: no class entry
+        stackSavedDepth[sp] = 0;
+        stackSavedObjDepth[sp] = 0;
         sp++;
 
         while (sp > 0) {
@@ -116,25 +128,40 @@ final class RetainedSizes {
                 int child = childTargets[nextChild];
                 stackChildIdx[top] = nextChild + 1;
 
-                // Enter child: check + update classToLastDepth
+                // Enter child: check + update classToLastDepth and classObjDepth
                 short cls = classIndex[child];
                 int savedDepth = 0;
+                int savedObjDepth = 0;
                 if (cls >= 0 && cls < classCount) {
-                    if (classToLastDepth[cls] > 0) {
+                    // Mark if same-class ancestor or classObject for this class is on path
+                    if (classToLastDepth[cls] > 0 || classObjDepth[cls] > 0) {
                         hasSameClassAncestor.set(child);
                     }
                     savedDepth = classToLastDepth[cls];
-                    classToLastDepth[cls] = sp; // depth is current stack depth
+                    classToLastDepth[cls] = sp;
+                }
+                // If this node is a class object for some class ci, record that in classObjDepth
+                short ci = (classObjClassIdx != null && child < classObjClassIdx.length)
+                        ? classObjClassIdx[child] : -1;
+                if (ci >= 0 && ci < classCount) {
+                    savedObjDepth = classObjDepth[ci];
+                    classObjDepth[ci] = sp;
                 }
                 stackNode[sp] = child;
                 stackChildIdx[sp] = childOff[child];
                 stackSavedDepth[sp] = savedDepth;
+                stackSavedObjDepth[sp] = savedObjDepth;
                 sp++;
             } else {
-                // Leave v: restore classToLastDepth
+                // Leave v: restore classToLastDepth and classObjDepth
                 short cls = (v == HeapGraph.VIRTUAL_ROOT) ? -1 : classIndex[v];
                 if (cls >= 0 && cls < classCount) {
                     classToLastDepth[cls] = stackSavedDepth[top];
+                }
+                short ci = (classObjClassIdx != null && v < classObjClassIdx.length && v != HeapGraph.VIRTUAL_ROOT)
+                        ? classObjClassIdx[v] : -1;
+                if (ci >= 0 && ci < classCount) {
+                    classObjDepth[ci] = stackSavedObjDepth[top];
                 }
                 sp--;
             }

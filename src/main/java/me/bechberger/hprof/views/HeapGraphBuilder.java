@@ -132,6 +132,8 @@ public final class HeapGraphBuilder {
         DominatorTree.compute(graph);
         // --- Count unreachable objects (before retained sizes) ---
         graph.computeUnreachableStats();
+        // --- Build classObjClassIdx: node → the classListIndex it represents as a class object ---
+        buildClassObjClassIdx(graph);
         // --- Retained sizes ---
         RetainedSizes.compute(graph);
         return graph;
@@ -331,10 +333,28 @@ public final class HeapGraphBuilder {
      * classes with no explicit GC root record are unreachable, making their static fields (and
      * transitively referenced objects) also unreachable.
      */
+    /** Builds graph.classObjClassIdx: for each class-object node, records the classList index
+     *  of the class it represents. Used by RetainedSizes to handle MAT-style group-retained. */
+    private static void buildClassObjClassIdx(HeapGraph graph) {
+        int N = graph.N;
+        short[] result = new short[N];
+        java.util.Arrays.fill(result, (short) -1);
+        int classCount = graph.classList.size();
+        for (int ci = 0; ci < classCount; ci++) {
+            long classId = graph.classList.get(ci).classId();
+            if (classId == 0L) continue;
+            int nodeIdx = graph.idMap.indexOf(classId) + 1;
+            if (nodeIdx <= 0 || nodeIdx >= N) continue;
+            result[nodeIdx] = (short) Math.min(ci, Short.MAX_VALUE);
+        }
+        graph.classObjClassIdx = result;
+    }
+
     private static void addSystemClassRootsIfMissing(HeapGraph graph, IdMap idMap) {
         int added = 0;
         for (ClassRecord cr : graph.classList) {
             if (cr.classId() == 0L) continue;              // synthesized array class
+            if (cr.classLoaderId() != 0L) continue;        // non-boot classloader: skip (MAT parity)
             String name = cr.name();
             if (name.length() > 0 && name.charAt(0) == '[') continue; // array class
             int idx = idMap.indexOf(cr.classId());
@@ -798,7 +818,9 @@ public final class HeapGraphBuilder {
                 long refId = p.readId(); consumed += ids;
                 if (refId != 0) {
                     int dstIdx = objectIndex(idMap, refId);
-                    if (dstIdx >= 0) consumer.accept(srcIdx, dstIdx, 0L);
+                    if (dstIdx >= 0) {
+                        consumer.accept(srcIdx, dstIdx, 0L);
+                    }
                 }
             } else {
                 p.skipFully(sz); consumed += sz;

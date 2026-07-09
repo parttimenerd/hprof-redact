@@ -79,9 +79,15 @@ public final class HeapGraph {
     LongLongMap retainedSizeOverflow;// objectId → long for objects whose retained > 4.29 GB
 
     /** For each object v (idx > 0): true iff some strict ancestor in the dominator tree has
-     *  the same classIndex as v. Populated by RetainedSizes.compute. Consumed by the class
-     *  histogram to identify MAT-style "top ancestors" for each class. */
+     *  the same classIndex as v, OR the class-object for class(v) is a strict ancestor.
+     *  Populated by RetainedSizes.compute. Consumed by the class histogram to identify
+     *  MAT-style "top ancestors" for each class. */
     BitSet hasSameClassAncestor;
+
+    /** For each node index v: the classList index of the class that this node IS the class-object
+     *  for, or -1 if v is not a class-object. Built by HeapGraphBuilder after classList is final.
+     *  Used by RetainedSizes to detect "classObject(C) is ancestor of v" in O(N). */
+    short[] classObjClassIdx;
 
     // ---- Class object indices (populated in Phase A.1, used in RPO/DomTree) ----
     /** All object indices that appear in HPROF_GC_CLASS_DUMP records (1-based).

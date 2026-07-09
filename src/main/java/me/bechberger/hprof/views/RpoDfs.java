@@ -104,7 +104,7 @@ final class RpoDfs {
     }
 
     private static int childCount(int node, HeapGraph graph, int[] fwdOffsets) {
-        if (node == HeapGraph.VIRTUAL_ROOT) return graph.gcRootCount + graph.classDumpCount;
+        if (node == HeapGraph.VIRTUAL_ROOT) return graph.gcRootCount;
         if (fwdOffsets == null || node >= fwdOffsets.length - 1) return 0;
         return fwdOffsets[node + 1] - fwdOffsets[node];
     }
@@ -112,9 +112,7 @@ final class RpoDfs {
     private static int getChild(int node, int cursor, HeapGraph graph,
                                  int[] fwdOffsets, int[] fwdTargets) {
         if (node == HeapGraph.VIRTUAL_ROOT) {
-            if (cursor < graph.gcRootCount) return graph.gcRootIds[cursor];
-            int cdIdx = cursor - graph.gcRootCount;
-            return cdIdx < graph.classDumpCount ? graph.classDumpIndices[cdIdx] : -1;
+            return cursor < graph.gcRootCount ? graph.gcRootIds[cursor] : -1;
         }
         if (fwdOffsets == null || fwdTargets == null) return -1;
         int start = fwdOffsets[node];

@@ -29,18 +29,13 @@ final class DominatorTree {
         Arrays.fill(idom, HeapGraph.UNDEFINED);
         idom[HeapGraph.VIRTUAL_ROOT] = HeapGraph.VIRTUAL_ROOT;
 
-        // Virtual-root-adjacent set: nodes with an implicit VIRTUAL_ROOT predecessor
-        // (GC roots + class-dump objects). These must never be overwritten to a non-root
-        // dominator by CHK — the implicit edge from VIRTUAL_ROOT forces intersect() to
-        // resolve to VIRTUAL_ROOT when any other predecessor is present.
+        // Virtual-root-adjacent set: nodes with an implicit VIRTUAL_ROOT predecessor (GC roots).
+        // These must never be overwritten to a non-root dominator by CHK — the implicit edge
+        // from VIRTUAL_ROOT forces intersect() to resolve to VIRTUAL_ROOT when any other
+        // predecessor is present.
         BitSet vrAdjacent = new BitSet(N);
         for (int i = 0; i < graph.gcRootCount; i++) {
             int idx = graph.gcRootIds[i];
-            vrAdjacent.set(idx);
-            idom[idx] = HeapGraph.VIRTUAL_ROOT;
-        }
-        for (int i = 0; i < graph.classDumpCount; i++) {
-            int idx = graph.classDumpIndices[i];
             vrAdjacent.set(idx);
             idom[idx] = HeapGraph.VIRTUAL_ROOT;
         }
@@ -58,7 +53,7 @@ final class DominatorTree {
             // Iterate in RPO order, skipping virtual root (index 0 = rpoOrder[0])
             for (int rpoIdx = 1; rpoIdx < N; rpoIdx++) {
                 int b = rpoOrder[rpoIdx];
-                // Seed with VIRTUAL_ROOT for GC roots + class-dump objects (implicit predecessor)
+                // Seed with VIRTUAL_ROOT for GC roots (implicit predecessor)
                 int newIdom = vrAdjacent.get(b) ? HeapGraph.VIRTUAL_ROOT : HeapGraph.UNDEFINED;
 
                 // Iterate predecessors of b from inbound CSR
