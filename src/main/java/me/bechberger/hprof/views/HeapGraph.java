@@ -321,6 +321,14 @@ public final class HeapGraph {
             java.util.Arrays.fill(arr, 0);
             return arr;
         }
+
+        /** Return donated array (NOT zeroed) or fresh int[N]. Clears the slot.
+         *  Use only when the caller will immediately overwrite every element. */
+        int[] takeRaw() {
+            if (slot == null) return new int[N];
+            int[] arr = slot; slot = null;
+            return arr;
+        }
     }
 
     /**
