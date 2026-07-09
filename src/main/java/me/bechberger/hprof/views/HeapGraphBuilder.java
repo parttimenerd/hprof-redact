@@ -125,14 +125,18 @@ public final class HeapGraphBuilder {
     }
 
     /**
-     * Run all phases without freeing IdMap sorted arrays.
-     * For unit tests only — allows calling idMap.indexOf() after build.
+     * Run all phases without freeing IdMap sorted arrays or post-DOM structures.
+     * For unit tests only — preserves inboundStream/inboundOffsets/gcRootIds for inspection.
      */
     HeapGraph buildForTesting() throws IOException {
-        return buildInternal();
+        return buildInternal(false);
     }
 
     private HeapGraph buildInternal() throws IOException {
+        return buildInternal(true);
+    }
+
+    private HeapGraph buildInternal(boolean freePostDom) throws IOException {
         IdMap idMap = new IdMap();
         long t0 = System.currentTimeMillis();
         HeapGraph graph = phaseA1(idMap);
@@ -145,6 +149,15 @@ public final class HeapGraphBuilder {
         System.gc(); // free fwdOffsets/fwdTargets (freeFwdCsr called inside RpoDfs)
         long t3 = System.currentTimeMillis();
         DominatorTree.compute(graph);
+        if (freePostDom) {
+            // Free inbound CSR — only consumed by DominatorTree; never read again after this point.
+            // For large heaps the VByte stream can be 200–600 MB; freeing it here is the biggest win.
+            graph.inboundStream  = null;
+            graph.inboundOffsets = null;
+            // GC root arrays only needed through DOM (DominatorTree.compute reads gcRootIds for vrAdjacent)
+            graph.gcRootIds   = null;
+            graph.gcRootTypes = null;
+        }
         System.gc(); // free dfsPos/dfsOrder/dfsParent (freeRpoPos called inside DominatorTree)
         long t4 = System.currentTimeMillis();
         graph.computeUnreachableStats();
@@ -728,7 +741,8 @@ public final class HeapGraphBuilder {
                 f.freeFieldArrays();
             }
         }
-        graph.isGCRoot = null; // only needed for addGCRoot deduplication during A1/A2
+        graph.isGCRoot   = null; // only needed for addGCRoot deduplication during A1/A2
+        graph.excludedEdge = null; // built during VByte encoding, never read after A2 completes
     }
 
     /** Fast out-degree count: skips instance data, uses class record field counts. */
