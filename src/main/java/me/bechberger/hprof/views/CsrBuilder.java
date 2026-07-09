@@ -42,6 +42,9 @@ final class CsrBuilder {
     // Internal: inboundTargets before VByte encoding
     private int[] targets;
 
+    // Reusable scratch buffer for sortWithFlags (rows > 16 elements)
+    private long[] sortScratch = new long[0];
+
     /** For inbound CSR construction with VByte + BitSet. */
     CsrBuilder(HeapGraph graph, int n, int estimatedEdges) {
         this.graph = graph;
@@ -229,11 +232,8 @@ final class CsrBuilder {
             int rowLen   = rowEnd - rowStart;
 
             if (rowLen > 1) {
-                // Sort by absolute src value (lower 31 bits), preserving exclude flag in sign bit.
-                // Java's Arrays.sort uses signed comparison, so negative values (excluded) sort first.
-                // To sort by unsigned value, XOR with Integer.MIN_VALUE to move sign bit correctly.
-                // Simpler: use a custom sort that strips the flag for comparison.
-                sortWithFlags(targets, rowStart, rowEnd);
+                if (rowLen > sortScratch.length) sortScratch = new long[rowLen];
+                sortWithFlags(targets, rowStart, rowEnd, sortScratch);
             }
 
             offsets[v] = streamPos;
@@ -260,8 +260,9 @@ final class CsrBuilder {
         graph.excludedEdge = newExcluded;
     }
 
-    /** Sort targets[lo..hi) by lower 31 bits (actual src index), preserving sign-bit flag. */
-    private static void sortWithFlags(int[] arr, int lo, int hi) {
+    /** Sort targets[lo..hi) by lower 31 bits (actual src index), preserving sign-bit flag.
+     *  scratch must have length >= (hi - lo) for rows > 16; caller ensures this. */
+    private static void sortWithFlags(int[] arr, int lo, int hi, long[] scratch) {
         int len = hi - lo;
         if (len <= 16) {
             // Insertion sort for small rows
@@ -276,16 +277,15 @@ final class CsrBuilder {
                 arr[j + 1] = key;
             }
         } else {
-            long[] packed = new long[len];
             for (int i = 0; i < len; i++) {
                 int raw = arr[lo + i];
                 int src = raw & Integer.MAX_VALUE;
                 int excl = (raw >>> 31) & 1;
-                packed[i] = ((long) src << 1) | excl;
+                scratch[i] = ((long) src << 1) | excl;
             }
-            Arrays.sort(packed);
+            Arrays.sort(scratch, 0, len);
             for (int i = 0; i < len; i++) {
-                long p = packed[i];
+                long p = scratch[i];
                 int src  = (int) (p >>> 1);
                 int excl = (int) (p & 1);
                 arr[lo + i] = excl != 0 ? (src | Integer.MIN_VALUE) : src;

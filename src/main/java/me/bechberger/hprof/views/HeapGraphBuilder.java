@@ -94,6 +94,7 @@ public final class HeapGraphBuilder {
     private final long fileSize;
     private final boolean gzipped;
     private byte[] instanceDataBuf = new byte[256];
+    private byte[] stringReadBuf   = new byte[256]; // reused for UTF-8 string records
 
     public HeapGraphBuilder(Path path) throws IOException {
         this.path = path;
@@ -201,11 +202,12 @@ public final class HeapGraphBuilder {
                     case HPROF_UTF8 -> {
                         long nameId = p.readId();
                         int strLen = (int) (length - p.idSize());
-                        byte[] bytes = p.readBytes(strLen);
+                        if (strLen > stringReadBuf.length) stringReadBuf = new byte[strLen];
+                        p.readBytesInto(stringReadBuf, strLen);
                         try {
-                            graph.utf8Strings.put(nameId, ModifiedUtf8.decode(bytes));
+                            graph.utf8Strings.put(nameId, ModifiedUtf8.decode(stringReadBuf, strLen));
                         } catch (IllegalArgumentException ex) {
-                            graph.utf8Strings.put(nameId, new String(bytes, java.nio.charset.StandardCharsets.ISO_8859_1));
+                            graph.utf8Strings.put(nameId, new String(stringReadBuf, 0, strLen, java.nio.charset.StandardCharsets.ISO_8859_1));
                         }
                     }
                     case HPROF_LOAD_CLASS -> {

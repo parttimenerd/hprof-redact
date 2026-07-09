@@ -309,9 +309,9 @@ public final class HeapGraph {
 
         PhaseArrays(int N) { this.N = N; }
 
-        /** Donate arr for reuse next take(). Silently ignored if null or wrong size. */
+        /** Donate arr for reuse next take(). Silently ignored if null or too small. */
         void donate(int[] arr) {
-            if (arr != null && arr.length == N) slot = arr;
+            if (arr != null && arr.length >= N) slot = arr;
         }
 
         /** Return donated array (zeroed) or fresh int[N]. Clears the slot. */

@@ -18,21 +18,26 @@ public final class ModifiedUtf8 {
     private ModifiedUtf8() {}
 
     public static String decode(byte[] bytes) {
+        return decode(bytes, bytes.length);
+    }
+
+    public static String decode(byte[] bytes, int length) {
         // Fast path: ASCII (and no NUL)
         boolean ascii = true;
-        for (byte b : bytes) {
+        for (int idx = 0; idx < length; idx++) {
+            byte b = bytes[idx];
             if ((b & 0x80) != 0 || b == 0) {
                 ascii = false;
                 break;
             }
         }
         if (ascii) {
-            return new String(bytes, StandardCharsets.ISO_8859_1);
+            return new String(bytes, 0, length, StandardCharsets.ISO_8859_1);
         }
 
-        StringBuilder sb = new StringBuilder(bytes.length);
+        StringBuilder sb = new StringBuilder(length);
         int i = 0;
-        while (i < bytes.length) {
+        while (i < length) {
             int b = bytes[i] & 0xFF;
             if (b == 0) {
                 // Not expected in valid MUTF-8, but tolerate.
@@ -46,7 +51,7 @@ public final class ModifiedUtf8 {
                 continue;
             }
             if ((b & 0xE0) == 0xC0) {
-                if (i + 1 >= bytes.length) {
+                if (i + 1 >= length) {
                     throw new IllegalArgumentException("Truncated modified UTF-8 sequence");
                 }
                 int b2 = bytes[i + 1] & 0xFF;
@@ -60,7 +65,7 @@ public final class ModifiedUtf8 {
                 continue;
             }
             if ((b & 0xF0) == 0xE0) {
-                if (i + 2 >= bytes.length) {
+                if (i + 2 >= length) {
                     throw new IllegalArgumentException("Truncated modified UTF-8 sequence");
                 }
                 int b2 = bytes[i + 1] & 0xFF;
