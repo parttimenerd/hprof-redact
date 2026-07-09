@@ -360,7 +360,7 @@ def _run_one(args_tuple) -> tuple[str, bool]:
 
 
 def generate_reports_parallel(
-    stems: list[str], jar: Path, dumps_dir: Path, max_workers: int = 8
+    stems: list[str], jar: Path, dumps_dir: Path, max_workers: int = 10
 ) -> dict[str, bool]:
     """Run hprof-redact on all stems in parallel. Returns {stem: success}."""
     tasks = [
@@ -522,8 +522,8 @@ def main():
     ap.add_argument('--failures-only', action='store_true',
                     help='Print only FAIL lines; passing dumps show one summary line')
     ap.add_argument('--no-color',      action='store_true')
-    ap.add_argument('--workers',       type=int, default=8,
-                    help='Parallel workers for report generation (default: 8)')
+    ap.add_argument('--workers',       type=int, default=10,
+                    help='Parallel workers for report generation (default: 10)')
     args = ap.parse_args()
 
     use_color = not args.no_color and sys.stdout.isatty()
@@ -557,20 +557,31 @@ def main():
         if not args.failures_only:
             print("\nAll reports already cached (use --rerun to regenerate).")
 
+    def _compare_one(stem: str):
+        md_out = args.dumps_dir / f"{stem}_ours.md"
+        if not md_out.exists():
+            return stem, None
+        our_r  = parse_our_report(md_out.read_text(), stem)
+        checks = compare(mat_reports[stem], our_r)
+        return stem, checks
+
+    valid_stems = [s for s in stems_to_run if s not in skipped]
+    stem_checks: dict[str, list[Check]] = {}
+    with ThreadPoolExecutor(max_workers=args.workers) as pool:
+        for stem, checks in pool.map(_compare_one, valid_stems):
+            if checks is None:
+                print(f"  Skipping {stem} (no output file)", file=sys.stderr)
+            else:
+                stem_checks[stem] = checks
+
     total_fail = 0
     for stem in stems_to_run:
         if stem in skipped:
             print(f"  Skipping {stem} (generation failed)", file=sys.stderr)
             continue
-
-        md_out = args.dumps_dir / f"{stem}_ours.md"
-        if not md_out.exists():
-            print(f"  Skipping {stem} (no output file)", file=sys.stderr)
+        if stem not in stem_checks:
             continue
-
-        our_r  = parse_our_report(md_out.read_text(), stem)
-        checks = compare(mat_reports[stem], our_r)
-        fails  = print_dump_report(stem, checks, use_color, args.failures_only)
+        fails = print_dump_report(stem, stem_checks[stem], use_color, args.failures_only)
         total_fail += fails
 
     print(f"\n{'='*90}")

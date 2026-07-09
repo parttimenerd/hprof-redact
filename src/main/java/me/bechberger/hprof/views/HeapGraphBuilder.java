@@ -120,21 +120,13 @@ public final class HeapGraphBuilder {
     /** Run all three phases and return the fully-populated HeapGraph. */
     public HeapGraph build() throws IOException {
         IdMap idMap = new IdMap();
-        // --- Phase A.1 ---
         HeapGraph graph = phaseA1(idMap);
-        // --- Phase A.2 ---
         phaseA2(graph);
-        // --- RPO DFS (uses forward CSR, frees it after) ---
         RpoDfs.compute(graph);
-        // --- Phase B ---
         phaseB(graph);
-        // --- Dominator tree (CHK) ---
         DominatorTree.compute(graph);
-        // --- Count unreachable objects (before retained sizes) ---
         graph.computeUnreachableStats();
-        // --- Build classObjClassIdx: node → the classListIndex it represents as a class object ---
         buildClassObjClassIdx(graph);
-        // --- Retained sizes ---
         RetainedSizes.compute(graph);
         return graph;
     }
@@ -1595,7 +1587,7 @@ public final class HeapGraphBuilder {
         private static void sortWithFlags(int[] arr, int lo, int hi) {
             int len = hi - lo;
             if (len <= 16) {
-                // Insertion sort (preserves sign bit)
+                // Insertion sort for small rows (preserves sign bit)
                 for (int i = lo + 1; i < hi; i++) {
                     int key = arr[i];
                     int keyVal = key & Integer.MAX_VALUE;
@@ -1607,23 +1599,20 @@ public final class HeapGraphBuilder {
                     arr[j + 1] = key;
                 }
             } else {
-                // Strip flags, sort stripped, re-apply flags by linear scan
-                int[] stripped = new int[len];
-                for (int i = 0; i < len; i++) stripped[i] = arr[lo + i] & Integer.MAX_VALUE;
-                Arrays.sort(stripped);
-                // Mark used entries in original
-                boolean[] used = new boolean[len];
+                // Pack (src31 << 1 | excl) into a long so Arrays.sort keeps flags O(N log N)
+                long[] packed = new long[len];
                 for (int i = 0; i < len; i++) {
-                    int src = stripped[i];
-                    boolean excl = false;
-                    for (int j = 0; j < len; j++) {
-                        if (!used[j] && (arr[lo + j] & Integer.MAX_VALUE) == src) {
-                            excl = (arr[lo + j] & Integer.MIN_VALUE) != 0;
-                            used[j] = true;
-                            break;
-                        }
-                    }
-                    arr[lo + i] = excl ? (src | Integer.MIN_VALUE) : src;
+                    int raw = arr[lo + i];
+                    int src = raw & Integer.MAX_VALUE;
+                    int excl = (raw >>> 31) & 1;
+                    packed[i] = ((long) src << 1) | excl;
+                }
+                Arrays.sort(packed);
+                for (int i = 0; i < len; i++) {
+                    long p = packed[i];
+                    int src  = (int) (p >>> 1);
+                    int excl = (int) (p & 1);
+                    arr[lo + i] = excl != 0 ? (src | Integer.MIN_VALUE) : src;
                 }
             }
         }
