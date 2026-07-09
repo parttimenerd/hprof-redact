@@ -352,32 +352,26 @@ public final class HeapGraphBuilder {
         }
         if (added > 0) {
             graph.trimRoots();
-            System.err.println("  [SYSCLASS] added " + added + " boot-loader classes as STICKY_CLASS roots");
         }
     }
 
     private static Map<Integer, int[]> buildSyntheticEdges(A1State state, HeapGraph graph, IdMap idMap) {        Map<Integer, int[]> result = new HashMap<>();
-        int totalLocals = 0, mappedLocals = 0, threadsWithEdges = 0, threadsSkipped = 0;
         for (Map.Entry<Integer, List<Long>> entry : state.threadLocalsBySerial.entrySet()) {
             int threadSerial = entry.getKey();
             long threadObjId = graph.threadSerialToObjectId.getIfAbsent(threadSerial, 0L);
-            if (threadObjId == 0L) { threadsSkipped++; totalLocals += entry.getValue().size(); continue; }
+            if (threadObjId == 0L) continue;
             int threadIdx = idMap.indexOf(threadObjId);
-            if (threadIdx < 0) { threadsSkipped++; totalLocals += entry.getValue().size(); continue; }
+            if (threadIdx < 0) continue;
             int threadIdxAdjusted = threadIdx + 1; // +1 for virtual root offset
             List<Long> localIds = entry.getValue();
-            totalLocals += localIds.size();
             int[] localIdxArr = new int[localIds.size()];
             int count = 0;
             for (Long localId : localIds) {
                 int localIdx = idMap.indexOf(localId);
-                if (localIdx >= 0) { localIdxArr[count++] = localIdx + 1; mappedLocals++; }
+                if (localIdx >= 0) { localIdxArr[count++] = localIdx + 1; }
             }
-            if (count > 0) { result.put(threadIdxAdjusted, java.util.Arrays.copyOf(localIdxArr, count)); threadsWithEdges++; }
+            if (count > 0) { result.put(threadIdxAdjusted, java.util.Arrays.copyOf(localIdxArr, count)); }
         }
-        System.err.println("  [SYN] threads=" + state.threadLocalsBySerial.size()
-                + " withEdges=" + threadsWithEdges + " skipped=" + threadsSkipped
-                + " locals=" + totalLocals + " mapped=" + mappedLocals);
         return result;
     }
 

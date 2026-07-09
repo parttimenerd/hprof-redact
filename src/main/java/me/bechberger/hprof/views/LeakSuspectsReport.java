@@ -37,7 +37,9 @@ final class LeakSuspectsReport {
         out.println();
 
         long totalShallow = 0;
-        for (int i = 1; i < graph.N; i++) totalShallow += graph.shallowSizeOf(i);
+        for (int i = 1; i < graph.N; i++) {
+            if (graph.idom[i] != HeapGraph.UNDEFINED) totalShallow += graph.shallowSizeOf(i);
+        }
         long threshold = (long) (totalShallow * thresholdPct / 100.0);
 
         List<Suspect> suspects = findSuspects(threshold, totalShallow);
@@ -82,42 +84,38 @@ final class LeakSuspectsReport {
             suspects.add(new Suspect(className, i, 1, retained, graph.shallowSizeOf(i), true));
         }
 
-        // Phase 2: class groups using group-retained semantics (avoid double-counting linked lists)
-        if (suspects.isEmpty()) {
+        // Phase 2: class groups — always run (MAT reports both individual and class-group suspects)
+        // Group-retained = sum of retainedSize for instances that are direct children of VIRTUAL_ROOT
+        // (top-level dominators), aggregated by class. This matches MAT's getTopAncestors semantics.
+        {
             int classCount = graph.classList.size();
             long[] retainedByClass = new long[classCount];
             long[] shallowByClass  = new long[classCount];
             long[] countByClass    = new long[classCount];
-            int[]  firstByClass    = new int[classCount]; // first object index per class
+            int[]  firstByClass    = new int[classCount];
             Arrays.fill(firstByClass, -1);
             int N = graph.N;
-            int[] idom = graph.idom;
 
             for (int i = 1; i < N; i++) {
                 short ci = graph.classIndex[i];
                 if (ci < 0 || ci >= classCount) continue;
+                if (graph.idom[i] == HeapGraph.UNDEFINED) continue;
                 shallowByClass[ci]  += graph.shallowSizeOf(i);
                 countByClass[ci]++;
                 if (firstByClass[ci] < 0) firstByClass[ci] = i;
-            }
-            // Group-retained: attribute shallowSize[v] to classOf(idom[v])
-            for (int i = 1; i < N; i++) {
-                if (idom[i] == HeapGraph.UNDEFINED) continue;
-                int parent = idom[i];
-                long shallow = graph.shallowSizeOf(i);
-                if (parent == HeapGraph.VIRTUAL_ROOT || parent == HeapGraph.UNDEFINED) {
-                    short ci = graph.classIndex[i];
-                    if (ci >= 0 && ci < classCount) retainedByClass[ci] += shallow;
-                } else {
-                    short parentCi = graph.classIndex[parent];
-                    int parentClass = parentCi & 0xFFFF;
-                    if (parentClass < classCount) retainedByClass[parentClass] += shallow;
+                // Only accumulate retained for top-level dominators (direct children of VIRTUAL_ROOT)
+                if (graph.idom[i] == HeapGraph.VIRTUAL_ROOT) {
+                    retainedByClass[ci] += graph.retainedSizeOf(i);
                 }
             }
 
             for (int ci = 0; ci < classCount; ci++) {
                 if (retainedByClass[ci] < threshold) continue;
                 String name = ClassNames.pretty(graph.classList.get(ci).name());
+                // Don't add a group suspect if we already have a single-object suspect of the same class
+                boolean alreadyCovered = suspects.stream()
+                        .anyMatch(s -> s.isSingle() && s.className().equals(name));
+                if (alreadyCovered) continue;
                 suspects.add(new Suspect(name, firstByClass[ci], countByClass[ci],
                         retainedByClass[ci], shallowByClass[ci], false));
             }

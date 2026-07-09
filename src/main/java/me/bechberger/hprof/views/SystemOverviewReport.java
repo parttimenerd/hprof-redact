@@ -35,7 +35,9 @@ final class SystemOverviewReport {
         // virtual root retained = sum of all top-level retained (can be less due to freeing)
         // better to sum all objects
         long totalShallow = 0;
-        for (int i = 1; i < graph.N; i++) totalShallow += graph.shallowSizeOf(i);
+        for (int i = 1; i < graph.N; i++) {
+            if (graph.idom[i] != HeapGraph.UNDEFINED) totalShallow += graph.shallowSizeOf(i);
+        }
 
         out.println("### Heap Summary");
         out.println();
@@ -43,7 +45,7 @@ final class SystemOverviewReport {
         out.printf("|---|---|%n");
         out.printf("| HPROF format | %s |%n", graph.hprofFormat);
         out.printf("| File size | %s |%n", formatBytes(graph.fileSize));
-        out.printf("| Total objects | %,d |%n", graph.N - 1);
+        out.printf("| Total objects | %,d |%n", graph.N - 1 - graph.unreachableCount);
         out.printf("| Total shallow heap | %s |%n", formatBytes(totalShallow));
         out.printf("| GC roots | %,d |%n", graph.gcRootCount);
         out.printf("| Classes loaded | %,d |%n", graph.classList.size());
@@ -60,20 +62,17 @@ final class SystemOverviewReport {
         long[] classRetained = new long[classCount];
 
         int N = graph.N;
-        int[] idom = graph.idom;
 
         // MAT class-retained: for class C, sum retainedSize(v) over v of class C
-        // whose immediate dominator is NOT also of class C.
+        // that are "top ancestors" (no strict dom-tree ancestor is of class C).
         // Equivalent to MAT's getMinRetainedSize(all_instances_of_C).
         for (int i = 1; i < N; i++) {
             short ci = graph.classIndex[i];
             if (ci < 0 || ci >= classCount) continue;
+            if (graph.idom[i] == HeapGraph.UNDEFINED) continue; // unreachable: exclude from histogram
             instanceCount[ci]++;
             shallowTotal[ci] += graph.shallowSizeOf(i);
-            if (idom[i] == HeapGraph.UNDEFINED) continue; // unreachable: no retained
-            int dom = idom[i];
-            short domCi = (dom >= 1 && dom < N) ? graph.classIndex[dom] : (short) -1;
-            if (domCi != ci) {
+            if (!graph.hasSameClassAncestor.get(i)) {
                 classRetained[ci] += graph.retainedSizeOf(i);
             }
         }

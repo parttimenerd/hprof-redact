@@ -83,7 +83,9 @@ final class HtmlReportData {
 
     static ReportData compute(HeapGraph graph) {
         long totalShallow = 0;
-        for (int i = 1; i < graph.N; i++) totalShallow += graph.shallowSizeOf(i);
+        for (int i = 1; i < graph.N; i++) {
+            if (graph.idom[i] != HeapGraph.UNDEFINED) totalShallow += graph.shallowSizeOf(i);
+        }
         final long ts = totalShallow;
 
         List<BiggestObject> biggestObjects = buildBiggestObjects(graph, ts);
@@ -113,7 +115,7 @@ final class HtmlReportData {
         return new HeapSummary(
             graph.sourcePath.getFileName().toString(),
             graph.hprofFormat, graph.fileSize,
-            graph.N - 1L, totalShallow,
+            graph.N - 1L - graph.unreachableCount, totalShallow,
             graph.gcRootCount, graph.classList.size(),
             java.time.Instant.now().toString()
         );
@@ -121,10 +123,9 @@ final class HtmlReportData {
 
     // -- Class-retained histogram (MAT semantics) --
     // For each class C, retained = sum of retainedSize(v) over all v of class C
-    // whose immediate dominator is NOT also of class C. This mirrors MAT's
-    // getMinRetainedSize(all-instances-of-C): the set of "top ancestors"
-    // within the class's instance set.
-    // One O(N) pass over all nodes.
+    // that are "top ancestors" — i.e., no strict ancestor in the dominator tree
+    // is of class C. This mirrors MAT's getMinRetainedSize(all-instances-of-C).
+    // The hasSameClassAncestor bit is precomputed in RetainedSizes.
 
     private static List<ClassHistogramEntry> buildHistogram(HeapGraph graph, long totalShallow) {
         int classCount = graph.classList.size();
@@ -135,13 +136,11 @@ final class HtmlReportData {
         for (int i = 1; i < graph.N; i++) {
             short ci = graph.classIndex[i];
             if (ci < 0 || ci >= classCount) continue;
+            if (graph.idom[i] == HeapGraph.UNDEFINED) continue; // unreachable: exclude from histogram
             instanceCount[ci]++;
             shallowTotal[ci] += graph.shallowSizeOf(i);
 
-            // Class-retained: add v's retained size iff v's idom is not the same class
-            int dom = graph.idom[i];
-            short domCi = (dom >= 1 && dom < graph.N) ? graph.classIndex[dom] : (short) -1;
-            if (domCi != ci) {
+            if (!graph.hasSameClassAncestor.get(i)) {
                 classRetained[ci] += graph.retainedSizeOf(i);
             }
         }
@@ -324,8 +323,9 @@ final class HtmlReportData {
             ));
         }
 
-        // Phase 2: class groups (if no single suspect)
-        if (suspects.isEmpty()) {
+        // Phase 2: class groups — always run (MAT reports both individual and class-group suspects)
+        // Group-retained = sum of retainedSize for top-level dominators (idom == VIRTUAL_ROOT) per class.
+        {
             int classCount = graph.classList.size();
             long[] retainedByClass = new long[classCount];
             long[] shallowByClass  = new long[classCount];
@@ -333,13 +333,19 @@ final class HtmlReportData {
             for (int i = 1; i < graph.N; i++) {
                 short ci = graph.classIndex[i];
                 if (ci < 0 || ci >= classCount) continue;
-                retainedByClass[ci] += graph.retainedSizeOf(i);
+                if (graph.idom[i] == HeapGraph.UNDEFINED) continue;
                 shallowByClass[ci]  += graph.shallowSizeOf(i);
                 countByClass[ci]++;
+                if (graph.idom[i] == HeapGraph.VIRTUAL_ROOT) {
+                    retainedByClass[ci] += graph.retainedSizeOf(i);
+                }
             }
+            java.util.Set<String> phase1Classes = suspects.stream()
+                .map(LeakSuspect::className).collect(java.util.stream.Collectors.toSet());
             for (int ci = 0; ci < classCount; ci++) {
                 if (retainedByClass[ci] < threshold) continue;
                 String name = ClassNames.pretty(graph.classList.get(ci).name());
+                if (phase1Classes.contains(name)) continue;
                 String narrative = String.format("%,d instances of %s occupy %s (%.2f%%) bytes.",
                     countByClass[ci], name,
                     SystemOverviewReport.formatBytes(retainedByClass[ci]),

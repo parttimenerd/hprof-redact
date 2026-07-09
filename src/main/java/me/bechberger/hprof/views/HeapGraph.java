@@ -76,6 +76,11 @@ public final class HeapGraph {
     int[] retainedSize;              // unsigned int per obj; query via retainedSizeOf()
     LongLongMap retainedSizeOverflow;// objectId → long for objects whose retained > 4.29 GB
 
+    /** For each object v (idx > 0): true iff some strict ancestor in the dominator tree has
+     *  the same classIndex as v. Populated by RetainedSizes.compute. Consumed by the class
+     *  histogram to identify MAT-style "top ancestors" for each class. */
+    BitSet hasSameClassAncestor;
+
     // ---- Class object indices (populated in Phase A.1, used in RPO/DomTree) ----
     /** All object indices that appear in HPROF_GC_CLASS_DUMP records (1-based).
      *  Treated as virtual-root-adjacent (like GC roots) for reachability, but
@@ -245,24 +250,11 @@ public final class HeapGraph {
     void computeUnreachableStats() {
         unreachableCount = 0;
         unreachableShallowBytes = 0L;
-        int[] byClass = new int[classList.size()];
         for (int i = 1; i < N; i++) {
             if (idom[i] == UNDEFINED) {
                 unreachableCount++;
                 unreachableShallowBytes += shallowSizeOf(i);
-                short ci = classIndex[i];
-                if (ci >= 0 && ci < byClass.length) byClass[ci]++;
             }
-        }
-        // Top-10 diagnostic
-        Integer[] idxs = new Integer[byClass.length];
-        for (int i = 0; i < idxs.length; i++) idxs[i] = i;
-        Arrays.sort(idxs, (a, b) -> Integer.compare(byClass[b], byClass[a]));
-        System.err.println("  [UNREACHABLE] total=" + unreachableCount + " top:");
-        for (int k = 0; k < Math.min(15, idxs.length); k++) {
-            int ci = idxs[k];
-            if (byClass[ci] == 0) break;
-            System.err.println("    " + byClass[ci] + " x " + classList.get(ci).name());
         }
     }
 
