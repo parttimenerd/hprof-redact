@@ -100,9 +100,10 @@ final class RetainedSizes {
             if (p == u) continue;
             childTargets[cursor[p]++] = u;
         }
-        // cursor no longer needed
-        // gives back the memory
+        // cursor no longer needed; donate for potential reuse, then childDeg
+        if (graph.phaseArrays != null) graph.phaseArrays.donate(cursor);
         cursor = null;
+        if (graph.phaseArrays != null) graph.phaseArrays.donate(childDeg);
         childDeg = null;
 
         // Iterative DFS from virtual root. Stack entries are (node, childIter,
