@@ -98,7 +98,7 @@ final class CsrBuilder {
      * @param nameIdx    interned field name index (0 = no name / array element)
      * @param srcClassIdx class index of src (for exclude pair matching)
      */
-    void addEdge(int src, int dst, short nameIdx, short srcClassIdx) {
+    void addEdge(int src, int dst, short nameIdx, int srcClassIdx) {
         int[] offsets = offsetsCursor;
         int pos = offsets[dst];
         if (isInbound && lowMemory && isExcluded(srcClassIdx, nameIdx)) {
@@ -115,12 +115,12 @@ final class CsrBuilder {
         fwdTargets[fwdOffsets[src]++] = dst;
     }
 
-    private boolean isExcluded(short classIdx, short nameIdx) {
+    private boolean isExcluded(int classIdx, short nameIdx) {
         // Class meta edges (instance→classObj, classObj→superClass/classLoader) are pseudo
         // references that MAT skips during dominator tree computation.
         if (nameIdx == Short.MIN_VALUE) return true;
         if (graph.excludePairs == null || nameIdx == ClassRecord.NO_NAME) return false;
-        for (short[] pair : graph.excludePairs) {
+        for (int[] pair : graph.excludePairs) {
             if (pair[0] == classIdx && pair[1] == nameIdx) return true;
         }
         return false;

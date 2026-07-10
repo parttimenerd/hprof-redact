@@ -57,7 +57,7 @@ public final class HeapGraph {
     // ---- Per-object metadata ----
     byte[]  shallowSizeDiv8;         // 1 byte/obj; value×8 = shallow bytes; 0 = overflowSizes
     LongLongMap overflowSizes;       // objectId(int key) → long shallow size (for objects > 2040 B)
-    short[] classIndex;              // index into classList; -1 = class object itself
+    int[] classIndex;                // index into classList; -1 = class object itself
     BitSet isGCRoot;
     int[] gcRootIds;                 // dense list of root object indices
     byte[] gcRootTypes;              // GC root type code per actual root
@@ -97,7 +97,7 @@ public final class HeapGraph {
     /** For each node index v: the classList index of the class that this node IS the class-object
      *  for, or -1 if v is not a class-object. Built by HeapGraphBuilder after classList is final.
      *  Used by RetainedSizes to detect "classObject(C) is ancestor of v" in O(N). */
-    short[] classObjClassIdx;
+    int[] classObjClassIdx;
 
     // ---- Class object indices (populated in Phase A.1, used in RPO/DomTree) ----
     /** All object indices that appear in HPROF_GC_CLASS_DUMP records (1-based).
@@ -134,7 +134,7 @@ public final class HeapGraph {
 
     // ---- Exclude pairs (resolved at build time) ----
     /** 3 default exclude (classIndex, fieldNameInternIdx) pairs. Filled by HeapGraphBuilder. */
-    short[][] excludePairs;          // [3][2]: {classIdx, fieldNameIdx}
+    int[][] excludePairs;          // [3][2]: {classIdx, fieldNameIdx}
 
     // ---- Stack trace data (populated only when --stack-traces is passed) ----
     StackTraceData stackTraces;   // null unless StackTraceReader.read() was called
@@ -295,6 +295,9 @@ public final class HeapGraph {
         if (phaseArrays != null) phaseArrays.donate(dfsOrder);
         dfsPos = null; dfsOrder = null; dfsParent = null;
     }
+    /** When true (unit-test mode), DominatorTree skips early freeing of inboundOffsets/inboundStream. */
+    boolean retainInboundCsrForTesting;
+
     /** Reusable N-element int[] pool for cross-phase array donation. Initialized by HeapGraphBuilder after N is set. */
     PhaseArrays phaseArrays;
 

@@ -97,7 +97,7 @@ final class LeakSuspectsReport {
             int N = graph.N;
 
             for (int i = 1; i < N; i++) {
-                short ci = graph.classIndex[i];
+                int ci = graph.classIndex[i];
                 if (ci < 0 || ci >= classCount) continue;
                 if (graph.idom[i] == HeapGraph.UNDEFINED) continue;
                 shallowByClass[ci]  += graph.shallowSizeOf(i);
@@ -152,7 +152,7 @@ final class LeakSuspectsReport {
     }
 
     private String classNameOf(int idx) {
-        short ci = graph.classIndex[idx];
+        int ci = graph.classIndex[idx];
         if (ci < 0 || ci >= graph.classList.size()) return "(class object)";
         return ClassNames.pretty(graph.classList.get(ci).name());
     }

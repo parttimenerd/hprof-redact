@@ -37,7 +37,7 @@ class CsrBuilderTest {
         // not in g.inboundOffsets (which is null until encodeVByte sets it).
         // We can only verify after encodeVByte by checking the stream.
         // For this test, just verify fill+restore works by encoding and checking predecessors.
-        g.excludePairs = new short[0][];
+        g.excludePairs = new int[0][];
         b.addEdge(0, 1, (short)0, (short)0);
         b.addEdge(0, 2, (short)0, (short)0);
         b.addEdge(1, 3, (short)0, (short)0);
@@ -62,7 +62,7 @@ class CsrBuilderTest {
         // 3-node graph: 0→1, 0→2, 1→2
         int n = 3;
         HeapGraph g = stub(n);
-        g.excludePairs = new short[0][]; // empty — no excludes
+        g.excludePairs = new int[0][]; // empty — no excludes
         CsrBuilder b = new CsrBuilder(g, n, 3);
 
         b.countEdge(1); b.countEdge(2); b.countEdge(2);
@@ -102,7 +102,7 @@ class CsrBuilderTest {
         int n = 2;
         HeapGraph g = stub(n);
         // Exclude pair: classIdx=5, nameIdx=3
-        g.excludePairs = new short[][]{ {5, 3} };
+        g.excludePairs = new int[][]{ {5, 3} };
         CsrBuilder b = new CsrBuilder(g, n, 1);
 
         b.countEdge(1);
@@ -122,7 +122,7 @@ class CsrBuilderTest {
     void nonExcludedEdgeFlagNotSet() {
         int n = 2;
         HeapGraph g = stub(n);
-        g.excludePairs = new short[][]{ {5, 3} };
+        g.excludePairs = new int[][]{ {5, 3} };
         CsrBuilder b = new CsrBuilder(g, n, 1);
         b.countEdge(1);
         b.finishCounting();
@@ -157,7 +157,7 @@ class CsrBuilderTest {
         // Node 0 receives 100 predecessors from nodes 1..100 added in reverse order
         int n = 101;
         HeapGraph g = stub(n);
-        g.excludePairs = new short[0][];
+        g.excludePairs = new int[0][];
         CsrBuilder b = new CsrBuilder(g, n, 100);
 
         for (int i = 100; i >= 1; i--) b.countEdge(0);

@@ -80,8 +80,8 @@ final class RetainedSizes {
         // To DFS the dominator tree we build a children-CSR: for each node v,
         // enumerate {u : idom[u] == v}. Two-pass: count degrees, then fill.
         BitSet hasSameClassAncestor = new BitSet(N);
-        short[] classIndex = graph.classIndex;
-        short[] classObjClassIdx = graph.classObjClassIdx; // node → classList index it represents; -1 if not class-obj
+        int[] classIndex = graph.classIndex;
+        int[] classObjClassIdx = graph.classObjClassIdx; // node → classList index it represents; -1 if not class-obj
 
         int[] childDeg = graph.phaseArrays != null ? graph.phaseArrays.take() : new int[N];
         for (int u = 1; u < N; u++) {
@@ -142,7 +142,7 @@ final class RetainedSizes {
                 stackChildIdx[top] = nextChild + 1;
 
                 // Enter child: check + update classToLastDepth and classObjDepth
-                short cls = classIndex[child];
+                int cls = classIndex[child];
                 int savedDepth = 0;
                 int savedObjDepth = 0;
                 if (cls >= 0 && cls < classCount) {
@@ -154,7 +154,7 @@ final class RetainedSizes {
                     classToLastDepth[cls] = sp;
                 }
                 // If this node is a class object for some class ci, record that in classObjDepth
-                short ci = (classObjClassIdx != null && child < classObjClassIdx.length)
+                int ci = (classObjClassIdx != null && child < classObjClassIdx.length)
                         ? classObjClassIdx[child] : -1;
                 if (ci >= 0 && ci < classCount) {
                     savedObjDepth = classObjDepth[ci];
@@ -174,11 +174,11 @@ final class RetainedSizes {
                 }
             } else {
                 // Leave v: restore classToLastDepth and classObjDepth
-                short cls = (v == HeapGraph.VIRTUAL_ROOT) ? -1 : classIndex[v];
+                int cls = (v == HeapGraph.VIRTUAL_ROOT) ? -1 : classIndex[v];
                 if (cls >= 0 && cls < classCount) {
                     classToLastDepth[cls] = stackSavedDepth[top];
                 }
-                short ci = (classObjClassIdx != null && v < classObjClassIdx.length && v != HeapGraph.VIRTUAL_ROOT)
+                int ci = (classObjClassIdx != null && v < classObjClassIdx.length && v != HeapGraph.VIRTUAL_ROOT)
                         ? classObjClassIdx[v] : -1;
                 if (ci >= 0 && ci < classCount) {
                     classObjDepth[ci] = stackSavedObjDepth[top];

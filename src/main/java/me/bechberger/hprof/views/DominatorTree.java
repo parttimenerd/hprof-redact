@@ -143,9 +143,12 @@ final class DominatorTree {
         ancestor = null;
         // inboundOffsets and inboundStream are only used in Phase 1; free them now
         // to reclaim ~2 GB int[N+1] + VByte stream before the NCA walk allocates idomD.
-        graph.phaseArrays.donate(graph.inboundOffsets); // int[N+1] ≥ N: accepted
-        graph.inboundOffsets = null;
-        graph.inboundStream  = null;
+        // Skip when retainInboundCsrForTesting is set (unit-test mode: preserve for inspection).
+        if (!graph.retainInboundCsrForTesting) {
+            graph.phaseArrays.donate(graph.inboundOffsets); // int[N+1] ≥ N: accepted
+            graph.inboundOffsets = null;
+            graph.inboundStream  = null;
+        }
         Log.debug("  [RSS] DOM after phase1+free: %,d KB", Log.rssKb());
 
         // ----------------------------------------------------------------

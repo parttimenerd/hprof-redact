@@ -138,7 +138,7 @@ final class HtmlReportData {
         long[] classRetained = new long[classCount];
 
         for (int i = 1; i < N; i++) {
-            short ci = graph.classIndex[i];
+            int ci = graph.classIndex[i];
             if (ci < 0 || ci >= classCount) continue;
             if (graph.idom[i] == HeapGraph.UNDEFINED) continue; // unreachable: exclude from histogram
             instanceCount[ci]++;
@@ -199,7 +199,7 @@ final class HtmlReportData {
         long[] countByClass    = new long[classCount];
         for (int i = 1; i < graph.N; i++) {
             if (graph.idom[i] != HeapGraph.VIRTUAL_ROOT) continue;
-            short ci = graph.classIndex[i];
+            int ci = graph.classIndex[i];
             if (ci >= 0 && ci < classCount) {
                 retainedByClass[ci] += graph.retainedSizeOf(i);
                 countByClass[ci]++;
@@ -227,7 +227,7 @@ final class HtmlReportData {
         long[] retainedByClass = new long[classCount];
         for (int i = 1; i < graph.N; i++) {
             if (graph.idom[i] != HeapGraph.VIRTUAL_ROOT) continue;
-            short ci = graph.classIndex[i];
+            int ci = graph.classIndex[i];
             if (ci >= 0 && ci < classCount) retainedByClass[ci] += graph.retainedSizeOf(i);
         }
         Map<String, long[]> pkgMap = new LinkedHashMap<>();
@@ -255,7 +255,7 @@ final class HtmlReportData {
         long[] retainedByClass = new long[classCount];
         for (int i = 1; i < graph.N; i++) {
             if (graph.idom[i] != HeapGraph.VIRTUAL_ROOT) continue;
-            short ci = graph.classIndex[i];
+            int ci = graph.classIndex[i];
             if (ci >= 0 && ci < classCount) retainedByClass[ci] += graph.retainedSizeOf(i);
         }
         Map<String, long[]> loaderMap = new LinkedHashMap<>();
@@ -277,6 +277,7 @@ final class HtmlReportData {
     }
 
     private static String loaderName(HeapGraph graph, int classIdx) {
+        if (classIdx < 0 || classIdx >= graph.classList.size()) return "<bootstrap>";
         ClassRecord cr = graph.classList.get(classIdx);
         if (cr.classLoaderId() == 0) return "<bootstrap>";
         int loaderIdx = graph.idMap.indexOf(cr.classLoaderId());
@@ -348,7 +349,7 @@ final class HtmlReportData {
             Arrays.fill(shallowByClassScratch, 0L); long[] shallowByClass = shallowByClassScratch;
             Arrays.fill(countByClassScratch,   0L); long[] countByClass   = countByClassScratch;
             for (int i = 1; i < graph.N; i++) {
-                short ci = graph.classIndex[i];
+                int ci = graph.classIndex[i];
                 if (ci < 0 || ci >= classCount) continue;
                 if (graph.idom[i] == HeapGraph.UNDEFINED) continue;
                 shallowByClass[ci]  += graph.shallowSizeOf(i);
@@ -393,7 +394,7 @@ final class HtmlReportData {
         for (int v = 1; v < graph.N; v++) {
             if (subtreeScratch[v] == 0) continue;
             subtreeScratch[v] = 0; // zero as we go — array is zeroed by end
-            short ci = graph.classIndex[v];
+            int ci = graph.classIndex[v];
             if (ci >= 0 && ci < classCount) {
                 shallowByClass[ci] += graph.shallowSizeOf(v);
                 countByClass[ci]++;
@@ -505,12 +506,12 @@ final class HtmlReportData {
         if (idx <= 0 || idx >= graph.N) return "(unknown)";
         // If this node IS a class object, show the class it represents (MAT parity)
         if (graph.classObjClassIdx != null && idx < graph.classObjClassIdx.length) {
-            short representedCi = graph.classObjClassIdx[idx];
+            int representedCi = graph.classObjClassIdx[idx];
             if (representedCi >= 0 && representedCi < graph.classList.size()) {
                 return ClassNames.pretty(graph.classList.get(representedCi).name());
             }
         }
-        short ci = graph.classIndex[idx];
+        int ci = graph.classIndex[idx];
         if (ci < 0 || ci >= graph.classList.size()) return "(class object)";
         return ClassNames.pretty(graph.classList.get(ci).name());
     }

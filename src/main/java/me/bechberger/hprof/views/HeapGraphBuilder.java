@@ -238,17 +238,24 @@ public final class HeapGraphBuilder {
      * For unit tests only — preserves inboundStream/inboundOffsets/gcRootIds for inspection.
      */
     HeapGraph buildForTesting() throws IOException {
-        return buildInternal(false);
+        // retainInboundCsrForTesting is set on the graph before DOM runs, so DominatorTree
+        // skips the early free of inboundOffsets/inboundStream.
+        return buildInternal(false, true);
     }
 
     private HeapGraph buildInternal() throws IOException {
-        return buildInternal(true);
+        return buildInternal(true, false);
     }
 
     private HeapGraph buildInternal(boolean freePostDom) throws IOException {
+        return buildInternal(freePostDom, false);
+    }
+
+    private HeapGraph buildInternal(boolean freePostDom, boolean retainInboundCsr) throws IOException {
         IdMap idMap = new IdMap();
         long t0 = System.currentTimeMillis();
         HeapGraph graph = phaseA1(idMap);
+        graph.retainInboundCsrForTesting = retainInboundCsr;
         System.gc();
         long t1 = System.currentTimeMillis();
         Log.verbose("  [RSS] after A1+GC: %,d KB", Log.rssKb());
@@ -483,13 +490,13 @@ public final class HeapGraphBuilder {
      *  of the class it represents. Used by RetainedSizes to handle MAT-style group-retained. */
     private static void buildClassObjClassIdx(HeapGraph graph) {
         int N = graph.N;
-        short[] result = new short[N];
-        java.util.Arrays.fill(result, (short) -1);
+        int[] result = new int[N];
+        java.util.Arrays.fill(result, -1);
         int classCount = graph.classList.size();
         for (int ci = 0; ci < classCount; ci++) {
             int nodeIdx = graph.classNodeIdx != null ? graph.classNodeIdx[ci] : -1;
             if (nodeIdx <= 0 || nodeIdx >= N) continue;
-            result[nodeIdx] = (short) Math.min(ci, Short.MAX_VALUE);
+            result[nodeIdx] = ci;
         }
         graph.classObjClassIdx = result;
     }
@@ -798,7 +805,7 @@ public final class HeapGraphBuilder {
         int[] ibCursor = graph.phaseArrays.takeRaw(); // will be fully overwritten by arraycopy
         System.arraycopy(inboundOffsets, 0, ibCursor, 0, N);
 
-        short[][] excludePairs = graph.excludePairs;
+        int[][] excludePairs = graph.excludePairs;
         final int[][] ibT = inboundTargets;
         final int[] ibC = ibCursor;
         try (Parser p = openParser()) {
@@ -1086,17 +1093,17 @@ public final class HeapGraphBuilder {
         p.readU4(); consumed += 4; // instance size
 
         int srcIdx = objectIndex(idMap, classId);
-        short srcClassIdx = 0;
+        int srcClassIdx = 0;
 
         // Emit classObj→superClass and classObj→classLoader edges (as excluded — don't affect retained)
         if (srcIdx >= 0) {
             if (superClassId != 0) {
                 int dstIdx = objectIndex(idMap, superClassId);
-                if (dstIdx >= 0) consumer.accept(srcIdx, dstIdx, Short.MIN_VALUE, (short) -1);
+                if (dstIdx >= 0) consumer.accept(srcIdx, dstIdx, Short.MIN_VALUE, -1);
             }
             if (classLoaderId != 0) {
                 int dstIdx = objectIndex(idMap, classLoaderId);
-                if (dstIdx >= 0) consumer.accept(srcIdx, dstIdx, Short.MIN_VALUE, (short) -1);
+                if (dstIdx >= 0) consumer.accept(srcIdx, dstIdx, Short.MIN_VALUE, -1);
             }
         }
 
@@ -1176,7 +1183,7 @@ public final class HeapGraphBuilder {
 
     @FunctionalInterface
     private interface NamedEdgeConsumer {
-        void accept(int srcIdx, int dstIdx, short nameIdx, short srcClassIdx);
+        void accept(int srcIdx, int dstIdx, short nameIdx, int srcClassIdx);
     }
 
     private void scanEdgesWithNames(Parser p, HeapGraph graph, NamedEdgeConsumer consumer) throws IOException {
@@ -1224,8 +1231,7 @@ public final class HeapGraphBuilder {
                     p.readBytesInto(instanceDataBuf, dataLen); remaining -= dataLen;
                     byte[] data = instanceDataBuf;
                     if (srcIdx >= 0) {
-                        short srcClassIdx = classIdx >= 0 ? (short) classIdx : 0;
-                        // Emit <class> edge: instance → its class object (MAT-compatible, always excluded)
+                        int srcClassIdx = classIdx >= 0 ? classIdx : 0;
                         int classObjIdx = objectIndex(idMap, classId);
                         if (classObjIdx >= 0) consumer.accept(srcIdx, classObjIdx, Short.MIN_VALUE, srcClassIdx);
                         if (cr != null) {
@@ -1251,7 +1257,7 @@ public final class HeapGraphBuilder {
                     remaining -= ids + 4 + 4 + ids;
                     int srcIdx = objectIndex(idMap, objId);
                     int classIdx = graph.classIdToIndex.getIfAbsent(elemClassId, -1);
-                    short srcClassIdx = classIdx >= 0 ? (short) classIdx : 0;
+                    int srcClassIdx = classIdx >= 0 ? classIdx : 0;
                     // Emit <class> edge: array → its element-class object (always excluded)
                     if (srcIdx >= 0 && elemClassId != 0) {
                         int classObjIdx = objectIndex(idMap, elemClassId);
@@ -1318,10 +1324,10 @@ public final class HeapGraphBuilder {
         };
     }
 
-    private static boolean isExcluded(short[][] pairs, short classIdx, short nameIdx) {
+    private static boolean isExcluded(int[][] pairs, int classIdx, short nameIdx) {
         if (nameIdx == Short.MIN_VALUE) return true; // class meta edge (superClass/classLoader)
         if (pairs == null || nameIdx == ClassRecord.NO_NAME) return false;
-        for (short[] pair : pairs) {
+        for (int[] pair : pairs) {
             if (pair[0] == classIdx && pair[1] == nameIdx) return true;
         }
         return false;
@@ -1334,15 +1340,15 @@ public final class HeapGraphBuilder {
             {"java/lang/ref/Finalizer", "unfinalized"},
             {"java/lang/Runtime", "<Unfinalized>"}
         };
-        List<short[]> resolved = new ArrayList<>();
+        List<int[]> resolved = new ArrayList<>();
         for (String[] pair : defaults) {
             String className = pair[0];
             String fieldName = pair[1];
             // Find classIdx
-            short classIdx = -1;
+            int classIdx = -1;
             for (int i = 0; i < graph.classList.size(); i++) {
                 if (graph.classList.get(i).name().equals(className)) {
-                    classIdx = (short) i;
+                    classIdx = i;
                     break;
                 }
             }
@@ -1356,9 +1362,9 @@ public final class HeapGraphBuilder {
                 }
             }
             if (nameIdx == ClassRecord.NO_NAME) continue;
-            resolved.add(new short[]{classIdx, nameIdx});
+            resolved.add(new int[]{classIdx, nameIdx});
         }
-        graph.excludePairs = resolved.toArray(new short[0][]);
+        graph.excludePairs = resolved.toArray(new int[0][]);
     }
 
     // =========================================================
@@ -1476,9 +1482,9 @@ public final class HeapGraphBuilder {
             return div8;
         }
 
-        short[] flushClassIndex(int N) {
-            short[] arr = new short[N];
-            java.util.Arrays.fill(arr, (short) -1); // -1 = class object / unresolved
+        int[] flushClassIndex(int N) {
+            int[] arr = new int[N];
+            java.util.Arrays.fill(arr, -1); // -1 = class object / unresolved
             return arr;
         }
 
@@ -1661,8 +1667,8 @@ public final class HeapGraphBuilder {
                 } else {
                     cidx2 = graph.classIdToIndex.getIfAbsent(cid, -1);
                 }
-                if (cidx2 >= 0 && cidx2 <= Short.MAX_VALUE) {
-                    graph.classIndex[objIdx] = (short) cidx2;
+                if (cidx2 >= 0) {
+                    graph.classIndex[objIdx] = cidx2;
                 }
             }
             // Free large A1State scan buffers — no longer needed after class/object metadata is built

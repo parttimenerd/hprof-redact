@@ -64,12 +64,12 @@ final class SystemOverviewReport {
 
         int N = graph.N;
         int[] idom = graph.idom;
-        short[] classObjClassIdx = graph.classObjClassIdx;
-        short[] classIndex = graph.classIndex;
+        int[] classObjClassIdx = graph.classObjClassIdx;
+        int[] classIndex = graph.classIndex;
 
         // Count instances and shallow sizes (instances only, not class objects).
         for (int i = 1; i < N; i++) {
-            short ci = classIndex[i];
+            int ci = classIndex[i];
             if (ci < 0 || ci >= classCount) continue;
             if (idom[i] == HeapGraph.UNDEFINED) continue;
             instanceCount[ci]++;
@@ -91,13 +91,13 @@ final class SystemOverviewReport {
             for (int v = 1; v < N; v++) {
                 if (idom[v] == HeapGraph.UNDEFINED) continue;
                 if (v >= classObjClassIdx.length) continue;
-                short ciObj = classObjClassIdx[v];
+                int ciObj = classObjClassIdx[v];
                 if (ciObj < 0 || ciObj >= classCount) continue;
                 // v is the class-object for class ciObj. Check if any ancestor is in ciObj's set.
                 int cur = idom[v];
                 while (cur != HeapGraph.VIRTUAL_ROOT) {
-                    short curInst = classIndex[cur];
-                    short curObj = (cur < classObjClassIdx.length) ? classObjClassIdx[cur] : -1;
+                    int curInst = classIndex[cur];
+                    int curObj = (cur < classObjClassIdx.length) ? classObjClassIdx[cur] : -1;
                     if (curInst == ciObj || curObj == ciObj) { hasAncestorAsClassObj.set(v); break; }
                     cur = idom[cur];
                 }
@@ -109,12 +109,12 @@ final class SystemOverviewReport {
         // ClassObj contribution: use hasAncestorAsClassObj (walked above for classObj nodes only).
         for (int i = 1; i < N; i++) {
             if (idom[i] == HeapGraph.UNDEFINED) continue;
-            short ciInst = classIndex[i];
+            int ciInst = classIndex[i];
             if (ciInst >= 0 && ciInst < classCount && !graph.hasSameClassAncestor.get(i)) {
                 classRetained[ciInst] += graph.retainedSizeOf(i);
             }
             if (hasAncestorAsClassObj != null && i < classObjClassIdx.length) {
-                short ciObj = classObjClassIdx[i];
+                int ciObj = classObjClassIdx[i];
                 if (ciObj >= 0 && ciObj < classCount && !hasAncestorAsClassObj.get(i)) {
                     classRetained[ciObj] += graph.retainedSizeOf(i);
                 }

@@ -78,7 +78,7 @@ final class TopConsumersReport {
 
         for (int i = 1; i < N; i++) {
             if (idom[i] != HeapGraph.VIRTUAL_ROOT) continue;
-            short ci = graph.classIndex[i];
+            int ci = graph.classIndex[i];
             if (ci < 0 || ci >= classCount) continue;
             countByClass[ci]++;
             retainedByClass[ci] += graph.retainedSizeOf(i);
@@ -113,7 +113,7 @@ final class TopConsumersReport {
         int[] idom = graph.idom;
         for (int i = 1; i < N; i++) {
             if (idom[i] != HeapGraph.VIRTUAL_ROOT) continue;
-            short ci = graph.classIndex[i];
+            int ci = graph.classIndex[i];
             if (ci >= 0 && ci < classCount) retainedByClass[ci] += graph.retainedSizeOf(i);
         }
 
@@ -146,12 +146,12 @@ final class TopConsumersReport {
     private String classNameOf(int idx) {
         // If this node IS a class object, show the class it represents (MAT parity)
         if (graph.classObjClassIdx != null && idx < graph.classObjClassIdx.length) {
-            short representedCi = graph.classObjClassIdx[idx];
+            int representedCi = graph.classObjClassIdx[idx];
             if (representedCi >= 0 && representedCi < graph.classList.size()) {
                 return ClassNames.pretty(graph.classList.get(representedCi).name());
             }
         }
-        short ci = graph.classIndex[idx];
+        int ci = graph.classIndex[idx];
         if (ci < 0 || ci >= graph.classList.size()) return "(class object)";
         return ClassNames.pretty(graph.classList.get(ci).name());
     }
