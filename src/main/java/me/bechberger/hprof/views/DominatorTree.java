@@ -68,14 +68,30 @@ final class DominatorTree {
         // Semi-NCA uses 4 arrays (vs LT's 6): sdom, label, ancestor, idomD.
         // Eliminated: bucket[], next[] (LT-specific bucket propagation lists).
         //
-        // Memory note: idomD is not allocated until after Phase 1 completes, and is
-        // assigned the label[] array's backing storage (same size: int[reachable]).
-        // This avoids holding idomD live simultaneously with label+ancestor+inbound CSR,
-        // saving ~2 GB during Phase 1 on large heaps.
+        // Memory notes:
+        //   - idomD is not allocated until after Phase 1 completes, and is assigned the
+        //     label[] array's backing storage (same size: int[reachable]). This avoids
+        //     holding idomD live simultaneously with label+ancestor+inbound CSR.
+        //   - sdom[] reuses graph.rpoOrder's backing (int[N] ≥ reachable for typical heaps),
+        //     saving one fresh int[reachable] allocation and making rpoOrder immediately
+        //     ineligible for GC (it is overwritten, so no stale data risk).
+        //     Fallback: fresh allocation if rpoOrder is null or too small.
+        //   - RetainedSizes uses children-CSR DFS instead of rpoOrder traversal, so
+        //     rpoOrder is not needed after DominatorTree completes.
         // ----------------------------------------------------------------
 
-        // Semi-NCA arrays indexed by DFS pre-order position d (0..reachable-1).
-        int[] sdom     = new int[reachable]; // semi-dominator DFS-position
+        // Reuse rpoOrder as sdom[] backing to save ~2 GB: rpoOrder is no longer needed
+        // (RetainedSizes uses children-CSR DFS), and it is exactly int[rpoReachable] ≈ int[N].
+        int[] sdom;
+        {
+            int[] rpoArr = graph.rpoOrder;
+            graph.rpoOrder = null; // sever graph reference; sdom now owns the array
+            if (rpoArr != null && rpoArr.length >= reachable) {
+                sdom = rpoArr; // reuse: overwrite with sdom values below
+            } else {
+                sdom = new int[reachable]; // fallback (partial-reachability or test heaps)
+            }
+        }
         int[] label    = new int[reachable]; // union-find: min-sdom node on path to forest root
         int[] ancestor = new int[reachable]; // union-find parent DFS-position; -1 = forest root
 
@@ -221,35 +237,17 @@ final class DominatorTree {
         idomD = null;
         Log.debug("  [RSS] DOM after phase2+translate: %,d KB", Log.rssKb());
 
-        // Take dfsParent directly as depth[] before freeRpoPos nulls it.
-        // dfsParent is int[N], same size — reuse avoids a fresh allocation.
-        int[] depth = graph.dfsParent;
-        graph.dfsParent = null;         // prevent freeRpoPos from nulling it after we've taken it
-        java.util.Arrays.fill(depth, 0); // zero former DFS parent indices
+        // Take dfsParent as a reusable int[N] buffer (already zeroed below) and donate it to
+        // phaseArrays for RetainedSizes to use as retainedSize[] backing.
+        int[] scratch = graph.dfsParent;
+        graph.dfsParent = null;
+        java.util.Arrays.fill(scratch, 0);
 
         graph.freeRpoPos(); // donates dfsOrder to phaseArrays; nulls dfsPos (null), dfsOrder, dfsParent (null)
 
-        // Measure max dominator-tree depth in O(N) by propagating depth through idom.
-        // Process nodes in RPO order — rpoOrder is still valid here (only dfsPos/dfsOrder/dfsParent freed).
-        // Since idom[v] always has a lower RPO position than v, RPO is a valid topological order.
-        int maxDepth = 0;
-        if (graph.rpoOrder != null) {
-            // depth[] already declared and zeroed above
-            // rpoOrder[0] = VIRTUAL_ROOT, already depth 0
-            int rpoReachable = 0;
-            for (int i = 0; i < N; i++) if (idom[i] != HeapGraph.UNDEFINED || i == HeapGraph.VIRTUAL_ROOT) rpoReachable++;
-            for (int ri = 1; ri < rpoReachable; ri++) {
-                int v = graph.rpoOrder[ri];
-                if (v <= 0 || v >= N) continue;
-                int par = idom[v];
-                if (par == HeapGraph.UNDEFINED) continue;
-                int d = (par >= 0 && par < N ? depth[par] : 0) + 1;
-                depth[v] = d;
-                if (d > maxDepth) maxDepth = d;
-            }
-        }
-        // Donate depth[] for reuse — RetainedSizes will take it as retainedSize backing.
-        if (graph.phaseArrays != null) graph.phaseArrays.donate(depth);
+        // Donate scratch (former dfsParent, zeroed) for reuse as retainedSize[] backing.
+        if (graph.phaseArrays != null) graph.phaseArrays.donate(scratch);
+        scratch = null;
     }
 
     // Reusable path buffer — avoids per-call allocation in eval().

@@ -102,21 +102,20 @@ These are intentional divergences, not bugs:
 
 Measured 2026-07-11 with optimizations: deferred idomD in DOM, excluded-edges skip,
 `G1PeriodicGCInterval=20 G1HeapRegionSize=2m` GC flags + chunk-by-chunk inbound VByte encoding
-+ progressive fwdTargets chunk freeing during DFS + BitSet visited in RPO.
++ progressive fwdTargets chunk freeing during DFS + BitSet visited in RPO
++ rpoOrder reused as sdom[] backing + RetainedSizes children-CSR DFS.
 
-| Phase | RSS after GC | Wall time |
-|-------|-------------:|----------:|
-| A1    | 21.2 GB      | 59.1 s    |
-| A2    | 24.3 GB      | 404.9 s   |
-| RPO   | 25.6 GB      | 32.7 s    |
-| DOM   | 17.0 GB      | 155.3 s   |
-| Retained | 19.8 GB   | 23.5 s    |
+| Phase | Wall time |
+|-------|----------:|
+| A1    | 57.5 s    |
+| A2    | 402.7 s   |
+| RPO   | 29.8 s    |
+| DOM   | 139.5 s   |
+| Retained | 24.4 s |
 
-- **Peak RSS**: 29.5 GB (`/usr/bin/time -v` maximum RSS — dominated by DOM Phase 1 peak while inbound CSR + sdom/label/ancestor are simultaneously live)
-- **DOM Phase 1 transient**: ~27.4 GB (after phase1+free log point; down from ~31 GB)
-- **A2 peak**: 24.7 GB (chunk-by-chunk VByte encoding overlaps only ~1 source chunk at a time)
-- **Total elapsed**: 11:48 (wall), 675 s tool time + 31 s report write
-- **CPU**: 728% average (8-core parallel I/O + dominator phases)
+- **Peak RSS**: 27.9 GB (`/usr/bin/time -v` maximum RSS — dominated by DOM Phase 1 peak)
+- **Total elapsed**: 11:27 (wall), 654 s tool time + 32 s report write
+- **CPU**: 817% average (8-core parallel I/O + dominator phases)
 
 ### RSS reduction history (pc52bs2job, 514 M objects)
 
@@ -124,7 +123,8 @@ Measured 2026-07-11 with optimizations: deferred idomD in DOM, excluded-edges sk
 |---|---:|---:|
 | Baseline | 30.4 GB | — |
 | + Chunk-by-chunk inbound VByte encoding | 30.4 GB | 0 (A2 peak: 30.7→24.7 GB) |
-| + Progressive fwdTargets chunk freeing + BitSet RPO + deferred idomD DOM | **29.5 GB** | **−0.9 GB** |
+| + Progressive fwdTargets chunk freeing + BitSet RPO + deferred idomD DOM | 29.5 GB | −0.9 GB |
+| + rpoOrder reused as sdom[] + RetainedSizes children-CSR DFS | **27.9 GB** | **−1.6 GB** |
 
 ## Algorithm notes
 
