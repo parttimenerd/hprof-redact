@@ -33,7 +33,7 @@ class HtmlReportDataTest {
                 .addInstanceObject(0x300L, 0x10L, 0L)        // C
                 .addGCRoot(0x100L, HPROF_GC_ROOT_STICKY_CLASS)
                 .buildToPath();
-        HeapGraph graph = new HeapGraphBuilder(hprof).build();
+        HeapGraph graph = new HeapGraphBuilder(hprof).keepAddressIndex(true).build();
 
         HtmlReportData.ReportData data = HtmlReportData.compute(graph);
 
@@ -54,7 +54,7 @@ class HtmlReportDataTest {
                 .addInstanceObject(0x100L, 0x10L)
                 .addGCRoot(0x100L, HPROF_GC_ROOT_STICKY_CLASS)
                 .buildToPath();
-        HeapGraph graph = new HeapGraphBuilder(hprof).build();
+        HeapGraph graph = new HeapGraphBuilder(hprof).keepAddressIndex(true).build();
 
         HtmlReportData.ReportData data = HtmlReportData.compute(graph);
 
@@ -77,7 +77,7 @@ class HtmlReportDataTest {
                 .addInstanceObject(0x200L, 0x20L, 0L)        // Child
                 .addGCRoot(0x100L, HPROF_GC_ROOT_STICKY_CLASS)
                 .buildToPath();
-        HeapGraph graph = new HeapGraphBuilder(hprof).build();
+        HeapGraph graph = new HeapGraphBuilder(hprof).keepAddressIndex(true).build();
 
         HtmlReportData.ReportData data = HtmlReportData.compute(graph);
 

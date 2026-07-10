@@ -109,6 +109,7 @@ public final class HeapGraphBuilder {
     private final long fileSize;
     private final boolean gzipped;
     private final boolean tarred;   // true for .hprof.tar.gz: gzip-wrap around a POSIX tar archive
+    private boolean keepAddressIndex = false; // when true: keep idMap sorted arrays for HTML address display
     private byte[] instanceDataBuf = new byte[256];
     private byte[] stringReadBuf   = new byte[256]; // reused for UTF-8 string records
 
@@ -118,6 +119,12 @@ public final class HeapGraphBuilder {
         String name = path.getFileName().toString();
         this.tarred  = name.endsWith(".tar.gz") || name.endsWith(".tgz");
         this.gzipped = tarred || detectGzip(path);
+    }
+
+    /** When set, idMap sorted arrays are kept past A2 for HTML address display (default: free after A2). */
+    public HeapGraphBuilder keepAddressIndex(boolean keep) {
+        this.keepAddressIndex = keep;
+        return this;
     }
 
     private static boolean detectGzip(Path path) throws IOException {
@@ -238,6 +245,7 @@ public final class HeapGraphBuilder {
      * For unit tests only — preserves inboundStream/inboundOffsets/gcRootIds for inspection.
      */
     HeapGraph buildForTesting() throws IOException {
+        keepAddressIndex = true; // tests access idMap.indexOf after build
         // retainInboundCsrForTesting is set on the graph before DOM runs, so DominatorTree
         // skips the early free of inboundOffsets/inboundStream.
         return buildInternal(false, true);
@@ -900,7 +908,11 @@ public final class HeapGraphBuilder {
             if (rawIdx >= 0) classNodeIdx[ci] = rawIdx + 1; // +1 for virtual root offset
         }
         graph.classNodeIdx = classNodeIdx;
-        graph.idMap.freeBucket();
+        if (keepAddressIndex) {
+            graph.idMap.freeBucket(); // HTML mode: keep intBuf/buf for address display
+        } else {
+            graph.idMap.freeSortedArrays(); // Markdown mode: free ~2 GB now; no address lookups needed
+        }
     }
 
     /** Exact out-degree and in-degree count: reads actual ref values from instance data. */

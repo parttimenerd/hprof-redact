@@ -27,7 +27,7 @@ class HtmlWriterTest {
                 .addInstanceObject(0x300L, 0x10L, 0L)
                 .addGCRoot(0x100L, HPROF_GC_ROOT_STICKY_CLASS)
                 .buildToPath();
-        HeapGraph graph = new HeapGraphBuilder(hprof).build();
+        HeapGraph graph = new HeapGraphBuilder(hprof).keepAddressIndex(true).build();
         Path out = tmpDir.resolve("report.html");
         new HtmlWriter(graph).writeTo(out);
         String html = Files.readString(out);

@@ -103,19 +103,21 @@ These are intentional divergences, not bugs:
 Measured 2026-07-11 with optimizations: deferred idomD in DOM, excluded-edges skip,
 `G1PeriodicGCInterval=20 G1HeapRegionSize=2m` GC flags + chunk-by-chunk inbound VByte encoding
 + progressive fwdTargets chunk freeing during DFS + BitSet visited in RPO
-+ rpoOrder reused as sdom[] backing + RetainedSizes children-CSR DFS.
++ rpoOrder reused as sdom[] backing + RetainedSizes children-CSR DFS
++ idMap sorted arrays freed after A2 in Markdown mode.
 
-| Phase | Wall time |
-|-------|----------:|
-| A1    | 57.5 s    |
-| A2    | 402.7 s   |
-| RPO   | 29.8 s    |
-| DOM   | 139.5 s   |
-| Retained | 24.4 s |
+| Phase | RSS after GC | Wall time |
+|-------|-------------:|----------:|
+| A1    | 21.5 GB      | 58.0 s    |
+| A2    | 24.2 GB      | 401.3 s   |
+| RPO   | 23.4 GB      | 26.5 s    |
+| DOM phase1+free | 23.0 GB | |
+| DOM   | 17.8 GB      | 140.7 s   |
+| Retained | —        | 26.9 s    |
 
-- **Peak RSS**: 27.9 GB (`/usr/bin/time -v` maximum RSS — dominated by DOM Phase 1 peak)
-- **Total elapsed**: 11:27 (wall), 654 s tool time + 32 s report write
-- **CPU**: 817% average (8-core parallel I/O + dominator phases)
+- **Peak RSS**: 27.4 GB (`/usr/bin/time -v` maximum RSS — dominated by DOM Phase 1 transient: RPO+GC 23.4 GB + label 2 GB + ancestor 2 GB)
+- **Total elapsed**: ~11:40 (wall), 654 s tool time + 27 s report write
+- **CPU**: ~820% average
 
 ### RSS reduction history (pc52bs2job, 514 M objects)
 
@@ -124,7 +126,8 @@ Measured 2026-07-11 with optimizations: deferred idomD in DOM, excluded-edges sk
 | Baseline | 30.4 GB | — |
 | + Chunk-by-chunk inbound VByte encoding | 30.4 GB | 0 (A2 peak: 30.7→24.7 GB) |
 | + Progressive fwdTargets chunk freeing + BitSet RPO + deferred idomD DOM | 29.5 GB | −0.9 GB |
-| + rpoOrder reused as sdom[] + RetainedSizes children-CSR DFS | **27.9 GB** | **−1.6 GB** |
+| + rpoOrder reused as sdom[] + RetainedSizes children-CSR DFS | 27.9 GB | −1.6 GB |
+| + idMap.freeSortedArrays() after A2 (Markdown mode) | **27.4 GB** | **−0.5 GB** |
 
 ## Algorithm notes
 

@@ -76,7 +76,9 @@ public class ViewsCommand implements Callable<Integer> {
 
         HeapGraph graph;
         try {
-            graph = new HeapGraphBuilder(inputPath).build();
+            graph = new HeapGraphBuilder(inputPath)
+                    .keepAddressIndex(htmlMode || stackTraces)
+                    .build();
         } catch (Exception e) {
             System.err.println("ERROR: failed to parse HPROF: " + e.getMessage());
             e.printStackTrace(System.err);
