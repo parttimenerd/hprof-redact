@@ -262,7 +262,6 @@ public final class HeapGraph {
 
     // ---- Transient forward CSR (built in Phase A.2, freed after RPO DFS) ----
     int[] fwdOffsets; // fwdOffsets[i+1] - fwdOffsets[i] = exact out-degree (compacted)
-    int[] fwdEnds;    // null after compaction (kept for potential future use)
     // fwdTargets is chunked (int[][]) for large heaps; each chunk = TARGETS_CHUNK_SIZE ints.
     // For heaps with < TARGETS_CHUNK_SIZE total fwd edges, chunk[0] is the only chunk.
     int[][] fwdTargets;
@@ -302,7 +301,7 @@ public final class HeapGraph {
     PhaseArrays phaseArrays;
 
     void freeRpoOrder() { rpoOrder = null; }
-    void freeFwdCsr()   { fwdOffsets = null; fwdEnds = null; fwdTargets = null; }
+    void freeFwdCsr()   { fwdOffsets = null; fwdTargets = null; }
 
     /** Total number of nodes including virtual root (index 0). */
     public int objectCount() { return N; }

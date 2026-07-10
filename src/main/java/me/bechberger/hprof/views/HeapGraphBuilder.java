@@ -879,7 +879,6 @@ public final class HeapGraphBuilder {
 
         // Store compact forward CSR — fwdOffsets[i+1] is exact, no fwdEnds needed
         graph.fwdOffsets = fwdOffsets;
-        graph.fwdEnds    = null;
         graph.fwdTargets = fwdTargets;
 
         // Free per-class field layout arrays — only needed during A2 edge scanning
