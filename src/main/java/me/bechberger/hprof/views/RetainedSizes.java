@@ -186,6 +186,9 @@ final class RetainedSizes {
         }
         graph.hasSameClassAncestor = hasSameClassAncestor;
 
+        // childTargets is dead after DFS; free before hasSameClassAncestor pass is complete.
+        childTargets = null;
+
         // childOff and childTargets are dead after DFS; donate childOff (length N+1 >= N, accepted)
         if (graph.phaseArrays != null) graph.phaseArrays.donate(childOff);
         childOff = null;

@@ -115,22 +115,29 @@ final class IdMap {
 
     /**
      * Returns the index (0-based) for the given address, or -1 if not found.
-     * Must be called after sort().
+     * Must be called after sort(). If freeBucket() has been called, falls back
+     * to a full binary search (slower but still correct).
      */
     int indexOf(long address) {
         if (!sorted) throw new IllegalStateException("sort() not yet called");
         if (size == 0) return -1;
         if (address < addrMin) return -1;
 
-        // O(1) bucket lookup: compute bucket index from address
-        long off = address - addrMin;
-        int b = (int) Math.min((off * (long) bucketCount) / addrRange, bucketCount - 1);
+        int lo, hi;
+        if (bucket != null) {
+            // O(1) bucket lookup: compute bucket index from address
+            long off = address - addrMin;
+            int b = (int) Math.min((off * (long) bucketCount) / addrRange, bucketCount - 1);
 
-        int lo = bucket[b];
-        // Extend hi by one extra bucket to cover integer-division boundary cases
-        // where the reverse formula (off*bucketCount/addrRange) maps to b-1 for an
-        // address that sits exactly at bStart of bucket b.
-        int hi = (b + 2 <= bucketCount) ? bucket[b + 2] : size;
+            lo = bucket[b];
+            // Extend hi by one extra bucket to cover integer-division boundary cases
+            // where the reverse formula (off*bucketCount/addrRange) maps to b-1 for an
+            // address that sits exactly at bStart of bucket b.
+            hi = (b + 2 <= bucketCount) ? bucket[b + 2] : size;
+        } else {
+            // Bucket freed — fall back to full binary search.
+            lo = 0; hi = size;
+        }
 
         // Linear scan within the small window (~4 entries average)
         if (compressedOops) {
@@ -154,6 +161,11 @@ final class IdMap {
     void freeSortedArrays() {
         buf    = null;
         intBuf = null;
+        bucket = null;
+    }
+
+    /** Release only the bucket index (~N/8 * 4 bytes). indexOf() must not be called after this. */
+    void freeBucket() {
         bucket = null;
     }
 

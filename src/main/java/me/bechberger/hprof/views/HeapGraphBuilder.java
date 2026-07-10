@@ -486,9 +486,7 @@ public final class HeapGraphBuilder {
         java.util.Arrays.fill(result, (short) -1);
         int classCount = graph.classList.size();
         for (int ci = 0; ci < classCount; ci++) {
-            long classId = graph.classList.get(ci).classId();
-            if (classId == 0L) continue;
-            int nodeIdx = graph.idMap.indexOf(classId) + 1;
+            int nodeIdx = graph.classNodeIdx != null ? graph.classNodeIdx[ci] : -1;
             if (nodeIdx <= 0 || nodeIdx >= N) continue;
             result[nodeIdx] = (short) Math.min(ci, Short.MAX_VALUE);
         }
@@ -884,6 +882,18 @@ public final class HeapGraphBuilder {
         }
         graph.isGCRoot   = null; // only needed for addGCRoot deduplication during A1/A2
         graph.excludedEdge = null; // built during VByte encoding, never read after A2 completes
+
+        // Precompute class-object node indices so idMap.bucket can be freed.
+        int[] classNodeIdx = new int[graph.classList.size()];
+        java.util.Arrays.fill(classNodeIdx, -1);
+        for (int ci = 0; ci < graph.classList.size(); ci++) {
+            long classId = graph.classList.get(ci).classId();
+            if (classId == 0L) continue;
+            int rawIdx = graph.idMap.indexOf(classId);
+            if (rawIdx >= 0) classNodeIdx[ci] = rawIdx + 1; // +1 for virtual root offset
+        }
+        graph.classNodeIdx = classNodeIdx;
+        graph.idMap.freeBucket();
     }
 
     /** Exact out-degree and in-degree count: reads actual ref values from instance data. */
