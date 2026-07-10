@@ -52,30 +52,13 @@ public class ViewsCommand implements Callable<Integer> {
             description = "Force HTML output (overrides extension detection).")
     private boolean forceHtml;
 
-    @Option(names = {"--optimal-gc"},
-            description = "Advise on JVM flags for lower peak RSS (~460 MB reduction on 11M-object heaps, e.g. 960 MB vs 1,420 MB). " +
-                    "Prints the recommended flags; does not restart the JVM.")
-    private boolean optimalGc;
-
     @Option(names = {"--stack-traces"},
             description = "Parse HPROF stack frames for richer leak suspect analysis (third pass, optional).")
     private boolean stackTraces;
 
-    private static void printOptimalGcAdvice() {
-        System.err.println("  [GC] For ~460 MB lower peak RSS (e.g. 960 MB vs 1,420 MB on 11M-object heaps), run with:");
-        System.err.println("       java -XX:+UseG1GC -XX:G1PeriodicGCInterval=50 -XX:+G1PeriodicGCInvokesConcurrent \\");
-        System.err.println("            -XX:MinHeapFreeRatio=1 -XX:MaxHeapFreeRatio=2 \\");
-        System.err.println("            -XX:G1HeapRegionSize=4m -XX:G1PeriodicGCSystemLoadThreshold=0.0 \\");
-        System.err.println("            -XX:SoftRefLRUPolicyMSPerMB=500 ...");
-        System.err.println("  [GC] Validated on VSCode (11.3M objects) and scala-doku (957K objects): generalizes across heap sizes.");
-        System.err.println("  [GC] Cost: ~+4s wall time on 11M-object heaps. For minimum RSS at higher cost, use interval=20ms.");
-        System.err.println("  [GC] Runtime flag setting via MXBean is not used: it fires during active fills and increases RSS.");
-    }
-
     @Override
     public Integer call() throws IOException {
         Log.setLevel(debug ? 2 : (verbose || printPhaseTimes) ? 1 : 0);
-        if (optimalGc) printOptimalGcAdvice();
 
         Path inputPath = Path.of(input);
         boolean htmlMode = forceHtml || (output != null && output.endsWith(".html"));
