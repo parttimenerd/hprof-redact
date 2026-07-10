@@ -14,6 +14,8 @@ import java.util.BitSet;
  * {@code next} arrays, saving 2 × int[reachable] ≈ 4 GB on large heaps.
  *
  * Arrays used: {@code sdom}, {@code label}, {@code ancestor}, {@code idomD} (4 total vs LT's 6).
+ * {@code idomD} reuses {@code label}'s storage after Phase 1, so peak live count is 3 arrays
+ * (sdom + label/idomD + ancestor), not 4.
  * The {@code bucket}/{@code next} linked-list structures from LT's bucket propagation step
  * are replaced by the NCA walk in Phase 2.
  *
@@ -65,15 +67,18 @@ final class DominatorTree {
         //
         // Semi-NCA uses 4 arrays (vs LT's 6): sdom, label, ancestor, idomD.
         // Eliminated: bucket[], next[] (LT-specific bucket propagation lists).
+        //
+        // Memory note: idomD is not allocated until after Phase 1 completes, and is
+        // assigned the label[] array's backing storage (same size: int[reachable]).
+        // This avoids holding idomD live simultaneously with label+ancestor+inbound CSR,
+        // saving ~2 GB during Phase 1 on large heaps.
         // ----------------------------------------------------------------
 
         // Semi-NCA arrays indexed by DFS pre-order position d (0..reachable-1).
         int[] sdom     = new int[reachable]; // semi-dominator DFS-position
-        int[] idomD    = new int[reachable]; // immediate dominator DFS-position (output); -1 = unset
         int[] label    = new int[reachable]; // union-find: min-sdom node on path to forest root
         int[] ancestor = new int[reachable]; // union-find parent DFS-position; -1 = forest root
 
-        Arrays.fill(idomD,    -1);
         Arrays.fill(ancestor, -1);
         for (int d = 0; d < reachable; d++) {
             label[d] = d;
@@ -138,11 +143,17 @@ final class DominatorTree {
             ancestor[d] = par;
         }
 
-        // label[] and ancestor[] are dead after Phase 1 — release before Phase 2.
-        label    = null;
+        // label[] and ancestor[] are dead after Phase 1.
+        // Repurpose label[] as idomD[] (same size: int[reachable]) to avoid a fresh
+        // int[reachable] allocation while inbound CSR is still live.
+        int[] idomD = label;
+        label = null;
+        Arrays.fill(idomD, -1);
+        // Donate ancestor to phaseArrays: it is int[reachable] ≥ N for fully-reachable heaps.
+        if (graph.phaseArrays != null && ancestor.length >= graph.N) graph.phaseArrays.donate(ancestor);
         ancestor = null;
         // inboundOffsets and inboundStream are only used in Phase 1; free them now
-        // to reclaim ~2 GB int[N+1] + VByte stream before the NCA walk allocates idomD.
+        // to reclaim ~2 GB int[N+1] + VByte stream before the NCA walk.
         // Skip when retainInboundCsrForTesting is set (unit-test mode: preserve for inspection).
         if (!graph.retainInboundCsrForTesting) {
             graph.phaseArrays.donate(graph.inboundOffsets); // int[N+1] ≥ N: accepted
@@ -203,7 +214,9 @@ final class DominatorTree {
         graph.idom = idom;
         graph.dfsPos = null; // already repurposed as idom — freeRpoPos must not re-stash it
 
-        // sdom[] and idomD[] are dead after translation — release before depth pass.
+        // sdom[] and idomD[] are dead after translation — donate to phaseArrays for reuse.
+        if (graph.phaseArrays != null && sdom.length >= graph.N) graph.phaseArrays.donate(sdom);
+        if (graph.phaseArrays != null && idomD.length >= graph.N) graph.phaseArrays.donate(idomD);
         sdom  = null;
         idomD = null;
         Log.debug("  [RSS] DOM after phase2+translate: %,d KB", Log.rssKb());

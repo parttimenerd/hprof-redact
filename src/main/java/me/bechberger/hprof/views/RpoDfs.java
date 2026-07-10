@@ -5,6 +5,7 @@
 package me.bechberger.hprof.views;
 
 import java.util.Arrays;
+import java.util.BitSet;
 
 /**
  * Computes the Reverse-Post-Order (RPO) traversal of the heap graph,
@@ -23,6 +24,10 @@ import java.util.Arrays;
  * For large heaps, {@code fwdTargets} chunks are freed progressively as the DFS
  * finishes with each chunk (refcount-based), reducing peak RSS during this phase.
  *
+ * Memory note: visited tracking uses a {@code BitSet(N)} (~64 MB for 514M nodes) instead of
+ * {@code int[N]} (~2 GB) during the DFS traversal. {@code dfsPos[]} is reconstructed from
+ * {@code dfsOrder[]} in O(N) after the DFS completes, when {@code fwdTargets} has been freed.
+ *
  * Note: rpoPos[] is NOT produced here. Reachability is determined via dfsPos[v] >= 0.
  */
 final class RpoDfs {
@@ -36,12 +41,11 @@ final class RpoDfs {
 
         int[] rpoOrder = graph.phaseArrays.takeRaw(); // donated by A2; avoids fresh int[N]
 
-        // DFS pre-order: assigned when a node is first pushed onto the stack.
-        // dfsPos[v] = -1 means not yet visited; >= 0 means visited (also serves as visited-sentinel).
-        int[] dfsPos   = new int[N];
-        int[] dfsOrder = new int[N];
+        // Use a BitSet for visited tracking during DFS (~64 MB for 514M nodes) instead of
+        // int[N] (~2 GB). dfsPos[N] is reconstructed after freeFwdCsr() drops fwdTargets.
+        BitSet visited = new BitSet(N);
+        int[] dfsOrder  = new int[N];
         int[] dfsParent = new int[N];
-        Arrays.fill(dfsPos,    -1);
         Arrays.fill(dfsParent, -1);
 
         // Explicit DFS stack: parallel arrays for node and cursor
@@ -53,7 +57,7 @@ final class RpoDfs {
         int rpoIdx   = N;
         int dfsCount = 0;
 
-        dfsPos[HeapGraph.VIRTUAL_ROOT]    = dfsCount;
+        visited.set(HeapGraph.VIRTUAL_ROOT);
         dfsOrder[dfsCount++]              = HeapGraph.VIRTUAL_ROOT;
         dfsParent[HeapGraph.VIRTUAL_ROOT] = -1;
         top++;
@@ -89,8 +93,8 @@ final class RpoDfs {
                 int child = getChild(node, cursor, graph, fwdOffsets, fwdTargets);
                 cursor++;
                 if (child < 0 || child >= N) continue;
-                if (dfsPos[child] == -1) { // not yet visited
-                    dfsPos[child]  = dfsCount;
+                if (!visited.get(child)) { // not yet visited
+                    visited.set(child);
                     dfsOrder[dfsCount++] = child;
                     dfsParent[child]     = node;
                     cursorStack[top] = cursor;
@@ -129,13 +133,25 @@ final class RpoDfs {
         int postCount = N - rpoIdx;
         System.arraycopy(rpoOrder, rpoIdx, rpoOrder, 0, postCount);
 
+        // Free fwdTargets and fwdOffsets before allocating dfsPos[N] to reduce peak RSS.
+        // Null the local references too so G1 can collect the arrays immediately.
+        graph.freeFwdCsr();
+        fwdOffsets = null;
+        fwdTargets = null;
+
+        // Reconstruct dfsPos[N] (node → DFS pre-order position) from dfsOrder[].
+        // dfsPos[v] = -1 for unreachable nodes (defaults to -1 from Arrays.fill).
+        int[] dfsPos = new int[N];
+        Arrays.fill(dfsPos, -1);
+        for (int d = 0; d < dfsCount; d++) {
+            dfsPos[dfsOrder[d]] = d;
+        }
+
         graph.rpoOrder     = rpoOrder;
         graph.rpoReachable = postCount;
         graph.dfsPos    = dfsPos;
         graph.dfsOrder  = dfsOrder;
         graph.dfsParent = dfsParent;
-
-        graph.freeFwdCsr();
     }
 
     private static int childCount(int node, HeapGraph graph, int[] fwdOffsets) {
