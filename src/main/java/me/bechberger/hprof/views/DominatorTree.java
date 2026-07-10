@@ -13,7 +13,9 @@ import java.util.BitSet;
  * Replaces the Lengauer-Tarjan "simple" algorithm to eliminate the {@code bucket} and
  * {@code next} arrays, saving 2 × int[reachable] ≈ 4 GB on large heaps.
  *
- * Arrays used: {@code sdom}, {@code label}, {@code ancestor}, {@code idomD} (4 total vs LT's 6).
+ * Arrays used: {@code sdom}, {@code label}, {@code ancestor} (Phase 1); {@code idomD} (Phase 2).
+ * {@code idomD} is allocated after Phase 1 so it never overlaps with {@code label}/{@code ancestor},
+ * saving one int[reachable] ≈ 2 GB at the Phase-1 peak on large heaps.
  * The {@code bucket}/{@code next} linked-list structures from LT's bucket propagation step
  * are replaced by the NCA walk in Phase 2.
  *
@@ -68,12 +70,11 @@ final class DominatorTree {
         // ----------------------------------------------------------------
 
         // Semi-NCA arrays indexed by DFS pre-order position d (0..reachable-1).
+        // idomD is deferred until after Phase 1 to avoid overlap with label/ancestor.
         int[] sdom     = new int[reachable]; // semi-dominator DFS-position
-        int[] idomD    = new int[reachable]; // immediate dominator DFS-position (output); -1 = unset
         int[] label    = new int[reachable]; // union-find: min-sdom node on path to forest root
         int[] ancestor = new int[reachable]; // union-find parent DFS-position; -1 = forest root
 
-        Arrays.fill(idomD,    -1);
         Arrays.fill(ancestor, -1);
         for (int d = 0; d < reachable; d++) {
             label[d] = d;
@@ -139,10 +140,10 @@ final class DominatorTree {
         }
 
         // label[] and ancestor[] are dead after Phase 1 — release before Phase 2.
+        // Free BEFORE allocating idomD so they don't overlap in memory.
         label    = null;
         ancestor = null;
-        // inboundOffsets and inboundStream are only used in Phase 1; free them now
-        // to reclaim ~2 GB int[N+1] + VByte stream before the NCA walk allocates idomD.
+        // inboundOffsets and inboundStream are only used in Phase 1; free them now.
         // Skip when retainInboundCsrForTesting is set (unit-test mode: preserve for inspection).
         if (!graph.retainInboundCsrForTesting) {
             graph.phaseArrays.donate(graph.inboundOffsets); // int[N+1] ≥ N: accepted
@@ -150,6 +151,11 @@ final class DominatorTree {
             graph.inboundStream  = null;
         }
         Log.debug("  [RSS] DOM after phase1+free: %,d KB", Log.rssKb());
+
+        // Allocate idomD here (after freeing label/ancestor/inbound) to avoid a 3-array overlap
+        // during Phase 1.  On 514M-object heaps this saves ~2 GB at the Phase-1 peak.
+        int[] idomD = new int[reachable]; // immediate dominator DFS-position (output); -1 = unset
+        Arrays.fill(idomD, -1);
 
         // ----------------------------------------------------------------
         // Phase 2: NCA idom computation.
