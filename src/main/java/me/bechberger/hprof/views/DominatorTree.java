@@ -141,6 +141,11 @@ final class DominatorTree {
         // label[] and ancestor[] are dead after Phase 1 — release before Phase 2.
         label    = null;
         ancestor = null;
+        // inboundOffsets and inboundStream are only used in Phase 1; free them now
+        // to reclaim ~2 GB int[N+1] + VByte stream before the NCA walk allocates idomD.
+        graph.phaseArrays.donate(graph.inboundOffsets); // int[N+1] ≥ N: accepted
+        graph.inboundOffsets = null;
+        graph.inboundStream  = null;
 
         // ----------------------------------------------------------------
         // Phase 2: NCA idom computation.
