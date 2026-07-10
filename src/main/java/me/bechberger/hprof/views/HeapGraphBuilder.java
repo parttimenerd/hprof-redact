@@ -1352,7 +1352,7 @@ public final class HeapGraphBuilder {
                 long superId = classSuperIds.getIfAbsent(classId, 0L);
                 int instSize = classInstanceSizes.getIfAbsent(classId, 0);
                 int ownFieldsSize = classOwnFieldsSizes.getIfAbsent(classId, 0);
-                long[] objFields = classObjFields.getIfAbsent(classId, null);
+                long[] objFields = classObjFields.get(classId);
                 int objFieldCount2 = objFields != null ? objFields.length / 2 : 0;
 
                 short[] nameIds = new short[objFieldCount2];
