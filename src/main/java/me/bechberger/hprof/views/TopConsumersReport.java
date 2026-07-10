@@ -64,7 +64,11 @@ final class TopConsumersReport {
         }
     }
 
-    /** Retained heap grouped by class, using group-retained semantics to avoid double-counting. */
+    /**
+     * Biggest Top-Level Dominator Classes: for each class, sum retainedSize[v] over
+     * all top-level dominators (idom[v] == VIRTUAL_ROOT) of that class. Matches MAT's
+     * "Biggest Top-Level Dominator Classes" semantics exactly.
+     */
     private void writeBiggestByClass(PrintWriter out) {
         int classCount = graph.classList.size();
         long[] retainedByClass = new long[classCount];
@@ -73,23 +77,11 @@ final class TopConsumersReport {
         int[] idom = graph.idom;
 
         for (int i = 1; i < N; i++) {
+            if (idom[i] != HeapGraph.VIRTUAL_ROOT) continue;
             short ci = graph.classIndex[i];
             if (ci < 0 || ci >= classCount) continue;
             countByClass[ci]++;
-        }
-        // Group-retained: attribute shallowSize[v] to classOf(idom[v])
-        for (int i = 1; i < N; i++) {
-            if (idom[i] == HeapGraph.UNDEFINED) continue;
-            int parent = idom[i];
-            long shallow = graph.shallowSizeOf(i);
-            if (parent == HeapGraph.VIRTUAL_ROOT || parent == HeapGraph.UNDEFINED) {
-                short ci = graph.classIndex[i];
-                if (ci >= 0 && ci < classCount) retainedByClass[ci] += shallow;
-            } else {
-                short parentCi = graph.classIndex[parent];
-                int parentClass = parentCi & 0xFFFF;
-                if (parentClass < classCount) retainedByClass[parentClass] += shallow;
-            }
+            retainedByClass[ci] += graph.retainedSizeOf(i);
         }
 
         List<Integer> sorted = new ArrayList<>(classCount);
@@ -111,7 +103,7 @@ final class TopConsumersReport {
         }
     }
 
-    /** Retained heap grouped by top-level package. */
+    /** Retained heap grouped by top-level package, using top-level-dominator semantics. */
     private void writeBiggestByPackage(PrintWriter out) {
         Map<String, long[]> pkgMap = new LinkedHashMap<>(); // pkg → [retained, count]
 
@@ -119,19 +111,10 @@ final class TopConsumersReport {
         long[] retainedByClass = new long[classCount];
         int N = graph.N;
         int[] idom = graph.idom;
-        // Group-retained: attribute shallowSize[v] to classOf(idom[v])
         for (int i = 1; i < N; i++) {
-            if (idom[i] == HeapGraph.UNDEFINED) continue;
-            int parent = idom[i];
-            long shallow = graph.shallowSizeOf(i);
-            if (parent == HeapGraph.VIRTUAL_ROOT || parent == HeapGraph.UNDEFINED) {
-                short ci = graph.classIndex[i];
-                if (ci >= 0 && ci < classCount) retainedByClass[ci] += shallow;
-            } else {
-                short parentCi = graph.classIndex[parent];
-                int parentClass = parentCi & 0xFFFF;
-                if (parentClass < classCount) retainedByClass[parentClass] += shallow;
-            }
+            if (idom[i] != HeapGraph.VIRTUAL_ROOT) continue;
+            short ci = graph.classIndex[i];
+            if (ci >= 0 && ci < classCount) retainedByClass[ci] += graph.retainedSizeOf(i);
         }
 
         for (int ci = 0; ci < classCount; ci++) {

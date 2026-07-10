@@ -71,10 +71,9 @@ final class DominatorTree {
             sdom[d]  = d; // initial: sdom is itself (identity)
         }
 
-        // Nodes with implicit VIRTUAL_ROOT predecessor (GC roots + class dump objects)
+        // Nodes with implicit VIRTUAL_ROOT predecessor (GC roots)
         BitSet vrAdjacent = new BitSet(N);
         for (int i = 0; i < graph.gcRootCount;  i++) vrAdjacent.set(graph.gcRootIds[i]);
-        for (int i = 0; i < graph.classDumpCount; i++) vrAdjacent.set(graph.classDumpIndices[i]);
 
         // ----------------------------------------------------------------
         // Main LT loop: process in REVERSE DFS pre-order (d = reachable-1 down to 1).
@@ -95,7 +94,7 @@ final class DominatorTree {
             // Start from DFS-tree parent as upper bound
             int minSdom = par;
 
-            // Implicit VRoot predecessor for GC roots and class-dump objects
+            // Implicit VRoot predecessor for GC roots
             if (vrAdjacent.get(v) && minSdom > 0) minSdom = 0;
 
             // Scan actual inbound predecessors

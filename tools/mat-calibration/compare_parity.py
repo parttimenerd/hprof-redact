@@ -119,12 +119,20 @@ class TopObject:
 
 
 @dataclass
+class DomClass:
+    """Biggest Top-Level Dominator Classes row (MAT Top Consumers report)."""
+    cls: str
+    retained: int
+
+
+@dataclass
 class MatReport:
     dump: str
     summary: MatSummary = field(default_factory=MatSummary)
     histogram: list[ClassRow] = field(default_factory=list)
     suspects: list[Suspect] = field(default_factory=list)
     top_objects: list[TopObject] = field(default_factory=list)
+    dom_classes: list[DomClass] = field(default_factory=list)
 
 
 # ── JSON cache helpers ────────────────────────────────────────────────────────
@@ -136,6 +144,7 @@ def _mat_report_to_dict(r: MatReport) -> dict:
         'histogram': [asdict(x) for x in r.histogram],
         'suspects':  [asdict(x) for x in r.suspects],
         'top_objects': [asdict(x) for x in r.top_objects],
+        'dom_classes': [asdict(x) for x in r.dom_classes],
     }
 
 
@@ -146,6 +155,8 @@ def _mat_report_from_dict(d: dict) -> MatReport:
     r.histogram   = [ClassRow(**x) for x in d['histogram']]
     r.suspects    = [Suspect(**x) for x in d['suspects']]
     r.top_objects = [TopObject(**x) for x in d['top_objects']]
+    r.dom_classes = [DomClass(cls=x.get('cls', x.get('name', '')), retained=x.get('retained', 0))
+                     for x in d.get('dom_classes', [])]
     return r
 
 
@@ -158,13 +169,15 @@ def load_mat_report_cached(stem: str, dumps_dir: Path) -> Optional[MatReport]:
     if not ov_zip.exists():
         return None
 
-    # Use cache if it's newer than both zips
+    # Use cache if it's newer than both zips AND has dom_classes (v2 format)
     if cache.exists():
         cache_mtime = cache.stat().st_mtime
         zips_mtime  = max(ov_zip.stat().st_mtime,
                           ls_zip.stat().st_mtime if ls_zip.exists() else 0)
         if cache_mtime >= zips_mtime:
-            return _mat_report_from_dict(json.loads(cache.read_text()))
+            cached = json.loads(cache.read_text())
+            if 'dom_classes' in cached:  # v2 format — safe to use
+                return _mat_report_from_dict(cached)
 
     r = _parse_mat_overview_zip(ov_zip)
     r.dump = stem
@@ -252,6 +265,34 @@ def _parse_mat_overview_zip(zip_path: Path) -> MatReport:
                 continue
             r.top_objects.append(TopObject(cls=cls, shallow=shallow, retained=retained))
 
+        # Parse Biggest Top-Level Dominator Classes table.
+        # Format per row: "ClassName [Only object | First N of M objects] count shallow retained pct%"
+        if obj_end_idx > 0:
+            dom_section = html[obj_end_idx:]
+            for tbl_m in re.finditer(r'<table[^>]*>(.*?)</table>', dom_section, re.DOTALL):
+                tbl = tbl_m.group(1)
+                rows = re.findall(r'<tr>(.*?)</tr>', tbl, re.DOTALL)
+                if len(rows) <= 1:
+                    continue
+                for row in rows[1:]:
+                    text = re.sub(r'<[^>]+>', ' ', row)
+                    text = re.sub(r'\s+', ' ', text).strip()
+                    if not text or 'Label' in text:
+                        continue
+                    # Strip "class " prefix that sometimes appears
+                    if text.startswith('class '):
+                        text = text[6:]
+                    m = re.match(
+                        r'([\w.$\[\]]+)\s+(?:Only object|First \d+ of \d+ objects)\s+'
+                        r'(\d[\d,]*)\s+(\d[\d,]*)\s+(\d[\d,]*)',
+                        text
+                    )
+                    if m:
+                        r.dom_classes.append(DomClass(
+                            cls=m.group(1),
+                            retained=int(m.group(4).replace(',', ''))
+                        ))
+
     return r
 
 
@@ -281,6 +322,7 @@ class OurReport:
     histogram: list[ClassRow] = field(default_factory=list)
     suspects: list[Suspect] = field(default_factory=list)
     top_objects: list[TopObject] = field(default_factory=list)
+    dom_classes: list[DomClass] = field(default_factory=list)
 
 
 def parse_our_report(md: str, stem: str) -> OurReport:
@@ -337,6 +379,23 @@ def parse_our_report(md: str, stem: str) -> OurReport:
                 r.top_objects.append(TopObject(
                     cls=m.group(1),
                     shallow=parse_bytes_human(m.group(2)),
+                    retained=parse_bytes_human(m.group(3)),
+                ))
+
+    # "| N | `ClassName` | instances | retained |"  (Biggest Classes by Retained Heap)
+    in_dom = False
+    for line in lines:
+        if '### Biggest Classes by Retained Heap' in line:
+            in_dom = True; continue
+        if in_dom and line.startswith('##'):
+            break
+        if in_dom:
+            if m := re.match(
+                r'\|\s*\d+\s*\|\s*`([^`]+)`\s*\|\s*([\d,]+)\s*\|\s*([^|]+?)\s*\|',
+                line
+            ):
+                r.dom_classes.append(DomClass(
+                    cls=m.group(1),
                     retained=parse_bytes_human(m.group(3)),
                 ))
 
@@ -688,6 +747,10 @@ def _c(label, mat, our, unit='', is_ge=False) -> Check:
 def compare(mat: MatReport, our: OurReport) -> list[Check]:
     checks: list[Check] = []
 
+    def norm_cls(name: str) -> str:
+        """Normalize array class names: strip trailing [N] (MAT) → [] (ours)."""
+        return re.sub(r'\[\d+\]', '[]', name)
+
     checks += [
         _c('overview/heap_bytes', mat.summary.heap_bytes, our.heap_bytes,  'bytes'),
         _c('overview/objects',    mat.summary.objects,    our.objects),
@@ -695,7 +758,19 @@ def compare(mat: MatReport, our: OurReport) -> list[Check]:
         _c('overview/gc_roots',   mat.summary.gc_roots,   our.gc_roots),
     ]
 
-    our_histo = {row.name: row for row in our.histogram}
+    # Aggregate histogram rows by name (handles duplicate class names from multiple classloaders).
+    our_histo: dict[str, ClassRow] = {}
+    for row in our.histogram:
+        if row.name in our_histo:
+            existing = our_histo[row.name]
+            our_histo[row.name] = ClassRow(
+                name=row.name,
+                instances=existing.instances + row.instances,
+                shallow=existing.shallow + row.shallow,
+                retained_min=existing.retained_min + row.retained_min,
+            )
+        else:
+            our_histo[row.name] = row
     for mat_row in mat.histogram:
         if re.fullmatch(r'0x[0-9a-fA-F]+', mat_row.name):
             continue  # skip rows MAT couldn't resolve to a class name
@@ -721,19 +796,29 @@ def compare(mat: MatReport, our: OurReport) -> list[Check]:
             _c('suspects/top1_pct',      mat.suspects[0].pct,      our.suspects[0].pct),
         ]
 
-    mat_n = min(5, len(mat.top_objects))
+    mat_n = min(20, len(mat.top_objects))
     if mat_n > 0:
-        # Normalize array class names: MAT may show "ClassName[N]" (with array length N)
-        # while we show "ClassName[]" (without length). Strip trailing [N] for comparison.
-        def norm_cls(name: str) -> str:
-            return re.sub(r'\[\d+\]', '[]', name)
         mat_cls = Counter(norm_cls(o.cls) for o in mat.top_objects[:mat_n])
         our_cls = Counter(norm_cls(o.cls) for o in our.top_objects[:mat_n])
         overlap = sum((mat_cls & our_cls).values())
-        checks.append(_c('top_objects/top5_class_overlap', mat_n, overlap))
+        checks.append(_c(f'top_objects/top{mat_n}_class_overlap', mat_n, overlap))
     if mat.top_objects and our.top_objects:
         checks.append(_c('top_objects/top1_retained',
                          mat.top_objects[0].retained, our.top_objects[0].retained, 'bytes'))
+
+    # Biggest Top-Level Dominator Classes: compare class-name overlap and top-3 retained values
+    dom_n = min(10, len(mat.dom_classes))
+    if dom_n > 0 and our.dom_classes:
+        mat_dom_cls = Counter(norm_cls(d.cls) for d in mat.dom_classes[:dom_n])
+        our_dom_cls = Counter(norm_cls(d.cls) for d in our.dom_classes[:dom_n])
+        dom_overlap = sum((mat_dom_cls & our_dom_cls).values())
+        checks.append(_c(f'dom_classes/top{dom_n}_overlap', dom_n, dom_overlap))
+    # Per-class retained for top-3 dominator classes (by MAT order)
+    our_dom_by_cls = {norm_cls(d.cls): d.retained for d in our.dom_classes}
+    for rank, dc in enumerate(mat.dom_classes[:3], 1):
+        nc = norm_cls(dc.cls)
+        our_ret = our_dom_by_cls.get(nc, 0)
+        checks.append(_c(f'dom_classes/rank{rank}_{nc}/retained', dc.retained, our_ret, 'bytes', True))
 
     return checks
 

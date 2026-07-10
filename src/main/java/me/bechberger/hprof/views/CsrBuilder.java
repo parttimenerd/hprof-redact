@@ -116,6 +116,9 @@ final class CsrBuilder {
     }
 
     private boolean isExcluded(short classIdx, short nameIdx) {
+        // Class meta edges (instance→classObj, classObj→superClass/classLoader) are pseudo
+        // references that MAT skips during dominator tree computation.
+        if (nameIdx == Short.MIN_VALUE) return true;
         if (graph.excludePairs == null || nameIdx == ClassRecord.NO_NAME) return false;
         for (short[] pair : graph.excludePairs) {
             if (pair[0] == classIdx && pair[1] == nameIdx) return true;
@@ -170,6 +173,7 @@ final class CsrBuilder {
                 for (int i = rowStart; i < rowEnd; i++) {
                     int rawSrc = targets[i];
                     boolean excluded = (rawSrc & Integer.MIN_VALUE) != 0;
+                    if (excluded) { logicalEdgeIdx++; continue; } // skip excluded edges: don't affect dominator tree
                     int src = rawSrc & Integer.MAX_VALUE;
                     int delta = src - prev;
                     prev = src;
@@ -177,7 +181,6 @@ final class CsrBuilder {
                         singleBuf = Arrays.copyOf(singleBuf, Math.min(singleBuf.length * 2, VByte.CHUNK_SIZE - 1));
                     }
                     streamPos = VByte.encode(delta, singleBuf, (int) streamPos);
-                    if (excluded) newExcluded.set(logicalEdgeIdx);
                     logicalEdgeIdx++;
                 }
             }
@@ -212,6 +215,7 @@ final class CsrBuilder {
             for (int i = rowStart; i < rowEnd; i++) {
                 int rawSrc = targets[i];
                 boolean excluded = (rawSrc & Integer.MIN_VALUE) != 0;
+                if (excluded) { logicalEdgeIdx++; continue; } // skip excluded edges
                 int src = rawSrc & Integer.MAX_VALUE;
                 int delta = src - prev;
                 prev = src;
@@ -226,7 +230,6 @@ final class CsrBuilder {
                     }
                 }
                 streamPos = VByte.encode(delta, stream, streamPos);
-                if (excluded) newExcluded.set(logicalEdgeIdx);
                 logicalEdgeIdx++;
             }
         }

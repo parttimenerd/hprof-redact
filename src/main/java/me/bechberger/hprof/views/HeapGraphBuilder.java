@@ -579,8 +579,8 @@ public final class HeapGraphBuilder {
                     long localId = p.readId();
                     int threadSerial = (int) p.readU4();
                     remaining -= ids + 4;
-                    state.appendAddressToIdMapOnly(localId);  // still needs to be in IdMap
-                    // NOT a GC root — will be synthetic edge from thread to local
+                    state.appendAddressToIdMapOnly(localId);
+                    // NOT a direct GC root — added as synthetic edge from thread object (MAT parity)
                     appendThreadLocal(state.threadLocalsBySerial, threadSerial, localId);
                 }
                 case HPROF_GC_CLASS_DUMP -> {
@@ -1734,6 +1734,7 @@ public final class HeapGraphBuilder {
                 for (int i = lo; i < hi; i++) {
                     int raw = chunkGet(targets, i);
                     boolean excl = (raw & Integer.MIN_VALUE) != 0;
+                    if (excl) { logicalEdgeIdx++; continue; } // skip excluded: don't affect dominator tree
                     int src = raw & Integer.MAX_VALUE;
                     int delta = src - prev;
                     prev = src;
@@ -1743,7 +1744,6 @@ public final class HeapGraphBuilder {
                         singleBuf = Arrays.copyOf(singleBuf, Math.min(singleBuf.length * 2, VByte.CHUNK_SIZE - 1));
                     }
                     streamPos = VByte.encode(delta, singleBuf, streamPos);
-                    if (excl) newExcluded.set(logicalEdgeIdx);
                     logicalEdgeIdx++;
                 }
             }
@@ -1786,6 +1786,7 @@ public final class HeapGraphBuilder {
                 for (int i = lo; i < hi; i++) {
                     int raw = chunkGet(targets, i);
                     boolean excl = (raw & Integer.MIN_VALUE) != 0;
+                    if (excl) { logicalEdgeIdx++; continue; } // skip excluded: don't affect dominator tree
                     int src = raw & Integer.MAX_VALUE;
                     int delta = src - prev;
                     prev = src;
@@ -1803,7 +1804,6 @@ public final class HeapGraphBuilder {
                     }
 
                     streamPos = VByte.encode(delta, stream, streamPos);
-                    if (excl) newExcluded.set(logicalEdgeIdx);
                     logicalEdgeIdx++;
                 }
             }

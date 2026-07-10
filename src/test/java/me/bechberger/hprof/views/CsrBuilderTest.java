@@ -98,6 +98,7 @@ class CsrBuilderTest {
     @Test
     void excludedEdgeFlagSetCorrectly() {
         // 2-node graph: 0→1 with excluded edge (matching exclude pair)
+        // Excluded edges are removed from the inbound stream entirely (not included as marked edges).
         int n = 2;
         HeapGraph g = stub(n);
         // Exclude pair: classIdx=5, nameIdx=3
@@ -107,13 +108,14 @@ class CsrBuilderTest {
         b.countEdge(1);
         b.finishCounting();
 
-        // addEdge: src=0, dst=1, nameIdx=3, srcClassIdx=5 → should be excluded
+        // addEdge: src=0, dst=1, nameIdx=3, srcClassIdx=5 → should be excluded (not in stream)
         b.addEdge(0, 1, (short)3, (short)5);
         b.restoreOffsets();
         b.encodeVByteWithEmbeddedFlags();
 
-        // The single edge should have the exclude flag set
-        assertTrue(g.excludedEdge.get(0), "edge 0 should be excluded");
+        // Excluded edge should NOT appear in the inbound stream
+        List<Integer> preds1 = iteratePreds(g, 1);
+        assertTrue(preds1.isEmpty(), "excluded edge should not appear in inbound stream");
     }
 
     @Test
@@ -124,11 +126,30 @@ class CsrBuilderTest {
         CsrBuilder b = new CsrBuilder(g, n, 1);
         b.countEdge(1);
         b.finishCounting();
-        // Different class + name → not excluded
+        // Different class + name → not excluded, should appear in stream
         b.addEdge(0, 1, (short)4, (short)6);
         b.restoreOffsets();
         b.encodeVByteWithEmbeddedFlags();
-        assertFalse(g.excludedEdge.get(0), "edge 0 should not be excluded");
+        List<Integer> preds1 = iteratePreds(g, 1);
+        assertFalse(preds1.isEmpty(), "non-excluded edge should appear in inbound stream");
+    }
+
+    @Test
+    void classMetaEdgeAlwaysExcluded() {
+        // Class meta edges (nameIdx == Short.MIN_VALUE) must be excluded from the inbound
+        // stream regardless of excludePairs — they are pseudo references (instance→classObj,
+        // classObj→superClass/classLoader) that MAT's dominator tree skips.
+        int n = 2;
+        HeapGraph g = stub(n);
+        g.excludePairs = null; // no user-configured excludes
+        CsrBuilder b = new CsrBuilder(g, n, 1);
+        b.countEdge(1);
+        b.finishCounting();
+        b.addEdge(0, 1, Short.MIN_VALUE, (short)0);
+        b.restoreOffsets();
+        b.encodeVByteWithEmbeddedFlags();
+        List<Integer> preds1 = iteratePreds(g, 1);
+        assertTrue(preds1.isEmpty(), "class meta edge (Short.MIN_VALUE) must not appear in inbound stream");
     }
 
     @Test
