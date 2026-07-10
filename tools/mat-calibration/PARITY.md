@@ -100,21 +100,31 @@ These are intentional divergences, not bugs:
 
 ## RSS performance (pc52bs2job, 34 GB HPROF, 514 M objects)
 
-Measured 2026-07-10 with optimizations: deferred idomD, excluded-edges skip,
-`G1PeriodicGCInterval=20 G1HeapRegionSize=2m` GC flags + chunk-by-chunk inbound VByte encoding.
+Measured 2026-07-11 with optimizations: deferred idomD in DOM, excluded-edges skip,
+`G1PeriodicGCInterval=20 G1HeapRegionSize=2m` GC flags + chunk-by-chunk inbound VByte encoding
++ progressive fwdTargets chunk freeing during DFS + BitSet visited in RPO.
 
 | Phase | RSS after GC | Wall time |
 |-------|-------------:|----------:|
-| A1    | 20.8 GB      | 58.0 s    |
-| A2    | 23.7 GB      | 403.0 s   |
-| RPO   | 29.0 GB      | 20.2 s    |
-| DOM   | 18.1 GB      | 149.5 s   |
-| Retained | 19.4 GB   | 23.9 s    |
+| A1    | 21.2 GB      | 59.1 s    |
+| A2    | 24.3 GB      | 404.9 s   |
+| RPO   | 25.6 GB      | 32.7 s    |
+| DOM   | 17.0 GB      | 155.3 s   |
+| Retained | 19.8 GB   | 23.5 s    |
 
-- **Peak RSS**: 30.4 GB (`/usr/bin/time -v` maximum RSS — dominated by RPO phase with fwdTargets still live)
-- **A2 peak**: 24.7 GB (↓ from 30.7 GB; chunk-by-chunk VByte encoding overlaps only ~1 source chunk at a time)
-- **Total elapsed**: 11:29 (wall), 655 s tool time + 33 s report write
-- **CPU**: 741% average (8-core parallel I/O + dominator phases)
+- **Peak RSS**: 29.5 GB (`/usr/bin/time -v` maximum RSS — dominated by DOM Phase 1 peak while inbound CSR + sdom/label/ancestor are simultaneously live)
+- **DOM Phase 1 transient**: ~27.4 GB (after phase1+free log point; down from ~31 GB)
+- **A2 peak**: 24.7 GB (chunk-by-chunk VByte encoding overlaps only ~1 source chunk at a time)
+- **Total elapsed**: 11:48 (wall), 675 s tool time + 31 s report write
+- **CPU**: 728% average (8-core parallel I/O + dominator phases)
+
+### RSS reduction history (pc52bs2job, 514 M objects)
+
+| Optimization | Peak RSS | Δ |
+|---|---:|---:|
+| Baseline | 30.4 GB | — |
+| + Chunk-by-chunk inbound VByte encoding | 30.4 GB | 0 (A2 peak: 30.7→24.7 GB) |
+| + Progressive fwdTargets chunk freeing + BitSet RPO + deferred idomD DOM | **29.5 GB** | **−0.9 GB** |
 
 ## Algorithm notes
 
