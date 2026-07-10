@@ -262,13 +262,14 @@ public final class HeapGraphBuilder {
         Log.verbose("  [RSS] after RPO+GC: %,d KB", Log.rssKb());
         DominatorTree.compute(graph);
         if (freePostDom) {
-            // Free inbound CSR — only consumed by DominatorTree; never read again after this point.
-            // For large heaps the VByte stream can be 200–600 MB; freeing it here is the biggest win.
+            // Free inbound CSR — only consumed by DominatorTree; freed inside DOM after Phase 1.
+            // Null the fields here in case they weren't cleared inside (defensive).
             graph.inboundStream  = null;
             graph.inboundOffsets = null;
-            // GC root arrays only needed through DOM (DominatorTree.compute reads gcRootIds for vrAdjacent)
+            // GC root arrays only needed through DOM (DominatorTree uses gcRootIds/isGCRoot for vrAdjacent)
             graph.gcRootIds   = null;
             graph.gcRootTypes = null;
+            graph.isGCRoot    = null;
         }
         System.gc();
         long t4 = System.currentTimeMillis();
@@ -880,7 +881,6 @@ public final class HeapGraphBuilder {
                 f.freeFieldArrays();
             }
         }
-        graph.isGCRoot   = null; // only needed for addGCRoot deduplication during A1/A2
         graph.excludedEdge = null; // built during VByte encoding, never read after A2 completes
 
         // Precompute class-object node indices so idMap.bucket can be freed.

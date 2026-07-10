@@ -146,6 +146,7 @@ final class DominatorTree {
         graph.phaseArrays.donate(graph.inboundOffsets); // int[N+1] ≥ N: accepted
         graph.inboundOffsets = null;
         graph.inboundStream  = null;
+        Log.debug("  [RSS] DOM after phase1+free: %,d KB", Log.rssKb());
 
         // ----------------------------------------------------------------
         // Phase 2: NCA idom computation.
@@ -202,6 +203,7 @@ final class DominatorTree {
         // sdom[] and idomD[] are dead after translation — release before depth pass.
         sdom  = null;
         idomD = null;
+        Log.debug("  [RSS] DOM after phase2+translate: %,d KB", Log.rssKb());
 
         // Take dfsParent directly as depth[] before freeRpoPos nulls it.
         // dfsParent is int[N], same size — reuse avoids a fresh allocation.
