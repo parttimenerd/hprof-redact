@@ -66,111 +66,6 @@ public final class HeapGraphBuilder {
     }
 
     /**
-     * VByte-encode the forward CSR in-place.
-     * Sorts each adjacency row, delta-encodes into byte[][], sets graph.fwdOffsets (as byte offsets)
-     * and graph.fwdStream, then frees graph.fwdTargets. Called once after A2c fill completes.
-     *
-     * Encoding: for each row, store first value absolute, then deltas (all non-negative after sort).
-     * fwdOffsets[v] = byte offset in fwdStream where row v begins; fwdOffsets[N] = total bytes used.
-     * Rows with 0 edges: fwdOffsets[v] == fwdOffsets[v+1].
-     */
-    private static void encodeFwdVByte(HeapGraph graph, int[] fwdOffsets, int[][] fwdTargets,
-                                        int N, int totalFwdSlots) {
-        // Estimate stream byte size: ~1.5 bytes/edge average for a mix of small and large deltas.
-        long estimatedBytes = Math.max((long) totalFwdSlots + totalFwdSlots / 2L, 16L);
-        int[] byteOffsets = new int[N + 1]; // replaces fwdOffsets (currently int counts → becomes byte offsets)
-        long streamPos = 0;
-
-        int[] sortBuf = new int[64]; // reusable sort buffer; grows as needed
-
-        if (estimatedBytes < VByte.CHUNK_SIZE) {
-            byte[] singleBuf = new byte[(int) estimatedBytes];
-
-            for (int v = 0; v < N; v++) {
-                int lo = fwdOffsets[v];
-                int hi = fwdOffsets[v + 1];
-                int rowLen = hi - lo;
-                byteOffsets[v] = (int) streamPos;
-                if (rowLen == 0) continue;
-
-                // Extract row into sortBuf, sort, then delta-encode.
-                if (rowLen > sortBuf.length) sortBuf = new int[rowLen];
-                extractFwdRow(fwdTargets, lo, rowLen, sortBuf);
-                java.util.Arrays.sort(sortBuf, 0, rowLen);
-
-                int prev = 0;
-                for (int i = 0; i < rowLen; i++) {
-                    int val = sortBuf[i];
-                    int delta = val - prev;
-                    prev = val;
-                    if ((int) streamPos + 8 > singleBuf.length) {
-                        singleBuf = java.util.Arrays.copyOf(singleBuf,
-                                Math.min(singleBuf.length * 2, VByte.CHUNK_SIZE - 1));
-                    }
-                    streamPos = VByte.encode(delta, singleBuf, (int) streamPos);
-                }
-            }
-            byteOffsets[N] = (int) streamPos;
-            if ((int) streamPos < singleBuf.length)
-                singleBuf = java.util.Arrays.copyOf(singleBuf, (int) streamPos);
-            graph.fwdTargets = null;
-            graph.fwdOffsets = byteOffsets;
-            graph.fwdStream  = new byte[][] { singleBuf };
-        } else {
-            int numChunks = (int) ((estimatedBytes + VByte.CHUNK_SIZE - 1) >>> VByte.CHUNK_BITS);
-            if (numChunks < 1) numChunks = 1;
-            byte[][] stream = new byte[numChunks][];
-            for (int c = 0; c < numChunks; c++) stream[c] = new byte[VByte.CHUNK_SIZE];
-
-            for (int v = 0; v < N; v++) {
-                int lo = fwdOffsets[v];
-                int hi = fwdOffsets[v + 1];
-                int rowLen = hi - lo;
-                byteOffsets[v] = (int) streamPos;
-                if (rowLen == 0) continue;
-
-                if (rowLen > sortBuf.length) sortBuf = new int[rowLen];
-                extractFwdRow(fwdTargets, lo, rowLen, sortBuf);
-                java.util.Arrays.sort(sortBuf, 0, rowLen);
-
-                int prev = 0;
-                for (int i = 0; i < rowLen; i++) {
-                    int delta = sortBuf[i] - prev;
-                    prev = sortBuf[i];
-                    int chunkIdx = (int) (streamPos >>> VByte.CHUNK_BITS);
-                    int chunkOff = (int) (streamPos & VByte.CHUNK_MASK);
-                    if (chunkOff + 8 > VByte.CHUNK_SIZE) {
-                        if (chunkIdx + 1 >= stream.length) {
-                            stream = java.util.Arrays.copyOf(stream, stream.length + 2);
-                        }
-                        if (stream[chunkIdx + 1] == null) {
-                            stream[chunkIdx + 1] = new byte[VByte.CHUNK_SIZE];
-                        }
-                    }
-                    streamPos = VByte.encode(delta, stream, streamPos);
-                }
-            }
-            byteOffsets[N] = (int) streamPos;
-            // Trim last chunk
-            int lastChunk = (int) (streamPos >>> VByte.CHUNK_BITS);
-            int lastOff   = (int) (streamPos & VByte.CHUNK_MASK);
-            if (lastOff > 0 && lastChunk < stream.length && stream[lastChunk] != null) {
-                stream[lastChunk] = java.util.Arrays.copyOf(stream[lastChunk], lastOff);
-            }
-            graph.fwdTargets = null;
-            graph.fwdOffsets = byteOffsets;
-            graph.fwdStream  = stream;
-        }
-    }
-
-    private static void extractFwdRow(int[][] chunks, int lo, int len, int[] out) {
-        for (int i = 0; i < len; i++) {
-            int pos = lo + i;
-            out[i] = chunks[pos >>> HeapGraph.TARGETS_CHUNK_BITS][pos & HeapGraph.TARGETS_CHUNK_MASK];
-        }
-    }
-
-    /**
      * MAT-parity per-class instance size — mirrors MAT's calculateInstanceSize + calculateSizeRecursive.
      * Caches results in {@code cache}; recurses through superclass chain via {@code classSuperIds}.
      */
@@ -982,13 +877,9 @@ public final class HeapGraphBuilder {
         graph.phaseArrays.donate(fwdCursor);
         fwdCursor = null;
 
-        // VByte-encode the forward CSR in-place: sort each row, encode deltas, free fwdTargets.
-        // Trades ~6.7 GB int[][] for ~2-3 GB byte[][] on large heaps.
+        // Store compact forward CSR — fwdOffsets[i+1] is exact, no fwdEnds needed
         graph.fwdOffsets = fwdOffsets;
         graph.fwdTargets = fwdTargets;
-        encodeFwdVByte(graph, fwdOffsets, fwdTargets, N, totalFwdSlots);
-        // graph.fwdTargets is now null (freed inside encodeFwdVByte); graph.fwdStream is set.
-        Log.debug("  [RSS] A2c after fwd VByte encode+free: %,d KB", Log.rssKb());
 
         // Free per-class field layout arrays — only needed during A2 edge scanning
         for (ClassRecord cr : graph.classList) {
