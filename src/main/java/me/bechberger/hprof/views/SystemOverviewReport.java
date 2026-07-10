@@ -6,6 +6,7 @@ package me.bechberger.hprof.views;
 
 import java.io.PrintWriter;
 import java.util.ArrayList;
+import java.util.BitSet;
 import java.util.Comparator;
 import java.util.List;
 
@@ -84,7 +85,7 @@ final class SystemOverviewReport {
 
         // Instance contribution: use pre-computed hasSameClassAncestor bit.
         // ClassObj contribution: walk idom chain for classObj nodes only (at most classCount nodes ≈ thousands).
-        boolean[] hasAncestorAsClassObj = (classObjClassIdx != null) ? new boolean[N] : null;
+        BitSet hasAncestorAsClassObj = (classObjClassIdx != null) ? new BitSet(N) : null;
 
         if (hasAncestorAsClassObj != null) {
             for (int v = 1; v < N; v++) {
@@ -97,7 +98,7 @@ final class SystemOverviewReport {
                 while (cur != HeapGraph.VIRTUAL_ROOT) {
                     short curInst = classIndex[cur];
                     short curObj = (cur < classObjClassIdx.length) ? classObjClassIdx[cur] : -1;
-                    if (curInst == ciObj || curObj == ciObj) { hasAncestorAsClassObj[v] = true; break; }
+                    if (curInst == ciObj || curObj == ciObj) { hasAncestorAsClassObj.set(v); break; }
                     cur = idom[cur];
                 }
             }
@@ -114,7 +115,7 @@ final class SystemOverviewReport {
             }
             if (hasAncestorAsClassObj != null && i < classObjClassIdx.length) {
                 short ciObj = classObjClassIdx[i];
-                if (ciObj >= 0 && ciObj < classCount && !hasAncestorAsClassObj[i]) {
+                if (ciObj >= 0 && ciObj < classCount && !hasAncestorAsClassObj.get(i)) {
                     classRetained[ciObj] += graph.retainedSizeOf(i);
                 }
             }
