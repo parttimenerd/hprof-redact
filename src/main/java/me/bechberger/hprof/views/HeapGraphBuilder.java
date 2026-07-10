@@ -249,14 +249,17 @@ public final class HeapGraphBuilder {
         IdMap idMap = new IdMap();
         long t0 = System.currentTimeMillis();
         HeapGraph graph = phaseA1(idMap);
-        System.gc(); // free A1State, utf8Strings, IdMap.buf (raw before sort)
+        System.gc();
         long t1 = System.currentTimeMillis();
+        Log.verbose("  [RSS] after A1+GC: %,d KB", Log.rssKb());
         phaseA2(graph);
-        System.gc(); // free outDegree/inDegree intermediates, inboundTargets
+        System.gc();
         long t2 = System.currentTimeMillis();
+        Log.verbose("  [RSS] after A2+GC: %,d KB", Log.rssKb());
         RpoDfs.compute(graph);
-        System.gc(); // free fwdOffsets/fwdTargets (freeFwdCsr called inside RpoDfs)
+        System.gc();
         long t3 = System.currentTimeMillis();
+        Log.verbose("  [RSS] after RPO+GC: %,d KB", Log.rssKb());
         DominatorTree.compute(graph);
         if (freePostDom) {
             // Free inbound CSR — only consumed by DominatorTree; never read again after this point.
@@ -267,14 +270,16 @@ public final class HeapGraphBuilder {
             graph.gcRootIds   = null;
             graph.gcRootTypes = null;
         }
-        System.gc(); // free dfsPos/dfsOrder/dfsParent (freeRpoPos called inside DominatorTree)
+        System.gc();
         long t4 = System.currentTimeMillis();
+        Log.verbose("  [RSS] after DOM+GC: %,d KB", Log.rssKb());
         graph.computeUnreachableStats();
         buildClassObjClassIdx(graph);
         RetainedSizes.compute(graph);
         long t5 = System.currentTimeMillis();
+        Log.verbose("  [RSS] after retained: %,d KB", Log.rssKb());
         graph.heapTotalBytes = graph.totalHeapBytes();
-        System.err.printf("  phases: A1=%.1fs  A2=%.1fs  RPO=%.1fs  DOM=%.1fs  retained=%.1fs%n",
+        Log.info("  phases: A1=%.1fs  A2=%.1fs  RPO=%.1fs  DOM=%.1fs  retained=%.1fs",
                 (t1-t0)/1e3, (t2-t1)/1e3, (t3-t2)/1e3, (t4-t3)/1e3, (t5-t4)/1e3);
         return graph;
     }
@@ -822,6 +827,7 @@ public final class HeapGraphBuilder {
         }
         graph.phaseArrays.donate(ibCursor);
         ibCursor = null;
+        Log.debug("  [RSS] A2b after inb fill: %,d KB", Log.rssKb());
 
         // VByte-encode inbound CSR; inboundTargets freed inside encoder.
         // Encoder sets graph.inboundOffsets (long[]) and graph.inboundStream (byte[][]) directly.
@@ -830,10 +836,12 @@ public final class HeapGraphBuilder {
         // inboundTargets is now null (freed inside encoder); donate inboundOffsets int[] for reuse
         graph.phaseArrays.donate(inboundOffsets);
         inboundOffsets = null;
+        Log.debug("  [RSS] A2b after inb encode+free: %,d KB", Log.rssKb());
 
         // --- Sub-pass A.2c: fill fwdTargets only (inboundTargets already freed) ---
         // At this point inboundTargets is gone; allocating fwdTargets now avoids the overlap.
         int[][] fwdTargets = allocChunked(totalFwdSlots);
+        Log.debug("  [RSS] A2c after fwdTargets alloc: %,d KB", Log.rssKb());
         int[] fwdCursor = graph.phaseArrays.takeRaw(); // will be fully overwritten by arraycopy
         System.arraycopy(fwdOffsets, 0, fwdCursor, 0, N);
 
