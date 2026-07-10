@@ -160,7 +160,6 @@ final class SystemOverviewReport {
                     classRetained[ciObj] += graph.retainedSizeOf(i);
                 }
             }
-        }
 
         // sort by retained desc
         List<Integer> indices = new ArrayList<>(classCount);

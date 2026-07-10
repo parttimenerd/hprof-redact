@@ -113,6 +113,9 @@ public final class HeapGraph {
     final LongIntHashMap classIdToIndex;         // classId → index in classList
     final IntIntHashMap classSerialToIndex;       // classSerial → index in classList
 
+    /** classList index → node index of that class's class-object, or -1. Computed after A2, replaces idMap.indexOf calls. */
+    int[] classNodeIdx;
+
     // ---- Interned field names ----
     /** Maps HPROF nameId → short intern index (0 = no-name sentinel; real names start at 1). */
     final LongShortHashMap fieldNameIntern;

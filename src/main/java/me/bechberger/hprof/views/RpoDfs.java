@@ -32,7 +32,7 @@ final class RpoDfs {
         int[] fwdOffsets = graph.fwdOffsets;
         int[][] fwdTargets = graph.fwdTargets;
 
-        int[] rpoOrder = new int[N];
+        int[] rpoOrder = graph.phaseArrays.takeRaw(); // donated by A2; avoids fresh int[N]
 
         // DFS pre-order: assigned when a node is first pushed onto the stack.
         // dfsPos[v] = -1 means not yet visited; >= 0 means visited (also serves as visited-sentinel).
@@ -48,9 +48,9 @@ final class RpoDfs {
         int[] cursorStack = new int[stackCap];
         int top = -1;
 
-        // Post-order sequence (collected in reverse)
-        int[] postOrder = new int[N];
-        int postCount  = 0;
+        // Fill rpoOrder in reverse during DFS (avoids a separate postOrder array).
+        // rpoIdx counts down from N; at completion postCount = N - rpoIdx.
+        int rpoIdx     = N;
         int dfsCount   = 0; // pre-order counter
 
         // Push virtual root (use Integer.MIN_VALUE as in-progress sentinel in dfsPos
@@ -91,15 +91,14 @@ final class RpoDfs {
             }
             if (!pushed) {
                 cursorStack[top] = cursor;
-                if (postCount < N) postOrder[postCount++] = node;
+                rpoOrder[--rpoIdx] = node;
                 top--;
             }
         }
 
-        // RPO = reverse of post-order
-        for (int i = 0; i < postCount; i++) {
-            rpoOrder[i] = postOrder[postCount - 1 - i];
-        }
+        // RPO entries are in rpoOrder[rpoIdx..N-1]; shift to rpoOrder[0..postCount-1].
+        int postCount = N - rpoIdx;
+        System.arraycopy(rpoOrder, rpoIdx, rpoOrder, 0, postCount);
 
         graph.rpoOrder  = rpoOrder;
         graph.dfsPos    = dfsPos;

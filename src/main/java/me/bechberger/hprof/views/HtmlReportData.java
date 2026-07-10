@@ -151,9 +151,7 @@ final class HtmlReportData {
 
         // Add class-object retained to each class's retained (MAT parity).
         for (int ci = 0; ci < classCount; ci++) {
-            long classId = graph.classList.get(ci).classId();
-            if (classId == 0L) continue;
-            int cdIdx = graph.idMap.indexOf(classId) + 1;
+            int cdIdx = graph.classNodeIdx != null ? graph.classNodeIdx[ci] : -1;
             if (cdIdx <= 0 || cdIdx >= N) continue;
             if (graph.idom[cdIdx] == HeapGraph.UNDEFINED) continue;
             classRetained[ci] += graph.retainedSizeOf(cdIdx);
