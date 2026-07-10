@@ -347,8 +347,8 @@ final class HtmlReportData {
         // Group-retained = sum of retainedSize for top-level dominators (idom == VIRTUAL_ROOT) per class.
         {
             long[] retainedByClass = new long[classCount];
-            long[] shallowByClass  = shallowByClassScratch; // reuse scratch (already zeroed)
-            long[] countByClass    = countByClassScratch;   // reuse scratch (already zeroed)
+            Arrays.fill(shallowByClassScratch, 0L); long[] shallowByClass = shallowByClassScratch;
+            Arrays.fill(countByClassScratch,   0L); long[] countByClass   = countByClassScratch;
             for (int i = 1; i < graph.N; i++) {
                 short ci = graph.classIndex[i];
                 if (ci < 0 || ci >= classCount) continue;
