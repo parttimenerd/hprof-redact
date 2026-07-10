@@ -810,10 +810,10 @@ public final class HeapGraphBuilder {
         final int[] ibC = ibCursor;
         try (Parser p = openParser()) {
             scanEdgesWithNames(p, graph, (srcIdx, dstIdx, nameIdx, srcClassIdx) -> {
-                if (!isExcluded(excludePairs, srcClassIdx, nameIdx)) {
-                    int pos = ibC[dstIdx]++;
-                    ibT[pos >>> HeapGraph.TARGETS_CHUNK_BITS][pos & HeapGraph.TARGETS_CHUNK_MASK] = srcIdx;
-                }
+                boolean excluded = isExcluded(excludePairs, srcClassIdx, nameIdx);
+                int pos = ibC[dstIdx]++;
+                ibT[pos >>> HeapGraph.TARGETS_CHUNK_BITS][pos & HeapGraph.TARGETS_CHUNK_MASK]
+                    = excluded ? (srcIdx | Integer.MIN_VALUE) : srcIdx;
             });
         }
         // Fill synthetic thread→local inbound edges
@@ -879,6 +879,7 @@ public final class HeapGraphBuilder {
 
         // Store compact forward CSR — fwdOffsets[i+1] is exact, no fwdEnds needed
         graph.fwdOffsets = fwdOffsets;
+        graph.fwdEnds    = null;
         graph.fwdTargets = fwdTargets;
 
         // Free per-class field layout arrays — only needed during A2 edge scanning
@@ -906,14 +907,13 @@ public final class HeapGraphBuilder {
     private void countOutDegrees(Parser p, HeapGraph graph, int[] outDegree, int[] inDegree) throws IOException {
         int ids = graph.idSize;
         IdMap idMap = graph.idMap;
-        int[][] excludePairs = graph.excludePairs;
         while (true) {
             int tag = p.readTag();
             if (tag < 0) break;
             p.readU4();
             long length = p.readU4();
             if (tag == HPROF_HEAP_DUMP || tag == HPROF_HEAP_DUMP_SEGMENT) {
-                countOutDegreesInSegment(p, (int) length, ids, idMap, graph, outDegree, inDegree, excludePairs);
+                countOutDegreesInSegment(p, (int) length, ids, idMap, graph, outDegree, inDegree);
             } else {
                 p.skipFully(length);
             }
@@ -921,8 +921,7 @@ public final class HeapGraphBuilder {
     }
 
     private void countOutDegreesInSegment(Parser p, int segLen, int ids, IdMap idMap,
-                                           HeapGraph graph, int[] outDegree, int[] inDegree,
-                                           int[][] excludePairs) throws IOException {
+                                           HeapGraph graph, int[] outDegree, int[] inDegree) throws IOException {
         int remaining = segLen;
         int N = graph.N;
         while (remaining > 0) {
@@ -950,29 +949,23 @@ public final class HeapGraphBuilder {
                     if (dataLen > instanceDataBuf.length) instanceDataBuf = new byte[dataLen];
                     p.readBytesInto(instanceDataBuf, dataLen); remaining -= dataLen;
                     if (srcIdx >= 0 && srcIdx < N) {
-                        // class-object edge (nameIdx=Short.MIN_VALUE in scan → excluded from inbound CSR)
+                        // class-object edge (always emitted)
                         int classObjIdx = objectIndex(idMap, classId);
                         if (classObjIdx >= 0 && classObjIdx < N) {
-                            outDegree[srcIdx]++; // still in forward CSR
-                            // NOT counted in inDegree: excluded from inbound CSR used by dominator
+                            outDegree[srcIdx]++;
+                            inDegree[classObjIdx]++;
                         }
-                        // object field edges — read actual refs to get exact inbound counts
+                        // object field edges — read actual refs to get exact counts
                         if (cr != null) {
                             byte[] data = instanceDataBuf;
-                            int[] offsets = cr.objectFieldOffsets();
-                            short[] nameIds = cr.objectFieldNameIds();
-                            for (int fi = 0; fi < offsets.length; fi++) {
-                                int off = offsets[fi];
+                            for (int off : cr.objectFieldOffsets()) {
                                 if (off + ids > data.length) continue;
                                 long refId = readIdFromBytes(data, off, ids);
                                 if (refId != 0) {
                                     int dstIdx = objectIndex(idMap, refId);
                                     if (dstIdx >= 0 && dstIdx < N) {
                                         outDegree[srcIdx]++;
-                                        short nameIdx = fi < nameIds.length ? nameIds[fi] : ClassRecord.NO_NAME;
-                                        if (!isExcluded(excludePairs, classIdx, nameIdx)) {
-                                            inDegree[dstIdx]++;
-                                        }
+                                        inDegree[dstIdx]++;
                                     }
                                 }
                             }
@@ -984,15 +977,15 @@ public final class HeapGraphBuilder {
                     long elemClassId = p.readId();
                     remaining -= ids + 4 + 4 + ids;
                     int srcIdx = objectIndex(idMap, objId);
-                    // class-object edge (nameIdx=Short.MIN_VALUE → excluded from inbound CSR)
+                    // class-object edge (always emitted)
                     if (srcIdx >= 0 && srcIdx < N && elemClassId != 0) {
                         int classObjIdx = objectIndex(idMap, elemClassId);
                         if (classObjIdx >= 0 && classObjIdx < N) {
-                            outDegree[srcIdx]++; // still in forward CSR
-                            // NOT in inDegree: excluded from inbound CSR
+                            outDegree[srcIdx]++;
+                            inDegree[classObjIdx]++;
                         }
                     }
-                    // read each element ref to get exact counts (array elements never excluded)
+                    // read each element ref to get exact counts
                     for (int i = 0; i < numElem; i++) {
                         long refId = p.readId(); remaining -= ids;
                         if (refId != 0 && srcIdx >= 0 && srcIdx < N) {
@@ -1030,19 +1023,19 @@ public final class HeapGraphBuilder {
         int srcIdx = objectIndex(idMap, classId);
         int N = graph.N;
 
-        // Emit classObj→superClass and classObj→classLoader (nameIdx=Short.MIN_VALUE → excluded from inbound CSR)
+        // Emit classObj→superClass and classObj→classLoader
         if (srcIdx >= 0 && srcIdx < N) {
             if (superClassId != 0) {
                 int dstIdx = objectIndex(idMap, superClassId);
-                if (dstIdx >= 0 && dstIdx < N) { outDegree[srcIdx]++; /* NOT inDegree: excluded */ }
+                if (dstIdx >= 0 && dstIdx < N) { outDegree[srcIdx]++; inDegree[dstIdx]++; }
             }
             if (classLoaderId != 0) {
                 int dstIdx = objectIndex(idMap, classLoaderId);
-                if (dstIdx >= 0 && dstIdx < N) { outDegree[srcIdx]++; /* NOT inDegree: excluded */ }
+                if (dstIdx >= 0 && dstIdx < N) { outDegree[srcIdx]++; inDegree[dstIdx]++; }
             }
         }
 
-        // Constant pool (nameIdx=Short.MIN_VALUE in scan → excluded from inbound CSR)
+        // Constant pool
         int cpCount = p.readU2(); consumed += 2;
         for (int i = 0; i < cpCount; i++) {
             p.readU2(); consumed += 2;
@@ -1052,13 +1045,13 @@ public final class HeapGraphBuilder {
                 long refId = p.readId(); consumed += ids;
                 if (refId != 0) {
                     int dstIdx = objectIndex(idMap, refId);
-                    if (dstIdx >= 0 && dstIdx < N) { outDegree[srcIdx]++; /* NOT inDegree: excluded */ }
+                    if (dstIdx >= 0 && dstIdx < N) { outDegree[srcIdx]++; inDegree[dstIdx]++; }
                 }
             } else {
                 p.skipFully(sz); consumed += sz;
             }
         }
-        // Static fields (proper nameIdx in scan → NOT excluded; count in both out+inDegree)
+        // Static fields
         int sfCount = p.readU2(); consumed += 2;
         for (int i = 0; i < sfCount; i++) {
             p.skipFully(ids); consumed += ids; // name id

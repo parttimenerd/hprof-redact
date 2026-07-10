@@ -135,23 +135,8 @@ final class IdMap {
             // address that sits exactly at bStart of bucket b.
             hi = (b + 2 <= bucketCount) ? bucket[b + 2] : size;
         } else {
-            // Bucket freed — binary search to narrow the window (O(log N)).
-            if (compressedOops) {
-                int key = (int) (address >>> 3);
-                int blo = 0, bhi = size;
-                while (blo < bhi) {
-                    int bmid = (blo + bhi) >>> 1;
-                    if (intBuf[bmid] < key) blo = bmid + 1; else bhi = bmid;
-                }
-                lo = blo; hi = Math.min(blo + 2, size);
-            } else {
-                int blo = 0, bhi = size;
-                while (blo < bhi) {
-                    int bmid = (blo + bhi) >>> 1;
-                    if (buf[bmid] < address) blo = bmid + 1; else bhi = bmid;
-                }
-                lo = blo; hi = Math.min(blo + 2, size);
-            }
+            // Bucket freed — fall back to full binary search.
+            lo = 0; hi = size;
         }
 
         // Linear scan within the small window (~4 entries average)
@@ -179,7 +164,7 @@ final class IdMap {
         bucket = null;
     }
 
-    /** Release only the bucket index (~N/8 * 4 bytes). indexOf() falls back to O(log N) binary search. */
+    /** Release only the bucket index (~N/8 * 4 bytes). indexOf() must not be called after this. */
     void freeBucket() {
         bucket = null;
     }
