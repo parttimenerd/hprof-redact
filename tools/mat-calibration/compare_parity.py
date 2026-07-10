@@ -805,8 +805,8 @@ def main():
                     help='Measure wall time and peak RSS for our tool and MAT')
     ap.add_argument('--mat-sh',        type=Path,
                     help='Path to MAT ParseHeapDump.sh (required with --benchmark)')
-    ap.add_argument('--max-size',      type=int, default=500,
-                    metavar='MB',      help='Skip dumps larger than this many MB (default: 500)')
+    ap.add_argument('--max-size',      type=int, default=2000,
+                    metavar='MB',      help='Skip dumps larger than this many MB (default: 2000)')
     args = ap.parse_args()
 
     if args.benchmark:
