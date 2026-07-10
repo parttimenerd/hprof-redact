@@ -80,9 +80,9 @@ final class DominatorTree {
             sdom[d]  = d; // initial: sdom is itself (identity)
         }
 
-        // Nodes with implicit VIRTUAL_ROOT predecessor (GC roots)
-        BitSet vrAdjacent = new BitSet(N);
-        for (int i = 0; i < graph.gcRootCount;  i++) vrAdjacent.set(graph.gcRootIds[i]);
+        // graph.isGCRoot is a pre-built BitSet of GC root node indices — reuse it
+        // instead of allocating a separate vrAdjacent BitSet(N).
+        BitSet vrAdjacent = graph.isGCRoot;
 
         // ----------------------------------------------------------------
         // Phase 1: Semi-dominator computation.
