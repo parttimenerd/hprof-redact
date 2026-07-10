@@ -20,6 +20,8 @@ import java.util.Arrays;
  * </ul>
  *
  * Frees {@code graph.fwdOffsets} and {@code graph.fwdTargets} after the DFS.
+ * For large heaps, {@code fwdTargets} chunks are freed progressively as the DFS
+ * finishes with each chunk (refcount-based), reducing peak RSS during this phase.
  *
  * Note: rpoPos[] is NOT produced here. Reachability is determined via dfsPos[v] >= 0.
  */
@@ -48,20 +50,34 @@ final class RpoDfs {
         int[] cursorStack = new int[stackCap];
         int top = -1;
 
-        // Fill rpoOrder in reverse during DFS (avoids a separate postOrder array).
-        // rpoIdx counts down from N; at completion postCount = N - rpoIdx.
-        int rpoIdx     = N;
-        int dfsCount   = 0; // pre-order counter
+        int rpoIdx   = N;
+        int dfsCount = 0;
 
-        // Push virtual root (use Integer.MIN_VALUE as in-progress sentinel in dfsPos
-        // to distinguish "on stack but not finished" from "not visited"; in practice
-        // dfsPos holds actual pre-order numbers, and the visited check is dfsPos[v] >= 0)
         dfsPos[HeapGraph.VIRTUAL_ROOT]    = dfsCount;
         dfsOrder[dfsCount++]              = HeapGraph.VIRTUAL_ROOT;
         dfsParent[HeapGraph.VIRTUAL_ROOT] = -1;
         top++;
         nodeStack[top]   = HeapGraph.VIRTUAL_ROOT;
         cursorStack[top] = 0;
+
+        // Per-chunk refcount: how many nodes have at least one forward edge in each chunk.
+        // When a node is popped (post-order), its chunk refcounts are decremented.
+        // A chunk is freed when its refcount reaches zero.
+        // Only used for large heaps where fwdTargets has multiple chunks.
+        int[] chunkRefs = null;
+        if (fwdTargets != null && fwdTargets.length > 1) {
+            chunkRefs = new int[fwdTargets.length];
+            for (int v = 1; v < N; v++) { // skip VIRTUAL_ROOT (its edges are gcRootIds)
+                int lo = fwdOffsets[v];
+                int hi = fwdOffsets[v + 1];
+                if (lo >= hi) continue;
+                int loChunk = lo  >>> HeapGraph.TARGETS_CHUNK_BITS;
+                int hiChunk = (hi - 1) >>> HeapGraph.TARGETS_CHUNK_BITS;
+                // Increment refcount for each chunk this node's edge range touches.
+                // Most nodes touch exactly one chunk; spanning two is rare.
+                for (int c = loChunk; c <= hiChunk; c++) chunkRefs[c]++;
+            }
+        }
 
         while (top >= 0) {
             int node   = nodeStack[top];
@@ -93,6 +109,19 @@ final class RpoDfs {
                 cursorStack[top] = cursor;
                 rpoOrder[--rpoIdx] = node;
                 top--;
+                // Decrement chunk refcounts for the popped node's edge range.
+                // Free any chunk whose refcount just hit zero.
+                if (chunkRefs != null && node != HeapGraph.VIRTUAL_ROOT) {
+                    int lo = fwdOffsets[node];
+                    int hi = fwdOffsets[node + 1];
+                    if (lo < hi) {
+                        int loChunk = lo  >>> HeapGraph.TARGETS_CHUNK_BITS;
+                        int hiChunk = (hi - 1) >>> HeapGraph.TARGETS_CHUNK_BITS;
+                        for (int c = loChunk; c <= hiChunk; c++) {
+                            if (--chunkRefs[c] == 0) fwdTargets[c] = null;
+                        }
+                    }
+                }
             }
         }
 
@@ -124,8 +153,10 @@ final class RpoDfs {
         int start = fwdOffsets[node];
         int idx   = start + cursor;
         if (idx < fwdOffsets[node + 1]) {
-            return fwdTargets[idx >>> HeapGraph.TARGETS_CHUNK_BITS][idx & HeapGraph.TARGETS_CHUNK_MASK];
+            int[] chunk = fwdTargets[idx >>> HeapGraph.TARGETS_CHUNK_BITS];
+            return chunk != null ? chunk[idx & HeapGraph.TARGETS_CHUNK_MASK] : -1;
         }
         return -1;
     }
 }
+
