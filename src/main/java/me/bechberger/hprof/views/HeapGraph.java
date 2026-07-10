@@ -75,6 +75,8 @@ public final class HeapGraph {
 
     // ---- RPO traversal arrays (freed after use) ----
     int[] rpoOrder;                  // node at each RPO position (freed after retained sizes)
+    /** Number of valid entries in rpoOrder[]. May be < rpoOrder.length when the array is reused. */
+    int rpoReachable;
     /** DFS pre-order position (order of first visit). Freed after DOM. */
     int[] dfsPos;
     /** Node at each DFS pre-order position. Freed after DOM. */

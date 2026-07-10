@@ -215,7 +215,7 @@ final class DominatorTree {
             // rpoOrder[0] = VIRTUAL_ROOT, already depth 0
             int rpoReachable = 0;
             for (int i = 0; i < N; i++) if (idom[i] != HeapGraph.UNDEFINED || i == HeapGraph.VIRTUAL_ROOT) rpoReachable++;
-            for (int ri = 1; ri < graph.rpoOrder.length; ri++) {
+            for (int ri = 1; ri < rpoReachable; ri++) {
                 int v = graph.rpoOrder[ri];
                 if (v <= 0 || v >= N) continue;
                 int par = idom[v];

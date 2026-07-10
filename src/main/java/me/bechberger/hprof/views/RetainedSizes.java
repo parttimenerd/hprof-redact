@@ -43,7 +43,8 @@ final class RetainedSizes {
         graph.setRetainedSize(HeapGraph.VIRTUAL_ROOT, 0);
 
         // Accumulate in reverse RPO order: skip virtual root (rpoOrder[0])
-        for (int rpoIdx = N - 1; rpoIdx >= 1; rpoIdx--) {
+        int rpoReachable = graph.rpoReachable > 0 ? graph.rpoReachable : N;
+        for (int rpoIdx = rpoReachable - 1; rpoIdx >= 1; rpoIdx--) {
             int v = rpoOrder[rpoIdx];
             if (v == 0) continue; // zero-tail guard: skip virtual root if it appears
             if (idom[v] == HeapGraph.UNDEFINED) continue; // unreachable node

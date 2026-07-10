@@ -100,7 +100,8 @@ final class RpoDfs {
         int postCount = N - rpoIdx;
         System.arraycopy(rpoOrder, rpoIdx, rpoOrder, 0, postCount);
 
-        graph.rpoOrder  = rpoOrder;
+        graph.rpoOrder     = rpoOrder;
+        graph.rpoReachable = postCount;
         graph.dfsPos    = dfsPos;
         graph.dfsOrder  = dfsOrder;
         graph.dfsParent = dfsParent;
