@@ -1780,23 +1780,36 @@ public final class HeapGraphBuilder {
             graph.excludedEdge   = newExcluded;
         }
 
-        /** Encode into chunked byte[][] (heap stream exceeds CHUNK_SIZE). */
+        /** Encode into chunked byte[][] (heap stream exceeds CHUNK_SIZE).
+         *  Source chunks of targets[] are freed (nulled) as soon as the read cursor advances
+         *  past them, overlapping source and dest only one chunk at a time (~0.5 GB overlap
+         *  instead of full 6+ GB source alive throughout). Output chunks are allocated lazily. */
         private static void sortAndEncodeChunked(int[][] targets, int[] offsets, int n,
                 java.util.BitSet newExcluded, long estimatedBytes, HeapGraph graph) {
-            int numChunks = (int) ((estimatedBytes + VByte.CHUNK_SIZE - 1) >>> VByte.CHUNK_BITS);
-            if (numChunks < 1) numChunks = 1;
-            byte[][] stream = new byte[numChunks][];
-            for (int c = 0; c < numChunks; c++) stream[c] = new byte[VByte.CHUNK_SIZE];
+            // Allocate output array but NOT the chunks yet — allocate each lazily.
+            int maxOutChunks = (int) ((estimatedBytes + VByte.CHUNK_SIZE - 1) >>> VByte.CHUNK_BITS) + 2;
+            if (maxOutChunks < 1) maxOutChunks = 1;
+            byte[][] stream = new byte[maxOutChunks][];
 
             int[] byteOffsets = new int[n + 1];
             long streamPos = 0;
             int logicalEdgeIdx = 0;
             int[] rowBuf = null;
+            int lastFreedSrcChunk = -1; // last source chunk index that has been freed
 
             for (int v = 0; v < n; v++) {
                 int lo = offsets[v];
                 int hi = offsets[v + 1];
                 int rowLen = hi - lo;
+
+                // Free source chunks strictly before the chunk containing lo.
+                // A source chunk c covers logical indices [c*CHUNK_SIZE, (c+1)*CHUNK_SIZE).
+                // Once the current row starts in chunk C, all chunks < C will never be read again.
+                int currentSrcChunk = lo >>> HeapGraph.TARGETS_CHUNK_BITS;
+                while (lastFreedSrcChunk < currentSrcChunk - 1) {
+                    lastFreedSrcChunk++;
+                    targets[lastFreedSrcChunk] = null;
+                }
 
                 if (rowLen > 1) {
                     if (rowBuf == null || rowBuf.length < rowLen) rowBuf = new int[rowLen];
@@ -1817,8 +1830,12 @@ public final class HeapGraphBuilder {
 
                     int chunkIdx = (int) (streamPos >>> VByte.CHUNK_BITS);
                     int chunkOff = (int) (streamPos & VByte.CHUNK_MASK);
+                    // Ensure the current output chunk exists (lazy allocation).
+                    if (stream[chunkIdx] == null) {
+                        stream[chunkIdx] = new byte[VByte.CHUNK_SIZE];
+                    }
                     if (chunkOff + 8 > VByte.CHUNK_SIZE) {
-                        // Near end of current full-size chunk: ensure next chunk exists.
+                        // Near end of current chunk: ensure next chunk exists.
                         if (chunkIdx + 1 >= stream.length) {
                             stream = Arrays.copyOf(stream, stream.length + 2);
                         }

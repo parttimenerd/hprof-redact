@@ -101,19 +101,20 @@ These are intentional divergences, not bugs:
 ## RSS performance (pc52bs2job, 34 GB HPROF, 514 M objects)
 
 Measured 2026-07-10 with optimizations: deferred idomD, excluded-edges skip,
-`G1PeriodicGCInterval=20 G1HeapRegionSize=2m` GC flags.
+`G1PeriodicGCInterval=20 G1HeapRegionSize=2m` GC flags + chunk-by-chunk inbound VByte encoding.
 
 | Phase | RSS after GC | Wall time |
 |-------|-------------:|----------:|
-| A1    | 20.8 GB      | 57.2 s    |
-| A2    | 29.9 GB      | 398.9 s   |
-| RPO   | 29.1 GB      | 17.5 s    |
-| DOM   | 19.3 GB      | 150.9 s   |
-| Retained | 18.3 GB   | 20.7 s    |
+| A1    | 20.8 GB      | 58.0 s    |
+| A2    | 23.7 GB      | 403.0 s   |
+| RPO   | 29.0 GB      | 20.2 s    |
+| DOM   | 18.1 GB      | 149.5 s   |
+| Retained | 19.4 GB   | 23.9 s    |
 
-- **Peak RSS**: 30.1 GB (`/usr/bin/time -v` maximum RSS)
-- **Total elapsed**: 11:12 (wall), 670 s tool time + 25 s report write
-- **CPU**: 757% average (8-core parallel I/O + dominator phases)
+- **Peak RSS**: 30.4 GB (`/usr/bin/time -v` maximum RSS — dominated by RPO phase with fwdTargets still live)
+- **A2 peak**: 24.7 GB (↓ from 30.7 GB; chunk-by-chunk VByte encoding overlaps only ~1 source chunk at a time)
+- **Total elapsed**: 11:29 (wall), 655 s tool time + 33 s report write
+- **CPU**: 741% average (8-core parallel I/O + dominator phases)
 
 ## Algorithm notes
 
