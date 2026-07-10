@@ -83,7 +83,7 @@ final class RetainedSizes {
         short[] classIndex = graph.classIndex;
         short[] classObjClassIdx = graph.classObjClassIdx; // node → classList index it represents; -1 if not class-obj
 
-        int[] childDeg = new int[N];
+        int[] childDeg = graph.phaseArrays != null ? graph.phaseArrays.take() : new int[N];
         for (int u = 1; u < N; u++) {
             int p = idom[u];
             if (p == HeapGraph.UNDEFINED) continue;
@@ -93,7 +93,10 @@ final class RetainedSizes {
         int[] childOff = new int[N + 1];
         for (int i = 0; i < N; i++) childOff[i + 1] = childOff[i] + childDeg[i];
         int[] childTargets = new int[childOff[N]];
-        int[] cursor = new int[N]; // reuse childDeg after copying
+        // Reuse childDeg as cursor array: donate it, take back immediately (zeroed → overwritten by arraycopy)
+        if (graph.phaseArrays != null) graph.phaseArrays.donate(childDeg);
+        childDeg = null;
+        int[] cursor = graph.phaseArrays != null ? graph.phaseArrays.takeRaw() : new int[N];
         System.arraycopy(childOff, 0, cursor, 0, N);
         for (int u = 1; u < N; u++) {
             int p = idom[u];
@@ -101,11 +104,9 @@ final class RetainedSizes {
             if (p == u) continue;
             childTargets[cursor[p]++] = u;
         }
-        // cursor no longer needed; donate for potential reuse, then childDeg
+        // cursor no longer needed; donate for potential reuse
         if (graph.phaseArrays != null) graph.phaseArrays.donate(cursor);
         cursor = null;
-        if (graph.phaseArrays != null) graph.phaseArrays.donate(childDeg);
-        childDeg = null;
 
         // Iterative DFS from virtual root. Stack entries are (node, childIter,
         // savedDepthForClass, savedClassObjDepth). We use parallel int stacks.

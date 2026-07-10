@@ -315,29 +315,39 @@ public final class HeapGraph {
      */
     static final class PhaseArrays {
         private final int N;
-        private int[] slot;
+        private int[] slot0;
+        private int[] slot1;
 
         PhaseArrays(int N) { this.N = N; }
 
-        /** Donate arr for reuse next take(). Silently ignored if null or too small. */
+        /** Donate arr for reuse next take(). Silently ignored if null or too small.
+         *  Fills slot0 first, then slot1; overwrites the older slot if both are full. */
         void donate(int[] arr) {
-            if (arr != null && arr.length >= N) slot = arr;
+            if (arr == null || arr.length < N) return;
+            if (slot0 == null) { slot0 = arr; return; }
+            if (slot1 == null) { slot1 = arr; return; }
+            slot0 = slot1; slot1 = arr; // evict oldest
         }
 
-        /** Return donated array (zeroed) or fresh int[N]. Clears the slot. */
+        /** Return donated array (zeroed) or fresh int[N]. Prefers slot0. */
         int[] take() {
-            if (slot == null) return new int[N];
-            int[] arr = slot; slot = null;
+            int[] arr = poll();
+            if (arr == null) return new int[N];
             java.util.Arrays.fill(arr, 0);
             return arr;
         }
 
-        /** Return donated array (NOT zeroed) or fresh int[N]. Clears the slot.
+        /** Return donated array (NOT zeroed) or fresh int[N].
          *  Use only when the caller will immediately overwrite every element. */
         int[] takeRaw() {
-            if (slot == null) return new int[N];
-            int[] arr = slot; slot = null;
-            return arr;
+            int[] arr = poll();
+            return arr != null ? arr : new int[N];
+        }
+
+        private int[] poll() {
+            if (slot0 != null) { int[] a = slot0; slot0 = slot1; slot1 = null; return a; }
+            if (slot1 != null) { int[] a = slot1; slot1 = null; return a; }
+            return null;
         }
     }
 
