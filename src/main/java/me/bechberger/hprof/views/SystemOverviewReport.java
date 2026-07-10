@@ -76,69 +76,27 @@ final class SystemOverviewReport {
         }
 
         // MAT parity: for class C, retained = getMinRetainedSize({classObject(C)} ∪ instances(C)).
-        // This finds "top ancestors" of that set: members for which no strict dom-tree ancestor
-        // is also in the set. We sum retained sizes of only top ancestors.
+        // Top ancestors = nodes with no strict dom-tree ancestor also in the set.
         //
-        // A node v contributes to class C's set if:
-        //   classIndex[v] == C  (v is an instance of C), OR
-        //   classObjClassIdx[v] == C  (v is the class object FOR C).
-        //
-        // Note: class objects are instances of java.lang.Class (classIndex = java.lang.Class ci),
-        // AND also the "classObject" for their own class. Both roles are independent.
-        //
-        // hasSetAncestor[v][C] = true iff some strict dom-tree ancestor of v is in set C.
-        // We compute this per-class by walking up idom chains. Dom trees are typically shallow
-        // (O(log N)), so O(N·depth) total is fine.
-        //
-        // For each node v in set C: walk idom[v] upward; stop when we find another node in set C.
-        boolean[] hasSetAncestor = new boolean[N];
+        // hasSameClassAncestor (from RetainedSizes) already encodes this for instance-class membership:
+        //   !hasSameClassAncestor.get(v) → v is a top ancestor for its classIndex-based set.
+        // For classObj nodes we additionally need to check the classObjClassIdx[v] set.
 
-        // We need two separate hasSetAncestor computations:
-        //   - For instance-class membership (classIndex[v]==C): walk checking classIndex[cur]==C or classObjClassIdx[cur]==C
-        //   - Same for classObj membership (classObjClassIdx[v]==C): same walk
-        // Since both use the same "is in set C" predicate, we can do it in one loop.
+        // Instance contribution: use pre-computed hasSameClassAncestor bit.
+        // ClassObj contribution: walk idom chain for classObj nodes only (at most classCount nodes ≈ thousands).
+        boolean[] hasAncestorAsClassObj = (classObjClassIdx != null) ? new boolean[N] : null;
 
-        // For each node v that is in some class C's set, check if any dom-ancestor is also in that set.
-        // "In set C" = classIndex[v]==C OR classObjClassIdx[v]==C.
-        // A node may be in multiple sets (class object is in java.lang.Class set AND own-class set).
-        // We need a separate hasSetAncestor flag per (node, class) pair — but that's O(N*classCount).
-        //
-        // Efficient approach: for each node v, its "primary class" for ancestor checking is:
-        //   - If classObjClassIdx[v] >= 0: BOTH java.lang.Class-ci (via classIndex) AND classObjClassIdx[v]
-        //   - Otherwise: classIndex[v]
-        //
-        // We compute two hasSetAncestor arrays:
-        //   hasAncestorAsInstance[v]: true iff some ancestor has classIndex==classIndex[v] (or is classObj for classIndex[v])
-        //   hasAncestorAsClassObj[v]: only relevant for classObj nodes: true iff some ancestor is in classObjClassIdx[v]'s set
-        //
-        // Then a node v is a top-ancestor for its "instance-class" set (classIndex[v]) if !hasAncestorAsInstance[v].
-        // A classObj node v is a top-ancestor for its "classObj-class" set (classObjClassIdx[v]) if !hasAncestorAsClassObj[v].
-
-        boolean[] hasAncestorAsInstance = new boolean[N]; // for classIndex[v] set
-        boolean[] hasAncestorAsClassObj = (classObjClassIdx != null) ? new boolean[N] : null; // for classObjClassIdx[v] set
-
-        for (int v = 1; v < N; v++) {
-            if (idom[v] == HeapGraph.UNDEFINED) continue;
-            short ciInst = classIndex[v]; // instance class
-            short ciObj = (classObjClassIdx != null && v < classObjClassIdx.length) ? classObjClassIdx[v] : -1;
-
-            // Check ancestor-as-instance for set ciInst
-            if (ciInst >= 0 && ciInst < classCount) {
+        if (hasAncestorAsClassObj != null) {
+            for (int v = 1; v < N; v++) {
+                if (idom[v] == HeapGraph.UNDEFINED) continue;
+                if (v >= classObjClassIdx.length) continue;
+                short ciObj = classObjClassIdx[v];
+                if (ciObj < 0 || ciObj >= classCount) continue;
+                // v is the class-object for class ciObj. Check if any ancestor is in ciObj's set.
                 int cur = idom[v];
                 while (cur != HeapGraph.VIRTUAL_ROOT) {
                     short curInst = classIndex[cur];
-                    short curObj = (classObjClassIdx != null && cur < classObjClassIdx.length) ? classObjClassIdx[cur] : -1;
-                    if (curInst == ciInst || curObj == ciInst) { hasAncestorAsInstance[v] = true; break; }
-                    cur = idom[cur];
-                }
-            }
-
-            // Check ancestor-as-classObj for set ciObj (only for classObj nodes)
-            if (ciObj >= 0 && ciObj < classCount && hasAncestorAsClassObj != null) {
-                int cur = idom[v];
-                while (cur != HeapGraph.VIRTUAL_ROOT) {
-                    short curInst = classIndex[cur];
-                    short curObj = (classObjClassIdx != null && cur < classObjClassIdx.length) ? classObjClassIdx[cur] : -1;
+                    short curObj = (cur < classObjClassIdx.length) ? classObjClassIdx[cur] : -1;
                     if (curInst == ciObj || curObj == ciObj) { hasAncestorAsClassObj[v] = true; break; }
                     cur = idom[cur];
                 }
@@ -146,12 +104,12 @@ final class SystemOverviewReport {
         }
 
         // Sum retained for top ancestors of each class set.
-        // Instance contribution: if !hasAncestorAsInstance[v], add retained to classIndex[v]'s row.
-        // ClassObj contribution: if !hasAncestorAsClassObj[v], add retained to classObjClassIdx[v]'s row.
+        // Instance contribution: use hasSameClassAncestor (computed by RetainedSizes in O(N)).
+        // ClassObj contribution: use hasAncestorAsClassObj (walked above for classObj nodes only).
         for (int i = 1; i < N; i++) {
             if (idom[i] == HeapGraph.UNDEFINED) continue;
             short ciInst = classIndex[i];
-            if (ciInst >= 0 && ciInst < classCount && !hasAncestorAsInstance[i]) {
+            if (ciInst >= 0 && ciInst < classCount && !graph.hasSameClassAncestor.get(i)) {
                 classRetained[ciInst] += graph.retainedSizeOf(i);
             }
             if (hasAncestorAsClassObj != null && i < classObjClassIdx.length) {
