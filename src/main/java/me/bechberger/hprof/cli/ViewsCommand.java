@@ -10,6 +10,7 @@ import me.bechberger.femtocli.annotations.Parameters;
 import me.bechberger.hprof.views.HeapGraph;
 import me.bechberger.hprof.views.HeapGraphBuilder;
 import me.bechberger.hprof.views.HtmlWriter;
+import me.bechberger.hprof.views.Log;
 import me.bechberger.hprof.views.MarkdownWriter;
 import me.bechberger.hprof.views.StackTraceReader;
 
@@ -35,20 +36,43 @@ public class ViewsCommand implements Callable<Integer> {
             description = "Retained heap threshold %% to flag as leak suspect (default: ${DEFAULT-VALUE}).")
     private double thresholdPct;
 
+    @Option(names = {"-v", "--verbose"},
+            description = "Print per-phase RSS and object/edge counts.")
+    private boolean verbose;
+
+    @Option(names = {"--debug"},
+            description = "Print sub-step RSS probes inside A2 and DOM phases (implies -v).")
+    private boolean debug;
+
     @Option(names = {"--print-phase-times"},
-            description = "Print per-phase wall-clock time and RSS to stderr.")
+            description = "Alias for -v (backward compatible).", hidden = true)
     private boolean printPhaseTimes;
 
     @Option(names = {"--html"},
             description = "Force HTML output (overrides extension detection).")
     private boolean forceHtml;
 
+    @Option(names = {"--optimal-gc"},
+            description = "Advise on JVM flags for lower peak RSS (~90 MB reduction on 11M-object heaps). " +
+                    "Prints the recommended flags; does not restart the JVM.")
+    private boolean optimalGc;
+
     @Option(names = {"--stack-traces"},
             description = "Parse HPROF stack frames for richer leak suspect analysis (third pass, optional).")
     private boolean stackTraces;
 
+    private static void printOptimalGcAdvice() {
+        System.err.println("  [GC] For ~90 MB lower peak RSS on large heaps, run with:");
+        System.err.println("       java -XX:+UseG1GC -XX:G1PeriodicGCInterval=1000 -XX:+G1PeriodicGCInvokesConcurrent ...");
+        System.err.println("  [GC] Setting GC flags at runtime via MXBean is not used: it fires during active");
+        System.err.println("  [GC] array fills and increases peak RSS. Startup flags are required.");
+    }
+
     @Override
     public Integer call() throws IOException {
+        Log.setLevel(debug ? 2 : (verbose || printPhaseTimes) ? 1 : 0);
+        if (optimalGc) printOptimalGcAdvice();
+
         Path inputPath = Path.of(input);
         boolean htmlMode = forceHtml || (output != null && output.endsWith(".html"));
 
@@ -87,7 +111,7 @@ public class ViewsCommand implements Callable<Integer> {
         } else {
             new MarkdownWriter(graph, thresholdPct).writeTo(outputPath);
         }
-        graph.freeAddressIndex(); // report writing done; release address lookup arrays
+        graph.freeAddressIndex();
 
         long t2 = System.currentTimeMillis();
         System.err.printf("Report written in %.1fs%n", (t2 - t1) / 1000.0);
