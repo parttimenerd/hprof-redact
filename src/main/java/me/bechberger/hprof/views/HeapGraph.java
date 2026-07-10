@@ -261,9 +261,13 @@ public final class HeapGraph {
     }
 
     // ---- Transient forward CSR (built in Phase A.2, freed after RPO DFS) ----
-    int[] fwdOffsets; // fwdOffsets[i+1] - fwdOffsets[i] = exact out-degree (compacted)
-    // fwdTargets is chunked (int[][]) for large heaps; each chunk = TARGETS_CHUNK_SIZE ints.
-    // For heaps with < TARGETS_CHUNK_SIZE total fwd edges, chunk[0] is the only chunk.
+    // fwdOffsets[v] = byte offset in fwdStream for node v's adjacency list start.
+    // fwdStream holds VByte delta-encoded successor lists (sorted per row, absolute first value,
+    // then deltas). For heaps with < VByte.CHUNK_SIZE bytes total, fwdStream[0] is the only chunk.
+    int[] fwdOffsets;
+    byte[][] fwdStream;
+    // fwdTargets is the temporary unsorted int[][] built during A2c; freed after VByte encoding.
+    // Kept as a field only to allow HeapGraphBuilder to pass it to the encoder without a local var.
     int[][] fwdTargets;
     static final int TARGETS_CHUNK_BITS = 26;            // 64 M ints per chunk
     static final int TARGETS_CHUNK_SIZE = 1 << TARGETS_CHUNK_BITS;
@@ -301,7 +305,7 @@ public final class HeapGraph {
     PhaseArrays phaseArrays;
 
     void freeRpoOrder() { rpoOrder = null; }
-    void freeFwdCsr()   { fwdOffsets = null; fwdTargets = null; }
+    void freeFwdCsr()   { fwdOffsets = null; fwdStream = null; fwdTargets = null; }
 
     /** Total number of nodes including virtual root (index 0). */
     public int objectCount() { return N; }

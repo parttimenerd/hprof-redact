@@ -19,7 +19,7 @@ import java.util.Arrays;
  *   <li>{@code graph.dfsParent[v]} = DFS spanning-tree parent of v (-1 = virtual root has no parent)</li>
  * </ul>
  *
- * Frees {@code graph.fwdOffsets} and {@code graph.fwdTargets} after the DFS.
+ * Frees {@code graph.fwdOffsets}, {@code graph.fwdStream}, and {@code graph.fwdTargets} after the DFS.
  *
  * Note: rpoPos[] is NOT produced here. Reachability is determined via dfsPos[v] >= 0.
  */
@@ -30,7 +30,7 @@ final class RpoDfs {
     static void compute(HeapGraph graph) {
         int N = graph.N;
         int[] fwdOffsets = graph.fwdOffsets;
-        int[][] fwdTargets = graph.fwdTargets;
+        byte[][] fwdStream = graph.fwdStream;
 
         int[] rpoOrder = graph.phaseArrays.takeRaw(); // donated by A2; avoids fresh int[N]
 
@@ -42,55 +42,84 @@ final class RpoDfs {
         Arrays.fill(dfsPos,    -1);
         Arrays.fill(dfsParent, -1);
 
-        // Explicit DFS stack: parallel arrays for node and cursor
+        // Per-node decoded adjacency state: for node at stack[top], we need:
+        //   - the current byte position in fwdStream (long, for chunked decode)
+        //   - the end byte position for this node's row
+        //   - the previous decoded value (for delta reconstruction)
+        //   - how many children remain
+        // We store cursor as long (byte offset in fwdStream) and prev as int.
         int stackCap = Math.min(N, 1 << 16);
-        int[] nodeStack   = new int[stackCap];
-        int[] cursorStack = new int[stackCap];
+        int[] nodeStack    = new int[stackCap];
+        long[] cursorStack = new long[stackCap]; // byte offset of next unread child in fwdStream
+        long[] endStack    = new long[stackCap]; // byte offset past last child for this node
+        int[]  prevStack   = new int[stackCap];  // delta-decode base (last decoded value)
+
         int top = -1;
 
-        // Fill rpoOrder in reverse during DFS (avoids a separate postOrder array).
-        // rpoIdx counts down from N; at completion postCount = N - rpoIdx.
-        int rpoIdx     = N;
-        int dfsCount   = 0; // pre-order counter
+        int rpoIdx   = N;
+        int dfsCount = 0;
 
-        // Push virtual root (use Integer.MIN_VALUE as in-progress sentinel in dfsPos
-        // to distinguish "on stack but not finished" from "not visited"; in practice
-        // dfsPos holds actual pre-order numbers, and the visited check is dfsPos[v] >= 0)
         dfsPos[HeapGraph.VIRTUAL_ROOT]    = dfsCount;
         dfsOrder[dfsCount++]              = HeapGraph.VIRTUAL_ROOT;
         dfsParent[HeapGraph.VIRTUAL_ROOT] = -1;
         top++;
         nodeStack[top]   = HeapGraph.VIRTUAL_ROOT;
-        cursorStack[top] = 0;
+        cursorStack[top] = 0; // virtual root uses gcRootIds cursor (int index, stored in low 32 bits)
+        endStack[top]    = graph.gcRootCount;
+        prevStack[top]   = 0;
+
+        int[] decodeBuf = new int[1];
 
         while (top >= 0) {
-            int node   = nodeStack[top];
-            int cursor = cursorStack[top];
+            int  node   = nodeStack[top];
+            long cursor = cursorStack[top];
+            long end    = endStack[top];
 
             boolean pushed = false;
-            int childCount = childCount(node, graph, fwdOffsets);
-            while (cursor < childCount) {
-                int child = getChild(node, cursor, graph, fwdOffsets, fwdTargets);
-                cursor++;
+
+            // Scan children until we push an unvisited one or exhaust this node's list.
+            while (cursor < end) {
+                int child;
+                if (node == HeapGraph.VIRTUAL_ROOT) {
+                    child = graph.gcRootIds[(int) cursor];
+                    cursor++;
+                    cursorStack[top] = cursor;
+                } else {
+                    long newPos = VByte.decode(fwdStream, cursor, decodeBuf);
+                    int  val    = prevStack[top] + decodeBuf[0];
+                    prevStack[top]   = val;
+                    cursorStack[top] = newPos;
+                    cursor = newPos;
+                    child = val;
+                }
                 if (child < 0 || child >= N) continue;
-                if (dfsPos[child] == -1) { // not yet visited
-                    dfsPos[child]  = dfsCount;
+                if (dfsPos[child] == -1) {
+                    dfsPos[child]        = dfsCount;
                     dfsOrder[dfsCount++] = child;
                     dfsParent[child]     = node;
-                    cursorStack[top] = cursor;
                     top++;
                     if (top == nodeStack.length) {
-                        nodeStack   = Arrays.copyOf(nodeStack, top * 2);
+                        nodeStack   = Arrays.copyOf(nodeStack,   top * 2);
                         cursorStack = Arrays.copyOf(cursorStack, top * 2);
+                        endStack    = Arrays.copyOf(endStack,    top * 2);
+                        prevStack   = Arrays.copyOf(prevStack,   top * 2);
                     }
-                    nodeStack[top]   = child;
-                    cursorStack[top] = 0;
+                    nodeStack[top] = child;
+                    if (fwdStream == null || fwdOffsets == null || child >= fwdOffsets.length - 1) {
+                        cursorStack[top] = 0;
+                        endStack[top]    = 0;
+                    } else {
+                        long byteStart = Integer.toUnsignedLong(fwdOffsets[child]);
+                        long byteEnd   = Integer.toUnsignedLong(fwdOffsets[child + 1]);
+                        cursorStack[top] = byteStart;
+                        endStack[top]    = byteEnd;
+                    }
+                    prevStack[top] = 0;
                     pushed = true;
                     break;
                 }
             }
             if (!pushed) {
-                cursorStack[top] = cursor;
                 rpoOrder[--rpoIdx] = node;
                 top--;
             }
@@ -107,25 +136,5 @@ final class RpoDfs {
         graph.dfsParent = dfsParent;
 
         graph.freeFwdCsr();
-    }
-
-    private static int childCount(int node, HeapGraph graph, int[] fwdOffsets) {
-        if (node == HeapGraph.VIRTUAL_ROOT) return graph.gcRootCount;
-        if (fwdOffsets == null || node >= fwdOffsets.length - 1) return 0;
-        return fwdOffsets[node + 1] - fwdOffsets[node];
-    }
-
-    private static int getChild(int node, int cursor, HeapGraph graph,
-                                 int[] fwdOffsets, int[][] fwdTargets) {
-        if (node == HeapGraph.VIRTUAL_ROOT) {
-            return cursor < graph.gcRootCount ? graph.gcRootIds[cursor] : -1;
-        }
-        if (fwdOffsets == null || fwdTargets == null) return -1;
-        int start = fwdOffsets[node];
-        int idx   = start + cursor;
-        if (idx < fwdOffsets[node + 1]) {
-            return fwdTargets[idx >>> HeapGraph.TARGETS_CHUNK_BITS][idx & HeapGraph.TARGETS_CHUNK_MASK];
-        }
-        return -1;
     }
 }
