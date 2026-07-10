@@ -1,10 +1,10 @@
 # MAT Parity Status
 
 Comparison of `hprof-redact views` output against Eclipse MAT across 11 HPROF
-dumps (88 MB – 1.3 GB heap; 235 K – 11.3 M objects).  All numbers from the
+dumps (88 MB – 34 GB heap; 235 K – 514 M objects).  All numbers from the
 `compare_parity.py` suite as of 2026-07-10.
 
-## Result: 1 known gap out of ~500 checks
+## Result: 2 known gaps out of ~700 checks
 
 | Dump | Heap | Objects | Result |
 |------|-----:|--------:|--------|
@@ -14,11 +14,11 @@ dumps (88 MB – 1.3 GB heap; 235 K – 11.3 M objects).  All numbers from the
 | dump_3_par-mnemonics | 19 MB | 518 K | ✓ all pass |
 | dump_4_philosophers | 12 MB | 236 K | ✓ all pass |
 | dump_5_naive-bayes | 1.2 GB | 976 K | ✓ all pass |
-| dump_6_dec-tree | 58 MB | 774 K | ✗ 1 gap (see below) |
+| dump_6_dec-tree | 58 MB | 774 K | ✗ 1 gap (top-objects rank tie-break; see below) |
 | dump_7_gauss-mix | 33 MB | 562 K | ✓ all pass |
 | dump_8_log-regression | 175 MB | 851 K | ✓ all pass |
 | dump_vscode (NetBeans/vscode-java) | 752 MB | 11.3 M | ✓ all pass |
-| pc52bs2job (production k8s) | 34 GB | — | MAT cache only; no ours run |
+| pc52bs2job (production k8s, 34 GB HPROF, 133 K classes) | 19.8 GB heap | 514 M | ✗ 1 gap (suspects/count; see below) |
 
 ## What is checked per dump
 
@@ -34,6 +34,20 @@ dumps (88 MB – 1.3 GB heap; 235 K – 11.3 M objects).  All numbers from the
 Retained checks use `>=` (our value must be ≥ MAT's) with a 5% tolerance
 because MAT's histogram retained column uses `getMinRetainedSize` (an
 approximation), while our value is exact.
+
+## Known gap: pc52bs2job suspects/count (3 vs 2)
+
+**Check**: `suspects/count` = 2, MAT = 3
+
+MAT identifies `java.net.URLClassLoader` (retained 1.91 GB, 9.6% of the 19.8
+GB heap) as a third leak suspect.  Our threshold for individual-object suspects
+is strictly >10%, so URLClassLoader's 9.6% does not meet it.  MAT uses a
+slightly looser threshold (~9.5% ÷ total used heap).
+
+**Why this is acceptable**: the top-1 suspect (WorkerThread, 10.58 GB, 53%) is
+exact.  URLClassLoader appears correctly in the histogram (1.90 GB, −0.1%) and
+in the biggest-dominator-classes list (rank 2, −0.3%).  The threshold
+discrepancy is a minor policy difference, not a correctness issue.
 
 ## Known gap: dump_6 top-objects rank 10/11 tie-break
 
@@ -83,6 +97,23 @@ These are intentional divergences, not bugs:
 | **Shallow bytes** | Typically ±2% for `java.lang.Object` and similar types. MAT includes JVM-internal header words in some size calculations; we use the sizes from the HPROF records directly. |
 | **GC root count** | Exact match on all 10 tested dumps. |
 | **Heap bytes** | Exact match on all dumps except dump_5 (−3.3%): that dump has a concatenation artifact where the second segment's heap-summary record reports a slightly different total. |
+
+## RSS performance (pc52bs2job, 34 GB HPROF, 514 M objects)
+
+Measured 2026-07-10 with optimizations: deferred idomD, excluded-edges skip,
+`G1PeriodicGCInterval=20 G1HeapRegionSize=2m` GC flags.
+
+| Phase | RSS after GC | Wall time |
+|-------|-------------:|----------:|
+| A1    | 20.8 GB      | 57.2 s    |
+| A2    | 29.9 GB      | 398.9 s   |
+| RPO   | 29.1 GB      | 17.5 s    |
+| DOM   | 19.3 GB      | 150.9 s   |
+| Retained | 18.3 GB   | 20.7 s    |
+
+- **Peak RSS**: 30.1 GB (`/usr/bin/time -v` maximum RSS)
+- **Total elapsed**: 11:12 (wall), 670 s tool time + 25 s report write
+- **CPU**: 757% average (8-core parallel I/O + dominator phases)
 
 ## Algorithm notes
 
