@@ -66,7 +66,7 @@ public final class HeapGraph {
     int syntheticRootCount;
 
     // ---- Inbound reference graph (VByte stream, --low-memory) ----
-    long[] inboundOffsets;           // (N+1) elements; inboundOffsets[i] = byte start of row i in stream
+    int[] inboundOffsets;            // (N+1) elements; unsigned int byte offset; use Integer.toUnsignedLong() to read
     byte[][] inboundStream;          // VByte delta-encoded predecessor lists; chunked to stay below 2 GB per chunk
     BitSet excludedEdge;             // 1 bit per logical edge position in sorted VByte order
 

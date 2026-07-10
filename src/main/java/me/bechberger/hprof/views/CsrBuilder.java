@@ -139,7 +139,7 @@ final class CsrBuilder {
      *
      * During addEdge, if excluded: store src | Integer.MIN_VALUE in targets[pos].
      * During encodeVByte, extract the flag from the sign bit before encoding.
-     * Sets graph.inboundOffsets (long[]) and graph.inboundStream (byte[][]) directly.
+     * Sets graph.inboundOffsets (int[]) and graph.inboundStream (byte[][]) directly.
      */
     void encodeVByteWithEmbeddedFlags() {
         int[] offsets = offsetsCursor;
@@ -150,7 +150,7 @@ final class CsrBuilder {
 
         // Estimate stream size; small heaps use single byte[], large use chunked byte[][].
         long estimatedBytes = Math.max((long) totalEdges + totalEdges / 4L, 16L);
-        long[] byteOffsets = new long[n + 1];
+        int[] byteOffsets = new int[n + 1];
         long streamPos = 0;
 
         if (estimatedBytes < VByte.CHUNK_SIZE) {
@@ -165,7 +165,7 @@ final class CsrBuilder {
                     if (rowLen > sortScratch.length) sortScratch = new long[rowLen];
                     sortWithFlags(targets, rowStart, rowEnd, sortScratch);
                 }
-                byteOffsets[v] = streamPos;
+                byteOffsets[v] = (int) streamPos;
                 int prev = 0;
                 for (int i = rowStart; i < rowEnd; i++) {
                     int rawSrc = targets[i];
@@ -181,7 +181,7 @@ final class CsrBuilder {
                     logicalEdgeIdx++;
                 }
             }
-            byteOffsets[n] = streamPos;
+            byteOffsets[n] = (int) streamPos;
             targets = null; offsetsCursor = null;
             if ((int) streamPos < singleBuf.length) singleBuf = Arrays.copyOf(singleBuf, (int) streamPos);
             graph.inboundStream  = new byte[][] { singleBuf };
@@ -206,7 +206,7 @@ final class CsrBuilder {
                 sortWithFlags(targets, rowStart, rowEnd, sortScratch);
             }
 
-            byteOffsets[v] = streamPos;
+            byteOffsets[v] = (int) streamPos;
             int prev = 0;
 
             for (int i = rowStart; i < rowEnd; i++) {
@@ -231,7 +231,7 @@ final class CsrBuilder {
             }
         }
 
-        byteOffsets[n] = streamPos;
+        byteOffsets[n] = (int) streamPos;
         targets = null;
         offsetsCursor = null;
 
