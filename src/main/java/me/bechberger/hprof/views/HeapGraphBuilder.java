@@ -1721,7 +1721,7 @@ public final class HeapGraphBuilder {
         private static void sortAndEncodeSingle(int[][] targets, int[] offsets, int n,
                 java.util.BitSet newExcluded, int estimatedBytes, HeapGraph graph) {
             byte[] singleBuf = new byte[estimatedBytes];
-            long[] byteOffsets = new long[n + 1];
+            int[] byteOffsets = new int[n + 1];
             int streamPos = 0;
             int logicalEdgeIdx = 0;
             int[] rowBuf = null; // scratch buffer for row extraction
@@ -1772,7 +1772,7 @@ public final class HeapGraphBuilder {
             byte[][] stream = new byte[numChunks][];
             for (int c = 0; c < numChunks; c++) stream[c] = new byte[VByte.CHUNK_SIZE];
 
-            long[] byteOffsets = new long[n + 1];
+            int[] byteOffsets = new int[n + 1];
             long streamPos = 0;
             int logicalEdgeIdx = 0;
             int[] rowBuf = null;
@@ -1789,7 +1789,7 @@ public final class HeapGraphBuilder {
                     putRow(targets, lo, rowLen, rowBuf);
                 }
 
-                byteOffsets[v] = streamPos;
+                byteOffsets[v] = (int) streamPos;
                 int prev = 0;
                 for (int i = lo; i < hi; i++) {
                     int raw = chunkGet(targets, i);
@@ -1815,7 +1815,7 @@ public final class HeapGraphBuilder {
                     logicalEdgeIdx++;
                 }
             }
-            byteOffsets[n] = streamPos;
+            byteOffsets[n] = (int) streamPos;
 
             // Trim last chunk and discard trailing empty chunks.
             int finalChunkIdx = (int) (streamPos >>> VByte.CHUNK_BITS);

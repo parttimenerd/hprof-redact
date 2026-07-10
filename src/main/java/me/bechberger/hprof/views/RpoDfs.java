@@ -106,9 +106,6 @@ final class RpoDfs {
         graph.dfsOrder  = dfsOrder;
         graph.dfsParent = dfsParent;
 
-        // Donate postOrder to phaseArrays so DominatorTree can take it as parent[].
-        if (graph.phaseArrays != null) graph.phaseArrays.donate(postOrder);
-
         graph.freeFwdCsr();
     }
 

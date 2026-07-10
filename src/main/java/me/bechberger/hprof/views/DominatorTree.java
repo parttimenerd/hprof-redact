@@ -8,15 +8,30 @@ import java.util.Arrays;
 import java.util.BitSet;
 
 /**
- * Lengauer-Tarjan "simple" dominator-tree algorithm — O(N α(N)).
+ * Semi-NCA dominator-tree algorithm — O(N α(N)) semi-dominator phase + O(N·depth) NCA phase.
  *
- * Uses the DFS spanning-tree (pre-order) produced by RpoDfs plus a path-compressed
- * union-find to compute semi-dominators, then derives immediate dominators.
- * Handles arbitrarily deep dominator chains (e.g. Scala cons-lists of depth 10,000+)
- * without the O(depth) per-step pathology of the CHK finger-walk.
+ * Replaces the Lengauer-Tarjan "simple" algorithm to eliminate the {@code bucket} and
+ * {@code next} arrays, saving 2 × int[reachable] ≈ 4 GB on large heaps.
  *
- * Reference: Lengauer & Tarjan (1979); "simple" variant (path compression without
- * link-cut trees) — see also Aho, Hopcroft & Ullman (1986).
+ * Arrays used: {@code sdom}, {@code label}, {@code ancestor}, {@code idomD} (4 total vs LT's 6).
+ * The {@code bucket}/{@code next} linked-list structures from LT's bucket propagation step
+ * are replaced by the NCA walk in Phase 2.
+ *
+ * Reference: Georgiadis, Tarjan, Werneck (2004) "Finding Dominators in Practice".
+ *
+ * Phase 1 (Semi-dominators) — same as LT:
+ *   Process nodes in reverse DFS pre-order. For each node v at DFS position d,
+ *   compute sdom[d] = min DFS-number reachable from predecessors via union-find eval().
+ *   Then link d into the spanning forest: ancestor[d] = parent DFS position.
+ *
+ * Phase 2 (NCA idom) — replaces LT's bucket propagation:
+ *   Process nodes in forward DFS pre-order. For each node v at DFS position d,
+ *   start from its DFS-tree parent position and walk up the partial idom tree
+ *   (already built for positions 0..d-1) until reaching a node with DFS position <= sdom[d].
+ *   That node's DFS position is idomD[d].
+ *
+ * The NCA walk is O(depth of idom tree) per node. For well-structured heaps this is fast.
+ * Worst case is O(N) per node (deep chains), dominated by O(N α(N)) semi-dominator phase.
  *
  * Input:  graph.dfsPos, graph.dfsOrder, graph.dfsParent, graph.inbound* CSR,
  *         graph.gcRootIds. Unreachable nodes are those with dfsPos[v] < 0.
@@ -48,24 +63,18 @@ final class DominatorTree {
         // dfsPos[v] = DFS position of node v (-1 = unreachable).
         // dfsPar[v] = DFS spanning-tree parent node (-1 = no parent = virtual root).
         //
-        // In LT, dfsPar gives the DFS tree structure.  parent[d] = dfsPos[dfsPar[dfsOrd[d]]].
+        // Semi-NCA uses 4 arrays (vs LT's 6): sdom, label, ancestor, idomD.
+        // Eliminated: bucket[], next[] (LT-specific bucket propagation lists).
         // ----------------------------------------------------------------
 
-        // Lengauer-Tarjan arrays indexed by DFS pre-order position d (0..reachable-1).
-        // parent[] is eliminated: computed inline as parentOf(d) = dfsPos[dfsPar[dfsOrd[d]]].
-        // dfsPar and dfsOrd are already live in graph.dfsParent and graph.dfsOrder during DOM,
-        // so the inline computation reuses existing arrays and saves one int[reachable] ≈ 43 MB.
+        // Semi-NCA arrays indexed by DFS pre-order position d (0..reachable-1).
         int[] sdom     = new int[reachable]; // semi-dominator DFS-position
         int[] idomD    = new int[reachable]; // immediate dominator DFS-position (output); -1 = unset
         int[] label    = new int[reachable]; // union-find: min-sdom node on path to forest root
         int[] ancestor = new int[reachable]; // union-find parent DFS-position; -1 = forest root
-        int[] bucket   = new int[reachable]; // head of bucket list for each semi-dom; -1 = empty
-        int[] next     = new int[reachable]; // linked list next in bucket; -1 = end
 
         Arrays.fill(idomD,    -1);
         Arrays.fill(ancestor, -1);
-        Arrays.fill(bucket,   -1);
-        Arrays.fill(next,     -1);
         for (int d = 0; d < reachable; d++) {
             label[d] = d;
             sdom[d]  = d; // initial: sdom is itself (identity)
@@ -76,8 +85,9 @@ final class DominatorTree {
         for (int i = 0; i < graph.gcRootCount;  i++) vrAdjacent.set(graph.gcRootIds[i]);
 
         // ----------------------------------------------------------------
-        // Main LT loop: process in REVERSE DFS pre-order (d = reachable-1 down to 1).
-        // parentOf(d) = dfsPos[dfsPar[dfsOrd[d]]] (inline; avoids a separate int[reachable] array)
+        // Phase 1: Semi-dominator computation.
+        // Process in REVERSE DFS pre-order (d = reachable-1 down to 1).
+        // Same as LT's semi-dominator step but WITHOUT bucket/next processing.
         // ----------------------------------------------------------------
         int[] tmp = new int[1]; // reused across iterations for VByte decode
         for (int d = reachable - 1; d >= 1; d--) {
@@ -90,7 +100,7 @@ final class DominatorTree {
                 par = (parNode < 0) ? 0 : dfsPos[parNode];
             }
 
-            // --- (a) Compute sdom[d] ---
+            // --- Compute sdom[d] ---
             // Start from DFS-tree parent as upper bound
             int minSdom = par;
 
@@ -98,8 +108,8 @@ final class DominatorTree {
             if (vrAdjacent.get(v) && minSdom > 0) minSdom = 0;
 
             // Scan actual inbound predecessors
-            long start = graph.inboundOffsets[v];
-            long end   = graph.inboundOffsets[v + 1];
+            long start = Integer.toUnsignedLong(graph.inboundOffsets[v]);
+            long end   = Integer.toUnsignedLong(graph.inboundOffsets[v + 1]);
             byte[][] stream = graph.inboundStream;
             long pos = start;
             int prev = 0;
@@ -124,51 +134,46 @@ final class DominatorTree {
             }
             sdom[d] = minSdom;
 
-            // --- (b) Link d into spanning forest: ancestor[d] = par ---
+            // Link d into spanning forest: ancestor[d] = par
             ancestor[d] = par;
-
-            // --- (c) Add d to bucket of its semi-dominator ---
-            next[d]         = bucket[sdom[d]];
-            bucket[sdom[d]] = d;
-
-            // --- (d) Process bucket of par ---
-            // For each w in bucket[par]:
-            //   u = eval(w); idomD[w] = (sdom[u] < sdom[w]) ? u : par
-            int w = bucket[par];
-            while (w != -1) {
-                int wNext = next[w];
-                int u = eval(w, ancestor, label, sdom);
-                idomD[w] = (sdom[u] < sdom[w]) ? u : par;
-                w = wNext;
-            }
-            bucket[par] = -1; // clear processed bucket
         }
 
-        // label[], ancestor[], bucket[], next[] are all dead after the main loop.
-        // Null them explicitly to release ~4×43 MB before step 4 and the idom translation.
+        // label[] and ancestor[] are dead after Phase 1 — release before Phase 2.
         label    = null;
         ancestor = null;
-        bucket   = null;
-        next     = null;
 
         // ----------------------------------------------------------------
-        // Step 4: deferred idom adjustment in forward DFS order.
-        // idomD[0] = 0 (virtual root is its own idom sentinel).
-        // For d=1..reachable-1: if idomD[d] != sdom[d], then idomD[d] = idomD[idomD[d]].
+        // Phase 2: NCA idom computation.
+        // Process in FORWARD DFS pre-order (d = 1 to reachable-1).
+        // For each node at DFS pos d:
+        //   1. Start from its DFS-tree parent position parentD.
+        //   2. Walk up the partial idom tree (idomD[0..d-1] already finalized)
+        //      until reaching a position x with x <= sdom[d].
+        //   3. Set idomD[d] = x.
+        //
+        // The walk uses idomD[] (in DFS-position space) directly, avoiding
+        // the need to look up dfsPos[] values during the walk.
         // ----------------------------------------------------------------
-        idomD[0] = 0;
+        idomD[0] = 0; // virtual root is its own idom sentinel
         for (int d = 1; d < reachable; d++) {
-            if (idomD[d] == -1) {
-                // Bucket of sdom[d] was never processed (sdom[d] is a DFS leaf with no
-                // children whose parent = sdom[d]).  This happens when the semi-dominator
-                // itself was processed after all its children but its bucket was never
-                // drained.  Fall back: idomD[d] = sdom[d], which will be adjusted in step 4
-                // if needed.
-                idomD[d] = sdom[d];
+            int v = dfsOrd[d];
+
+            // DFS-tree parent DFS position
+            int parentD;
+            {
+                int parNode = dfsPar[v];
+                parentD = (parNode < 0) ? 0 : dfsPos[parNode];
             }
-            if (idomD[d] != sdom[d]) {
-                idomD[d] = idomD[idomD[d]];
+
+            // NCA walk: from parentD, walk up the partial idom tree until
+            // reaching a position x with x <= sdom[d]. That x is idomD[d].
+            // All nodes on this walk have DFS positions < d, so idomD[] is
+            // already finalized for them.
+            int x = parentD;
+            while (x > sdom[d]) {
+                x = idomD[x]; // step up the partial idom tree (DFS-position space)
             }
+            idomD[d] = x;
         }
 
         // ----------------------------------------------------------------

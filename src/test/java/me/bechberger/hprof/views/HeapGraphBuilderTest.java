@@ -177,8 +177,8 @@ class HeapGraphBuilderTest {
     // ---- helper: decode inbound predecessors of node v ----
     private static List<Integer> decodePreds(HeapGraph g, int v) {
         List<Integer> result = new ArrayList<>();
-        long start = g.inboundOffsets[v];
-        long end   = g.inboundOffsets[v + 1];
+        long start = Integer.toUnsignedLong(g.inboundOffsets[v]);
+        long end   = Integer.toUnsignedLong(g.inboundOffsets[v + 1]);
         byte[][] stream = g.inboundStream;
         long pos = start;
         int prev = 0;
