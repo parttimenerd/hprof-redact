@@ -66,8 +66,8 @@ public final class HeapGraph {
     int syntheticRootCount;
 
     // ---- Inbound reference graph (VByte stream, --low-memory) ----
-    int[]  inboundOffsets;           // (N+1) elements; inboundOffsets[i] = byte start of row i in stream
-    byte[] inboundStream;            // VByte delta-encoded predecessor lists
+    long[] inboundOffsets;           // (N+1) elements; inboundOffsets[i] = byte start of row i in stream
+    byte[][] inboundStream;          // VByte delta-encoded predecessor lists; chunked to stay below 2 GB per chunk
     BitSet excludedEdge;             // 1 bit per logical edge position in sorted VByte order
 
     // ---- Dominator tree ----
@@ -258,7 +258,12 @@ public final class HeapGraph {
     // ---- Transient forward CSR (built in Phase A.2, freed after RPO DFS) ----
     int[] fwdOffsets; // fwdOffsets[i+1] - fwdOffsets[i] = exact out-degree (compacted)
     int[] fwdEnds;    // null after compaction (kept for potential future use)
-    int[] fwdTargets;
+    // fwdTargets is chunked (int[][]) for large heaps; each chunk = TARGETS_CHUNK_SIZE ints.
+    // For heaps with < TARGETS_CHUNK_SIZE total fwd edges, chunk[0] is the only chunk.
+    int[][] fwdTargets;
+    static final int TARGETS_CHUNK_BITS = 26;            // 64 M ints per chunk
+    static final int TARGETS_CHUNK_SIZE = 1 << TARGETS_CHUNK_BITS;
+    static final int TARGETS_CHUNK_MASK = TARGETS_CHUNK_SIZE - 1;
 
     void computeUnreachableStats() {
         unreachableCount = 0;

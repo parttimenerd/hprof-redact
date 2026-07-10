@@ -30,7 +30,7 @@ final class RpoDfs {
     static void compute(HeapGraph graph) {
         int N = graph.N;
         int[] fwdOffsets = graph.fwdOffsets;
-        int[] fwdTargets = graph.fwdTargets;
+        int[][] fwdTargets = graph.fwdTargets;
 
         int[] rpoOrder = new int[N];
 
@@ -119,13 +119,16 @@ final class RpoDfs {
     }
 
     private static int getChild(int node, int cursor, HeapGraph graph,
-                                 int[] fwdOffsets, int[] fwdTargets) {
+                                 int[] fwdOffsets, int[][] fwdTargets) {
         if (node == HeapGraph.VIRTUAL_ROOT) {
             return cursor < graph.gcRootCount ? graph.gcRootIds[cursor] : -1;
         }
         if (fwdOffsets == null || fwdTargets == null) return -1;
         int start = fwdOffsets[node];
         int idx   = start + cursor;
-        return idx < fwdOffsets[node + 1] ? fwdTargets[idx] : -1;
+        if (idx < fwdOffsets[node + 1]) {
+            return fwdTargets[idx >>> HeapGraph.TARGETS_CHUNK_BITS][idx & HeapGraph.TARGETS_CHUNK_MASK];
+        }
+        return -1;
     }
 }

@@ -45,6 +45,20 @@ public final class HeapGraphBuilder {
 
     private static final int BUFFER_SIZE = 1 << 20; // 1 MB direct buffer per pass
 
+    /** Allocate a chunked int[][] with exactly {@code size} logical elements. */
+    static int[][] allocChunked(int size) {
+        int numChunks = (size + HeapGraph.TARGETS_CHUNK_MASK) >>> HeapGraph.TARGETS_CHUNK_BITS;
+        if (numChunks == 0) numChunks = 1;
+        int[][] chunks = new int[numChunks][];
+        for (int c = 0; c < numChunks - 1; c++) {
+            chunks[c] = new int[HeapGraph.TARGETS_CHUNK_SIZE];
+        }
+        // Last chunk: only allocate what's needed.
+        int lastSize = size & HeapGraph.TARGETS_CHUNK_MASK;
+        chunks[numChunks - 1] = new int[lastSize == 0 ? HeapGraph.TARGETS_CHUNK_SIZE : lastSize];
+        return chunks;
+    }
+
     /** Round {@code n} up to a multiple of {@code align}. */
     private static int alignUp(int n, int align) {
         int r = n % align;
@@ -94,13 +108,16 @@ public final class HeapGraphBuilder {
     private final Path path;
     private final long fileSize;
     private final boolean gzipped;
+    private final boolean tarred;   // true for .hprof.tar.gz: gzip-wrap around a POSIX tar archive
     private byte[] instanceDataBuf = new byte[256];
     private byte[] stringReadBuf   = new byte[256]; // reused for UTF-8 string records
 
     public HeapGraphBuilder(Path path) throws IOException {
         this.path = path;
         this.fileSize = Files.size(path);
-        this.gzipped = detectGzip(path);
+        String name = path.getFileName().toString();
+        this.tarred  = name.endsWith(".tar.gz") || name.endsWith(".tgz");
+        this.gzipped = tarred || detectGzip(path);
     }
 
     private static boolean detectGzip(Path path) throws IOException {
@@ -111,11 +128,101 @@ public final class HeapGraphBuilder {
         }
     }
 
-    /** Open a fresh Parser for one pass. For gzipped files, decompresses from byte 0. */
+    /**
+     * Skip POSIX tar headers in {@code gz} until an entry whose name ends with {@code .hprof}
+     * is found. Returns the entry size in bytes so the caller can wrap the stream with a
+     * size limit, preventing HPROF-padding bytes at the end from being mis-parsed as records.
+     *
+     * Tar format: each entry = 512-byte header block + data padded to 512-byte boundary.
+     * Header layout (POSIX/ustar): name[0..99], size at [124..135] (NUL-terminated octal ASCII),
+     * typeflag at [156] ('0' or '\0' = regular file).
+     * GNU extension: size with high-bit set uses big-endian base-256 encoding.
+     */
+    private static long skipToHprofEntry(InputStream gz) throws IOException {
+        byte[] hdr = new byte[512];
+        while (true) {
+            // Read one 512-byte header block
+            int read = 0;
+            while (read < 512) {
+                int n = gz.read(hdr, read, 512 - read);
+                if (n < 0) throw new IOException("No .hprof entry found in tar archive");
+                read += n;
+            }
+            // Two consecutive all-zero blocks = end-of-archive sentinel
+            boolean allZero = true;
+            for (byte b : hdr) { if (b != 0) { allZero = false; break; } }
+            if (allZero) throw new IOException("No .hprof entry found in tar archive (hit end-of-archive)");
+
+            // Parse entry name (NUL-terminated at offset 0, length 100)
+            int nameLen = 0;
+            while (nameLen < 100 && hdr[nameLen] != 0) nameLen++;
+            String entryName = new String(hdr, 0, nameLen, java.nio.charset.StandardCharsets.US_ASCII);
+
+            // Parse size at offset 124, 12 bytes.
+            // GNU tar extension: if first byte has high bit set (0x80), the remaining 11 bytes
+            // are big-endian binary (base-256). Otherwise NUL/space-terminated octal ASCII.
+            long entrySize;
+            if ((hdr[124] & 0x80) != 0) {
+                // Base-256 encoding: 12 bytes, first byte encodes sign (0x80 = positive)
+                entrySize = 0L;
+                for (int i = 125; i < 136; i++) entrySize = (entrySize << 8) | (hdr[i] & 0xFF);
+            } else {
+                int sizeLen = 0;
+                for (int i = 124; i < 136 && hdr[i] != 0 && hdr[i] != ' '; i++) sizeLen++;
+                String sizeStr = new String(hdr, 124, sizeLen, java.nio.charset.StandardCharsets.US_ASCII).trim();
+                entrySize = sizeStr.isEmpty() ? 0L : Long.parseLong(sizeStr, 8);
+            }
+
+            // Typeflag at offset 156: '0' or '\0' = regular file
+            char typeFlag = (char) hdr[156];
+            boolean isRegular = typeFlag == '0' || typeFlag == '\0';
+
+            if (isRegular && entryName.endsWith(".hprof")) {
+                // Stream is now positioned at first byte of entry data; return size for limit wrapping
+                return entrySize;
+            }
+
+            // Skip this entry's data (padded to 512-byte boundary)
+            long toSkip = entrySize;
+            long remainder = entrySize % 512;
+            if (remainder != 0) toSkip += (512 - remainder);
+            while (toSkip > 0) {
+                long skipped = gz.skip(toSkip);
+                if (skipped <= 0) {
+                    // skip() may return 0 on some streams; fall back to read
+                    int b = gz.read();
+                    if (b < 0) throw new IOException("Unexpected EOF while skipping tar entry");
+                    toSkip--;
+                } else {
+                    toSkip -= skipped;
+                }
+            }
+        }
+    }
+
+    /** Open a fresh Parser for one pass. Handles plain .hprof, .hprof.gz, and .hprof.tar.gz. */
     private Parser openParser() throws IOException {
         if (gzipped) {
             InputStream raw = new BufferedInputStream(Files.newInputStream(path), BUFFER_SIZE);
             InputStream gz  = new GZIPInputStream(raw, BUFFER_SIZE);
+            if (tarred) {
+                long entrySize = skipToHprofEntry(gz);
+                // Wrap with a size-limited stream so tar padding bytes aren't mis-parsed as HPROF records
+                return new Parser(new java.io.FilterInputStream(gz) {
+                    long remaining = entrySize;
+                    @Override public int read() throws IOException {
+                        if (remaining <= 0) return -1;
+                        int b = super.read(); if (b >= 0) remaining--;
+                        return b;
+                    }
+                    @Override public int read(byte[] b, int off, int len) throws IOException {
+                        if (remaining <= 0) return -1;
+                        int n = super.read(b, off, (int) Math.min(len, remaining));
+                        if (n > 0) remaining -= n;
+                        return n;
+                    }
+                });
+            }
             return new Parser(gz);
         }
         return new Parser(path);
@@ -680,63 +787,86 @@ public final class HeapGraphBuilder {
         graph.phaseArrays.donate(inDegree); // donate before losing reference; take() will zero it
         inDegree = null;
 
-        // fwdTargets exact size (no slack — counts are exact from A.2a).
-        // fwdCursor: take donated array (was outDegree/inDegree, now zeroed), fill from fwdOffsets.
-        int[] fwdTargets     = new int[totalFwdSlots];
-        int[] inboundTargets = new int[totalInbEdges];
-        int[] fwdCursor = graph.phaseArrays.takeRaw(); // will be fully overwritten by arraycopy
-        System.arraycopy(fwdOffsets, 0, fwdCursor, 0, N);
-        // ibCursor: take donated array, fill from inboundOffsets start positions
+        // --- Sub-pass A.2b: fill inboundTargets only, then VByte-encode and free it ---
+        // Chunked int[][] avoids a single contiguous allocation that can OOM for large heaps.
+        // Each chunk = TARGETS_CHUNK_SIZE ints (256 MB); up to ~25 chunks for 1.67B edges.
+        int[][] inboundTargets = allocChunked(totalInbEdges);
         int[] ibCursor = graph.phaseArrays.takeRaw(); // will be fully overwritten by arraycopy
         System.arraycopy(inboundOffsets, 0, ibCursor, 0, N);
 
-        // --- Sub-pass A.2b: fill fwdTargets AND inboundTargets simultaneously ---
-        // exclude flag lives in inboundTargets (high bit of srcIdx entry), NOT in fwdTargets.
         short[][] excludePairs = graph.excludePairs;
-        final int[] fwdT = fwdTargets;
-        final int[] ibT  = inboundTargets;
-        final int[] fwdC = fwdCursor;
-        final int[] ibC  = ibCursor;
+        final int[][] ibT = inboundTargets;
+        final int[] ibC = ibCursor;
         try (Parser p = openParser()) {
             scanEdgesWithNames(p, graph, (srcIdx, dstIdx, nameIdx, srcClassIdx) -> {
                 boolean excluded = isExcluded(excludePairs, srcClassIdx, nameIdx);
-                fwdT[fwdC[srcIdx]++] = dstIdx; // no flag in fwdTargets
-                ibT[ibC[dstIdx]++] = excluded ? (srcIdx | Integer.MIN_VALUE) : srcIdx;
+                int pos = ibC[dstIdx]++;
+                ibT[pos >>> HeapGraph.TARGETS_CHUNK_BITS][pos & HeapGraph.TARGETS_CHUNK_MASK]
+                    = excluded ? (srcIdx | Integer.MIN_VALUE) : srcIdx;
             });
         }
-        // Fill synthetic thread→local edges (not excluded)
+        // Fill synthetic thread→local inbound edges
         if (graph.syntheticThreadEdges != null) {
             for (Map.Entry<Integer, int[]> e : graph.syntheticThreadEdges.entrySet()) {
                 int threadIdx = e.getKey();
                 if (threadIdx < N) {
                     for (int localIdx : e.getValue()) {
                         if (localIdx >= 0 && localIdx < N) {
-                            fwdT[fwdC[threadIdx]++] = localIdx; // not excluded
-                            ibT[ibC[localIdx]++] = threadIdx;   // not excluded
+                            int pos = ibC[localIdx]++;
+                            ibT[pos >>> HeapGraph.TARGETS_CHUNK_BITS][pos & HeapGraph.TARGETS_CHUNK_MASK]
+                                = threadIdx; // not excluded
+                        }
+                    }
+                }
+            }
+        }
+        graph.phaseArrays.donate(ibCursor);
+        ibCursor = null;
+
+        // VByte-encode inbound CSR; inboundTargets freed inside encoder.
+        // Encoder sets graph.inboundOffsets (long[]) and graph.inboundStream (byte[][]) directly.
+        CsrBuilderEncoder encoder = new CsrBuilderEncoder(graph, inboundTargets, inboundOffsets, N);
+        encoder.encodeVByte();
+        // inboundTargets is now null (freed inside encoder); donate inboundOffsets int[] for reuse
+        graph.phaseArrays.donate(inboundOffsets);
+        inboundOffsets = null;
+
+        // --- Sub-pass A.2c: fill fwdTargets only (inboundTargets already freed) ---
+        // At this point inboundTargets is gone; allocating fwdTargets now avoids the overlap.
+        int[][] fwdTargets = allocChunked(totalFwdSlots);
+        int[] fwdCursor = graph.phaseArrays.takeRaw(); // will be fully overwritten by arraycopy
+        System.arraycopy(fwdOffsets, 0, fwdCursor, 0, N);
+
+        final int[][] fwdT = fwdTargets;
+        final int[] fwdC = fwdCursor;
+        try (Parser p = openParser()) {
+            scanEdgesWithNames(p, graph, (srcIdx, dstIdx, nameIdx, srcClassIdx) -> {
+                int pos = fwdC[srcIdx]++;
+                fwdT[pos >>> HeapGraph.TARGETS_CHUNK_BITS][pos & HeapGraph.TARGETS_CHUNK_MASK] = dstIdx;
+            });
+        }
+        // Fill synthetic thread→local forward edges
+        if (graph.syntheticThreadEdges != null) {
+            for (Map.Entry<Integer, int[]> e : graph.syntheticThreadEdges.entrySet()) {
+                int threadIdx = e.getKey();
+                if (threadIdx < N) {
+                    for (int localIdx : e.getValue()) {
+                        if (localIdx >= 0 && localIdx < N) {
+                            int pos = fwdC[threadIdx]++;
+                            fwdT[pos >>> HeapGraph.TARGETS_CHUNK_BITS][pos & HeapGraph.TARGETS_CHUNK_MASK] = localIdx;
                         }
                     }
                 }
             }
             graph.syntheticThreadEdges = null;
         }
-
-        // fwdTargets and inboundTargets are fully populated; no compaction or trim needed.
-        // fwdCursor and ibCursor are exhausted; donate for reuse by later phases.
         graph.phaseArrays.donate(fwdCursor);
         fwdCursor = null;
-        graph.phaseArrays.donate(ibCursor);
-        ibCursor = null;
 
         // Store compact forward CSR — fwdOffsets[i+1] is exact, no fwdEnds needed
         graph.fwdOffsets = fwdOffsets;
         graph.fwdEnds    = null;
         graph.fwdTargets = fwdTargets;
-
-        // VByte-encode inbound CSR
-        graph.inboundOffsets = inboundOffsets;
-        CsrBuilderEncoder encoder = new CsrBuilderEncoder(graph, inboundTargets, inboundOffsets, N);
-        encoder.encodeVByte();
-        // inboundTargets freed inside encoder
 
         // Free per-class field layout arrays — only needed during A2 edge scanning
         for (ClassRecord cr : graph.classList) {
@@ -1538,11 +1668,11 @@ public final class HeapGraphBuilder {
 
     private static final class CsrBuilderEncoder {
         private final HeapGraph graph;
-        private int[] targets;
+        private int[][] targets;
         private final int[] offsets;
         private final int n;
 
-        CsrBuilderEncoder(HeapGraph graph, int[] targets, int[] offsets, int n) {
+        CsrBuilderEncoder(HeapGraph graph, int[][] targets, int[] offsets, int n) {
             this.graph = graph;
             this.targets = targets;
             this.offsets = offsets;
@@ -1561,44 +1691,156 @@ public final class HeapGraphBuilder {
     // =========================================================
 
     static final class BitSortHelper {
-        static void sortAndEncode(int[] targets, int[] offsets, int n, HeapGraph graph) {
+        static void sortAndEncode(int[][] targets, int[] offsets, int n, HeapGraph graph) {
             int totalEdges = offsets[n];
             java.util.BitSet newExcluded = new java.util.BitSet(totalEdges);
-            byte[] stream = new byte[Math.max((int) Math.min((long) totalEdges + totalEdges / 2, Integer.MAX_VALUE - 8), 16)];
+
+            // Estimate stream size: VByte deltas average ~1.5 bytes each.
+            // For small heaps (estimate < CHUNK_SIZE): encode into a single byte[] to minimize
+            // peak allocation. For large heaps: use chunked byte[][] (CHUNK_MASK addressing).
+            long estimatedBytes = Math.max((long) totalEdges + totalEdges / 2L, 16L);
+
+            if (estimatedBytes < VByte.CHUNK_SIZE) {
+                // Single-buffer path: allocate one byte[] at estimated size (no 512 MB chunk).
+                sortAndEncodeSingle(targets, offsets, n, newExcluded, (int) estimatedBytes, graph);
+            } else {
+                // Chunked path: full CHUNK_SIZE chunks for CHUNK_MASK addressing.
+                sortAndEncodeChunked(targets, offsets, n, newExcluded, estimatedBytes, graph);
+            }
+        }
+
+        /** Encode into a single byte[] (heap fits in < 512 MB stream). */
+        private static void sortAndEncodeSingle(int[][] targets, int[] offsets, int n,
+                java.util.BitSet newExcluded, int estimatedBytes, HeapGraph graph) {
+            byte[] singleBuf = new byte[estimatedBytes];
+            long[] byteOffsets = new long[n + 1];
             int streamPos = 0;
             int logicalEdgeIdx = 0;
+            int[] rowBuf = null; // scratch buffer for row extraction
 
             for (int v = 0; v < n; v++) {
                 int lo = offsets[v];
                 int hi = offsets[v + 1];
-                int len = hi - lo;
-
-                if (len > 1) {
-                    sortWithFlags(targets, lo, hi);
+                int rowLen = hi - lo;
+                if (rowLen > 1) {
+                    if (rowBuf == null || rowBuf.length < rowLen) rowBuf = new int[rowLen];
+                    extractRow(targets, lo, rowLen, rowBuf);
+                    sortWithFlags(rowBuf, 0, rowLen);
+                    putRow(targets, lo, rowLen, rowBuf);
                 }
 
-                offsets[v] = streamPos;
+                byteOffsets[v] = streamPos;
                 int prev = 0;
                 for (int i = lo; i < hi; i++) {
-                    int raw = targets[i];
+                    int raw = chunkGet(targets, i);
                     boolean excl = (raw & Integer.MIN_VALUE) != 0;
                     int src = raw & Integer.MAX_VALUE;
                     int delta = src - prev;
                     prev = src;
-                    if (streamPos + 8 > stream.length) {
-                        stream = Arrays.copyOf(stream, stream.length * 2);
+
+                    // Grow single buffer if needed (rare: estimate was too small).
+                    if (streamPos + 8 > singleBuf.length) {
+                        singleBuf = Arrays.copyOf(singleBuf, Math.min(singleBuf.length * 2, VByte.CHUNK_SIZE - 1));
                     }
+                    streamPos = VByte.encode(delta, singleBuf, streamPos);
+                    if (excl) newExcluded.set(logicalEdgeIdx);
+                    logicalEdgeIdx++;
+                }
+            }
+            byteOffsets[n] = streamPos;
+
+            // Trim to actual size and wrap in byte[][1].
+            if (streamPos < singleBuf.length) singleBuf = Arrays.copyOf(singleBuf, streamPos);
+            graph.inboundStream  = new byte[][] { singleBuf };
+            graph.inboundOffsets = byteOffsets;
+            graph.excludedEdge   = newExcluded;
+        }
+
+        /** Encode into chunked byte[][] (heap stream exceeds CHUNK_SIZE). */
+        private static void sortAndEncodeChunked(int[][] targets, int[] offsets, int n,
+                java.util.BitSet newExcluded, long estimatedBytes, HeapGraph graph) {
+            int numChunks = (int) ((estimatedBytes + VByte.CHUNK_SIZE - 1) >>> VByte.CHUNK_BITS);
+            if (numChunks < 1) numChunks = 1;
+            byte[][] stream = new byte[numChunks][];
+            for (int c = 0; c < numChunks; c++) stream[c] = new byte[VByte.CHUNK_SIZE];
+
+            long[] byteOffsets = new long[n + 1];
+            long streamPos = 0;
+            int logicalEdgeIdx = 0;
+            int[] rowBuf = null;
+
+            for (int v = 0; v < n; v++) {
+                int lo = offsets[v];
+                int hi = offsets[v + 1];
+                int rowLen = hi - lo;
+
+                if (rowLen > 1) {
+                    if (rowBuf == null || rowBuf.length < rowLen) rowBuf = new int[rowLen];
+                    extractRow(targets, lo, rowLen, rowBuf);
+                    sortWithFlags(rowBuf, 0, rowLen);
+                    putRow(targets, lo, rowLen, rowBuf);
+                }
+
+                byteOffsets[v] = streamPos;
+                int prev = 0;
+                for (int i = lo; i < hi; i++) {
+                    int raw = chunkGet(targets, i);
+                    boolean excl = (raw & Integer.MIN_VALUE) != 0;
+                    int src = raw & Integer.MAX_VALUE;
+                    int delta = src - prev;
+                    prev = src;
+
+                    int chunkIdx = (int) (streamPos >>> VByte.CHUNK_BITS);
+                    int chunkOff = (int) (streamPos & VByte.CHUNK_MASK);
+                    if (chunkOff + 8 > VByte.CHUNK_SIZE) {
+                        // Near end of current full-size chunk: ensure next chunk exists.
+                        if (chunkIdx + 1 >= stream.length) {
+                            stream = Arrays.copyOf(stream, stream.length + 2);
+                        }
+                        if (stream[chunkIdx + 1] == null) {
+                            stream[chunkIdx + 1] = new byte[VByte.CHUNK_SIZE];
+                        }
+                    }
+
                     streamPos = VByte.encode(delta, stream, streamPos);
                     if (excl) newExcluded.set(logicalEdgeIdx);
                     logicalEdgeIdx++;
                 }
             }
+            byteOffsets[n] = streamPos;
 
-            offsets[n] = streamPos;
-            // Assign stream directly — inboundOffsets[n] holds the exact byte count, so
-            // no trim copy is needed. Skipping Arrays.copyOf saves up to 1.5×E bytes peak.
-            graph.inboundStream = stream;
-            graph.excludedEdge = newExcluded;
+            // Trim last chunk and discard trailing empty chunks.
+            int finalChunkIdx = (int) (streamPos >>> VByte.CHUNK_BITS);
+            int finalChunkOff = (int) (streamPos & VByte.CHUNK_MASK);
+            if (finalChunkOff < stream[finalChunkIdx].length) {
+                stream[finalChunkIdx] = Arrays.copyOf(stream[finalChunkIdx], finalChunkOff);
+            }
+            if (finalChunkIdx + 1 < stream.length) {
+                stream = Arrays.copyOf(stream, finalChunkIdx + 1);
+            }
+
+            graph.inboundStream  = stream;
+            graph.inboundOffsets = byteOffsets;
+            graph.excludedEdge   = newExcluded;
+        }
+
+        static int chunkGet(int[][] arr, int idx) {
+            return arr[idx >>> HeapGraph.TARGETS_CHUNK_BITS][idx & HeapGraph.TARGETS_CHUNK_MASK];
+        }
+
+        /** Copy row [lo, lo+len) from chunked array into flat buf[0..len). */
+        private static void extractRow(int[][] arr, int lo, int len, int[] buf) {
+            for (int i = 0; i < len; i++) {
+                buf[i] = chunkGet(arr, lo + i);
+            }
+        }
+
+        /** Write flat buf[0..len) back to chunked array at [lo, lo+len). */
+        private static void putRow(int[][] arr, int lo, int len, int[] buf) {
+            for (int i = 0; i < len; i++) {
+                int idx = lo + i;
+                arr[idx >>> HeapGraph.TARGETS_CHUNK_BITS][idx & HeapGraph.TARGETS_CHUNK_MASK] = buf[i];
+            }
         }
 
         private static void sortWithFlags(int[] arr, int lo, int hi) {

@@ -33,28 +33,28 @@ class CsrBuilderTest {
         b.countEdge(1); b.countEdge(2); b.countEdge(3); b.countEdge(3);
         b.finishCounting();
 
-        // Verify offsets before fill: inDegree = [0,1,1,2], prefix sum offsets = [0,0,1,2,4]
-        int[] offsets = g.inboundOffsets;
-        assertEquals(5, offsets.length); // n+1 sentinel
-        assertEquals(0, offsets[0]); // row 0 starts at 0
-        assertEquals(0, offsets[1]); // row 1 starts at 0 (node 0 has 0 inbound edges)
-        assertEquals(1, offsets[2]); // row 2 starts at 1
-        assertEquals(2, offsets[3]); // row 3 starts at 2
-        assertEquals(4, offsets[4]); // sentinel = total edges
-
-        // Fill phase (src→dst becomes dst←src in inbound)
-        b.addEdge(0, 1, (short)0, (short)0); // 0→1: node 1's predecessor is 0
-        b.addEdge(0, 2, (short)0, (short)0); // 0→2: node 2's predecessor is 0
-        b.addEdge(1, 3, (short)0, (short)0); // 1→3: node 3's predecessor is 1
-        b.addEdge(2, 3, (short)0, (short)0); // 2→3: node 3's predecessor is 2
-
+        // After finishCounting, offsets are stored in CsrBuilder's internal offsetsCursor,
+        // not in g.inboundOffsets (which is null until encodeVByte sets it).
+        // We can only verify after encodeVByte by checking the stream.
+        // For this test, just verify fill+restore works by encoding and checking predecessors.
+        g.excludePairs = new short[0][];
+        b.addEdge(0, 1, (short)0, (short)0);
+        b.addEdge(0, 2, (short)0, (short)0);
+        b.addEdge(1, 3, (short)0, (short)0);
+        b.addEdge(2, 3, (short)0, (short)0);
         b.restoreOffsets();
+        b.encodeVByteWithEmbeddedFlags();
 
-        // After restore, inboundOffsets should be proper prefix sum again
-        assertEquals(0, g.inboundOffsets[0]);
-        assertEquals(0, g.inboundOffsets[1]); // node 0 has no inbound
-        assertEquals(1, g.inboundOffsets[2]);
-        assertEquals(2, g.inboundOffsets[3]);
+        // node 1 has predecessor 0
+        List<Integer> preds1 = iteratePreds(g, 1);
+        assertEquals(1, preds1.size());
+        assertEquals(0, (int) preds1.get(0));
+
+        // node 3 has predecessors 1 and 2
+        List<Integer> preds3 = iteratePreds(g, 3);
+        assertEquals(2, preds3.size());
+        assertTrue(preds3.contains(1));
+        assertTrue(preds3.contains(2));
     }
 
     @Test
@@ -77,6 +77,7 @@ class CsrBuilderTest {
 
         assertNotNull(g.inboundStream);
         assertTrue(g.inboundStream.length > 0);
+        assertTrue(g.inboundStream[0].length > 0);
 
         // Iterate predecessors of node 2: should be 0 and 1
         List<Integer> preds2 = iteratePreds(g, 2);
@@ -160,10 +161,10 @@ class CsrBuilderTest {
     // Helper: iterate predecessors of node v by decoding VByte stream
     private List<Integer> iteratePreds(HeapGraph g, int v) {
         List<Integer> result = new ArrayList<>();
-        int start = g.inboundOffsets[v];
-        int end   = g.inboundOffsets[v + 1];
-        byte[] stream = g.inboundStream;
-        int pos = start;
+        long start = g.inboundOffsets[v];
+        long end   = g.inboundOffsets[v + 1];
+        byte[][] stream = g.inboundStream;
+        long pos = start;
         int prev = 0;
         int[] tmp = new int[1];
         while (pos < end) {

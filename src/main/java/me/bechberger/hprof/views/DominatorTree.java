@@ -52,9 +52,9 @@ final class DominatorTree {
         // ----------------------------------------------------------------
 
         // Lengauer-Tarjan arrays indexed by DFS pre-order position d (0..reachable-1).
-        // Take donated int[N] from phaseArrays (was dfsOrder, donated by freeRpoPos indirectly)
-        // as parent[] to avoid one N-element allocation. Falls back to fresh if slot empty.
-        int[] parent   = graph.phaseArrays != null ? graph.phaseArrays.take() : new int[reachable];
+        // parent[] is eliminated: computed inline as parentOf(d) = dfsPos[dfsPar[dfsOrd[d]]].
+        // dfsPar and dfsOrd are already live in graph.dfsParent and graph.dfsOrder during DOM,
+        // so the inline computation reuses existing arrays and saves one int[reachable] ≈ 43 MB.
         int[] sdom     = new int[reachable]; // semi-dominator DFS-position
         int[] idomD    = new int[reachable]; // immediate dominator DFS-position (output); -1 = unset
         int[] label    = new int[reachable]; // union-find: min-sdom node on path to forest root
@@ -62,7 +62,6 @@ final class DominatorTree {
         int[] bucket   = new int[reachable]; // head of bucket list for each semi-dom; -1 = empty
         int[] next     = new int[reachable]; // linked list next in bucket; -1 = end
 
-        Arrays.fill(parent,   -1);
         Arrays.fill(idomD,    -1);
         Arrays.fill(ancestor, -1);
         Arrays.fill(bucket,   -1);
@@ -72,14 +71,6 @@ final class DominatorTree {
             sdom[d]  = d; // initial: sdom is itself (identity)
         }
 
-        // Build parent[] array from dfsPar[]
-        // parent[d] = dfsPos[dfsPar[dfsOrd[d]]], or -1 for virtual root
-        for (int d = 1; d < reachable; d++) {
-            int v  = dfsOrd[d];
-            int par = dfsPar[v]; // DFS-tree parent node index; -1 for nodes directly under VRoot
-            parent[d] = (par < 0) ? 0 : dfsPos[par]; // -1 → VRoot at dfsPos 0
-        }
-
         // Nodes with implicit VIRTUAL_ROOT predecessor (GC roots + class dump objects)
         BitSet vrAdjacent = new BitSet(N);
         for (int i = 0; i < graph.gcRootCount;  i++) vrAdjacent.set(graph.gcRootIds[i]);
@@ -87,23 +78,32 @@ final class DominatorTree {
 
         // ----------------------------------------------------------------
         // Main LT loop: process in REVERSE DFS pre-order (d = reachable-1 down to 1).
+        // parentOf(d) = dfsPos[dfsPar[dfsOrd[d]]] (inline; avoids a separate int[reachable] array)
         // ----------------------------------------------------------------
         int[] tmp = new int[1]; // reused across iterations for VByte decode
         for (int d = reachable - 1; d >= 1; d--) {
             int v = dfsOrd[d];
 
+            // Inline parent computation: DFS-tree parent of node at DFS-pos d.
+            int par;
+            {
+                int parNode = dfsPar[v]; // DFS spanning-tree parent node index; -1 = no parent
+                par = (parNode < 0) ? 0 : dfsPos[parNode];
+            }
+
             // --- (a) Compute sdom[d] ---
             // Start from DFS-tree parent as upper bound
-            int minSdom = parent[d];
+            int minSdom = par;
 
             // Implicit VRoot predecessor for GC roots and class-dump objects
             if (vrAdjacent.get(v) && minSdom > 0) minSdom = 0;
 
             // Scan actual inbound predecessors
-            int start = graph.inboundOffsets[v];
-            int end   = graph.inboundOffsets[v + 1];
-            byte[] stream = graph.inboundStream;
-            int pos = start, prev = 0;
+            long start = graph.inboundOffsets[v];
+            long end   = graph.inboundOffsets[v + 1];
+            byte[][] stream = graph.inboundStream;
+            long pos = start;
+            int prev = 0;
             while (pos < end) {
                 pos = VByte.decode(stream, pos, tmp);
                 int pred  = prev + tmp[0];
@@ -125,20 +125,16 @@ final class DominatorTree {
             }
             sdom[d] = minSdom;
 
-            // --- (b) Link d into spanning forest: ancestor[d] = parent[d] ---
-            ancestor[d] = parent[d];
+            // --- (b) Link d into spanning forest: ancestor[d] = par ---
+            ancestor[d] = par;
 
             // --- (c) Add d to bucket of its semi-dominator ---
             next[d]         = bucket[sdom[d]];
             bucket[sdom[d]] = d;
 
-            // --- (d) Process bucket of parent[d] ---
-            // For each w in bucket[parent[d]]:
-            //   u = eval(w); idomD[w] = (sdom[u] < sdom[w]) ? u : parent[d]
-            // At this point parent[d] is already linked (ancestor[parent[d]] is set)
-            // because parent[d] < d (DFS parent always has lower pre-order number)
-            // and was processed in a later backward-loop iteration.
-            int par = parent[d];
+            // --- (d) Process bucket of par ---
+            // For each w in bucket[par]:
+            //   u = eval(w); idomD[w] = (sdom[u] < sdom[w]) ? u : par
             int w = bucket[par];
             while (w != -1) {
                 int wNext = next[w];
@@ -149,9 +145,8 @@ final class DominatorTree {
             bucket[par] = -1; // clear processed bucket
         }
 
-        // parent[], label[], ancestor[], bucket[], next[] are all dead after the main loop.
-        // Null them explicitly to release ~5×43 MB before step 4 and the idom translation.
-        parent   = null;
+        // label[], ancestor[], bucket[], next[] are all dead after the main loop.
+        // Null them explicitly to release ~4×43 MB before step 4 and the idom translation.
         label    = null;
         ancestor = null;
         bucket   = null;
@@ -226,7 +221,6 @@ final class DominatorTree {
                 if (d > maxDepth) maxDepth = d;
             }
         }
-        System.err.println("  [DOM] LT completed: reachable=" + reachable + " maxDepth=" + maxDepth);
         // Donate depth[] for reuse — RetainedSizes will take it as retainedSize backing.
         if (graph.phaseArrays != null) graph.phaseArrays.donate(depth);
     }

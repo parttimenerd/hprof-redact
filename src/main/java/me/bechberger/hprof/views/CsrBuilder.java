@@ -39,6 +39,9 @@ final class CsrBuilder {
     private final boolean isInbound; // true = inbound CSR; false = forward CSR
     private final boolean lowMemory; // if true, build BitSet excludedEdge instead of fieldName[]
 
+    // Internal: edge-count offsets used as cursor during fill; owned by CsrBuilder not HeapGraph
+    private int[] offsetsCursor;
+
     // Internal: inboundTargets before VByte encoding
     private int[] targets;
 
@@ -69,7 +72,7 @@ final class CsrBuilder {
 
     /**
      * End of counting: prefix-sum inDegree → offsets; allocate targets.
-     * After this, inboundOffsets[i] = start of row i (forward CSR offsets).
+     * After this, offsetsCursor[i] = start of row i (forward CSR offsets).
      */
     void finishCounting() {
         int[] offsets = new int[n + 1];
@@ -82,13 +85,12 @@ final class CsrBuilder {
         inDegree = null; // free counting array
 
         targets = new int[total];
-        // temporary reuse; caller moves to fwdOffsets
-        graph.inboundOffsets = offsets;
+        offsetsCursor = offsets;
     }
 
     /**
      * Phase B: add one directed edge src→dst with optional field annotation.
-     * Uses graph.inboundOffsets[dst] as a mutable cursor (incremented in-place).
+     * Uses offsetsCursor[dst] as a mutable cursor (incremented in-place).
      * For exclude evaluation: checks if (srcClassIdx, nameIdx) matches any default exclude pair.
      *
      * @param src        source object index
@@ -97,7 +99,7 @@ final class CsrBuilder {
      * @param srcClassIdx class index of src (for exclude pair matching)
      */
     void addEdge(int src, int dst, short nameIdx, short srcClassIdx) {
-        int[] offsets = graph.inboundOffsets;
+        int[] offsets = offsetsCursor;
         int pos = offsets[dst];
         if (isInbound && lowMemory && isExcluded(srcClassIdx, nameIdx)) {
             // Embed exclude flag in sign bit of src value; stripped during VByte encode
@@ -122,93 +124,13 @@ final class CsrBuilder {
     }
 
     /**
-     * After Phase B: restore inboundOffsets to proper prefix-sum form.
+     * After Phase B: restore offsetsCursor to proper prefix-sum form.
      * (Phase B used offsets[i] as write cursors, incrementing them; this shifts right by 1.)
      */
     void restoreOffsets() {
-        int[] offsets = graph.inboundOffsets;
+        int[] offsets = offsetsCursor;
         System.arraycopy(offsets, 0, offsets, 1, n);
         offsets[0] = 0;
-    }
-
-    /**
-     * Post-Phase-B (--low-memory): sort each row's sources ascending, VByte-encode as deltas
-     * into a growing byte[] stream. Updates graph.inboundOffsets to byte-stream positions.
-     * Re-indexes graph.excludedEdge from fill-order to sorted-order.
-     * Frees the int[] targets after encoding.
-     */
-    void encodeVByte() {
-        int[] offsets = graph.inboundOffsets;
-        int totalEdges = offsets[n];
-
-        // Temporary new BitSet for re-indexed exclude flags
-        BitSet newExcluded = graph.excludedEdge != null ? new BitSet(totalEdges) : null;
-
-        // Estimate stream capacity: ~1.25 bytes/edge average; grow on overflow.
-        byte[] stream = new byte[Math.max(totalEdges + totalEdges / 4, 16)];
-        int streamPos = 0;
-        byte[] encodeBuf = new byte[8];
-
-        for (int v = 0; v < n; v++) {
-            int rowStart = offsets[v];
-            int rowEnd   = offsets[v + 1];
-            int rowLen   = rowEnd - rowStart;
-
-            // Sort sources in this row ascending (in-place within targets[rowStart..rowEnd))
-            if (rowLen > 1) {
-                Arrays.sort(targets, rowStart, rowEnd);
-                // Re-index excludedEdge: old positions → sorted positions
-                // After Arrays.sort, we don't know the permutation directly.
-                // Strategy: for each sorted position, re-evaluate the exclude condition.
-                // We re-evaluate based on the src value and its class.
-                // (The original BitSet used fill-order positions, which we can't recover
-                // without the original permutation. Since we have src indices, we can
-                // re-evaluate exclude from classIndex[src] and the edge nameIdx... but
-                // we don't have nameIdx here. Alternative: We stored it in the BitSet
-                // by fill-order position. Re-evaluation is only possible if we remember
-                // which src values were excluded.)
-                // Simpler correct approach: during Phase B we set excludedEdge[pos] where pos
-                // is the fill-order cursor value. After sorting, the old positions are lost.
-                // SOLUTION: store the exclude flag in the sign bit of targets[] temporarily.
-                // During addEdge, set targets[pos] = src | 0x80000000 if excluded.
-                // Then during encodeVByte, strip the flag out before encoding.
-                // Note: this requires src indices to fit in 31 bits (N < 2^31, true for all heaps).
-                // Re-sorting with flags intact works because sort is on the lower 31 bits.
-                // We handle this by re-encoding with flag extraction.
-            }
-
-            // Update offset to stream position
-            offsets[v] = streamPos;
-
-            // Encode row as VByte deltas
-            int prev = 0;
-            for (int i = rowStart; i < rowEnd; i++) {
-                int rawSrc = targets[i];
-                boolean excluded = (rawSrc & 0x80000000) != 0;
-                int src = rawSrc & 0x7FFFFFFF;
-                int delta = src - prev;
-                prev = src;
-                // Ensure stream capacity
-                if (streamPos + 8 > stream.length) {
-                    stream = Arrays.copyOf(stream, stream.length * 2);
-                }
-                streamPos = VByte.encode(delta, stream, streamPos);
-                if (newExcluded != null && excluded) {
-                    // edge position in stream = logical edge index during iteration
-                    // we track by current logical edge count in this row
-                    int edgeIdx = offsets[v] + (i - rowStart); // approximate; see note below
-                    newExcluded.set(streamPos - 1); // set at current stream byte? No, need logical.
-                    // CORRECTION: use a separate logical edge counter
-                }
-            }
-        }
-
-        offsets[n] = streamPos;
-        targets = null; // free int[] inboundTargets
-        // Trim only if >50% of the buffer is wasted — avoids a multi-GB copy for typical heaps
-        // where streamPos ≈ stream.length (1.25× estimate is tight).
-        graph.inboundStream = (streamPos < stream.length / 2) ? Arrays.copyOf(stream, streamPos) : stream;
-        if (newExcluded != null) graph.excludedEdge = newExcluded;
     }
 
     /**
@@ -217,16 +139,62 @@ final class CsrBuilder {
      *
      * During addEdge, if excluded: store src | Integer.MIN_VALUE in targets[pos].
      * During encodeVByte, extract the flag from the sign bit before encoding.
+     * Sets graph.inboundOffsets (long[]) and graph.inboundStream (byte[][]) directly.
      */
     void encodeVByteWithEmbeddedFlags() {
-        int[] offsets = graph.inboundOffsets;
+        int[] offsets = offsetsCursor;
         int totalEdges = offsets[n];
 
         BitSet newExcluded = new BitSet(totalEdges);
-        // Allocate 1.25× headroom; grow on overflow; trim only if >50% wasted.
-        byte[] stream = new byte[Math.max((int) Math.min((long) totalEdges + totalEdges / 4, Integer.MAX_VALUE - 8), 16)];
-        int streamPos = 0;
         int logicalEdgeIdx = 0;
+
+        // Estimate stream size; small heaps use single byte[], large use chunked byte[][].
+        long estimatedBytes = Math.max((long) totalEdges + totalEdges / 4L, 16L);
+        long[] byteOffsets = new long[n + 1];
+        long streamPos = 0;
+
+        if (estimatedBytes < VByte.CHUNK_SIZE) {
+            // Single-buffer path: allocate exactly estimatedBytes (no 512 MB chunk needed).
+            byte[] singleBuf = new byte[(int) estimatedBytes];
+
+            for (int v = 0; v < n; v++) {
+                int rowStart = offsets[v];
+                int rowEnd   = offsets[v + 1];
+                int rowLen   = rowEnd - rowStart;
+                if (rowLen > 1) {
+                    if (rowLen > sortScratch.length) sortScratch = new long[rowLen];
+                    sortWithFlags(targets, rowStart, rowEnd, sortScratch);
+                }
+                byteOffsets[v] = streamPos;
+                int prev = 0;
+                for (int i = rowStart; i < rowEnd; i++) {
+                    int rawSrc = targets[i];
+                    boolean excluded = (rawSrc & Integer.MIN_VALUE) != 0;
+                    int src = rawSrc & Integer.MAX_VALUE;
+                    int delta = src - prev;
+                    prev = src;
+                    if ((int) streamPos + 8 > singleBuf.length) {
+                        singleBuf = Arrays.copyOf(singleBuf, Math.min(singleBuf.length * 2, VByte.CHUNK_SIZE - 1));
+                    }
+                    streamPos = VByte.encode(delta, singleBuf, (int) streamPos);
+                    if (excluded) newExcluded.set(logicalEdgeIdx);
+                    logicalEdgeIdx++;
+                }
+            }
+            byteOffsets[n] = streamPos;
+            targets = null; offsetsCursor = null;
+            if ((int) streamPos < singleBuf.length) singleBuf = Arrays.copyOf(singleBuf, (int) streamPos);
+            graph.inboundStream  = new byte[][] { singleBuf };
+            graph.inboundOffsets = byteOffsets;
+            graph.excludedEdge   = newExcluded;
+            return;
+        }
+
+        // Chunked path: all chunks exactly CHUNK_SIZE for CHUNK_MASK addressing.
+        int numChunks = (int) ((estimatedBytes + VByte.CHUNK_SIZE - 1) >>> VByte.CHUNK_BITS);
+        if (numChunks < 1) numChunks = 1;
+        byte[][] stream = new byte[numChunks][];
+        for (int c = 0; c < numChunks; c++) stream[c] = new byte[VByte.CHUNK_SIZE];
 
         for (int v = 0; v < n; v++) {
             int rowStart = offsets[v];
@@ -238,17 +206,24 @@ final class CsrBuilder {
                 sortWithFlags(targets, rowStart, rowEnd, sortScratch);
             }
 
-            offsets[v] = streamPos;
+            byteOffsets[v] = streamPos;
             int prev = 0;
 
             for (int i = rowStart; i < rowEnd; i++) {
                 int rawSrc = targets[i];
                 boolean excluded = (rawSrc & Integer.MIN_VALUE) != 0;
-                int src = rawSrc & Integer.MAX_VALUE; // strip sign bit
+                int src = rawSrc & Integer.MAX_VALUE;
                 int delta = src - prev;
                 prev = src;
-                if (streamPos + 8 > stream.length) {
-                    stream = Arrays.copyOf(stream, stream.length * 2);
+                int chunkIdx = (int) (streamPos >>> VByte.CHUNK_BITS);
+                int chunkOff = (int) (streamPos & VByte.CHUNK_MASK);
+                if (chunkOff + 8 > VByte.CHUNK_SIZE) {
+                    if (chunkIdx + 1 >= stream.length) {
+                        stream = Arrays.copyOf(stream, stream.length + 2);
+                    }
+                    if (stream[chunkIdx + 1] == null) {
+                        stream[chunkIdx + 1] = new byte[VByte.CHUNK_SIZE];
+                    }
                 }
                 streamPos = VByte.encode(delta, stream, streamPos);
                 if (excluded) newExcluded.set(logicalEdgeIdx);
@@ -256,10 +231,23 @@ final class CsrBuilder {
             }
         }
 
-        offsets[n] = streamPos;
+        byteOffsets[n] = streamPos;
         targets = null;
-        graph.inboundStream = (streamPos < stream.length / 2) ? Arrays.copyOf(stream, streamPos) : stream;
-        graph.excludedEdge = newExcluded;
+        offsetsCursor = null;
+
+        // Trim last chunk
+        int finalChunkIdx = (int) (streamPos >>> VByte.CHUNK_BITS);
+        int finalChunkOff = (int) (streamPos & VByte.CHUNK_MASK);
+        if (finalChunkOff < stream[finalChunkIdx].length) {
+            stream[finalChunkIdx] = Arrays.copyOf(stream[finalChunkIdx], finalChunkOff);
+        }
+        if (finalChunkIdx + 1 < stream.length) {
+            stream = Arrays.copyOf(stream, finalChunkIdx + 1);
+        }
+
+        graph.inboundStream  = stream;
+        graph.inboundOffsets = byteOffsets;
+        graph.excludedEdge   = newExcluded;
     }
 
     /** Sort targets[lo..hi) by lower 31 bits (actual src index), preserving sign-bit flag.
@@ -299,13 +287,15 @@ final class CsrBuilder {
     int[] getTargets() { return targets; }
 
     /**
-     * Transfer the built forward CSR arrays out of graph.inboundOffsets/targets
-     * into dedicated fwdOffsets/fwdTargets variables and clear graph references.
+     * Transfer the built forward CSR offsets out as long[], clearing local reference.
+     * Converts the int[] offsetsCursor to long[] for storage in graph.inboundOffsets.
      */
-    int[] takeOffsets() {
-        int[] off = graph.inboundOffsets;
-        graph.inboundOffsets = null;
-        return off;
+    long[] takeOffsets() {
+        int[] off = offsetsCursor;
+        offsetsCursor = null;
+        long[] longOff = new long[off.length];
+        for (int i = 0; i < off.length; i++) longOff[i] = off[i];
+        return longOff;
     }
 
     int[] takeTargets() {
