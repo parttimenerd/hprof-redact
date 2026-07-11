@@ -853,16 +853,19 @@ public final class HeapGraphBuilder {
         // Encoder sets graph.inboundOffsets (long[]) and graph.inboundStream (byte[][]) directly.
         CsrBuilderEncoder encoder = new CsrBuilderEncoder(graph, inboundTargets, inboundOffsets, N);
         encoder.encodeVByte();
-        // inboundTargets is now null (freed inside encoder); donate inboundOffsets int[] for reuse
-        graph.phaseArrays.donate(inboundOffsets);
-        inboundOffsets = null;
+        // inboundTargets freed inside encoder. Do NOT donate inboundOffsets to phaseArrays yet —
+        // delaying until after fwdTargets alloc keeps 2 GB out of the A2c peak (the overall max).
         Log.debug("  [RSS] A2b after inb encode+free: %,d KB", Log.rssKb());
 
         // --- Sub-pass A.2c: fill fwdTargets only (inboundTargets already freed) ---
         // At this point inboundTargets is gone; allocating fwdTargets now avoids the overlap.
         int[][] fwdTargets = allocChunked(totalFwdSlots);
+        // Now it's safe to donate stale inboundOffsets — fwdTargets peak already passed.
+        // RpoDfs will take it via phaseArrays for dfsParent reuse (big14).
+        graph.phaseArrays.donate(inboundOffsets);
+        inboundOffsets = null;
         Log.debug("  [RSS] A2c after fwdTargets alloc: %,d KB", Log.rssKb());
-        int[] fwdCursor = graph.phaseArrays.takeRaw(); // gets inDegree/ibCursor storage (from phaseArrays)
+        int[] fwdCursor = graph.phaseArrays.takeRaw(); // gets ibCursor (int[N]) from phaseArrays slot0
         System.arraycopy(fwdOffsets, 0, fwdCursor, 0, N);
 
         final int[][] fwdT = fwdTargets;
