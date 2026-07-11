@@ -382,6 +382,8 @@ public final class HeapGraphBuilder {
 
             // --- Finalise IdMap ---
             idMap.sort();
+            // big22: build insertion→sorted-index mapping and free addrBuf (~6 GB) before buildClassList
+            state.computeInsertionToSortedIdx();
             int N = 1 + idMap.size(); // slot 0 = virtual root
             graph.N = N;
             graph.phaseArrays = new HeapGraph.PhaseArrays(N);
@@ -1398,6 +1400,10 @@ public final class HeapGraphBuilder {
         private long[] classIdBuf; // classId of each object
         private byte[] arrayTypeBuf; // 0=not array, -1=obj array, >0=prim array elem type
         private int count;
+        // big22: track last-appended address so appendShallow/ClassId/ArrayType don't need addrBuf[count-1]
+        private long lastAddr = -1L;
+        // big22: insertion-order → sorted-index mapping; built after idMap.sort(), frees addrBuf ~4 GB
+        private int[] insertionToSortedIdx;
 
         final IntLongHashMap classSerialToId = new IntLongHashMap();
         final LongLongHashMap classIdToNameId = new LongLongHashMap();
@@ -1458,6 +1464,7 @@ public final class HeapGraphBuilder {
                 arrayTypeBuf = Arrays.copyOf(arrayTypeBuf, count * 2);
             }
             addrBuf[count++] = addr;
+            lastAddr = addr;
             idMap.append(addr);
         }
 
@@ -1471,15 +1478,15 @@ public final class HeapGraphBuilder {
 
         void appendShallowSize(long addr, int bytes) {
             // find the entry we just appended (it's always the last one)
-            if (count > 0 && addrBuf[count-1] == addr) shallowBuf[count-1] = bytes;
+            if (count > 0 && lastAddr == addr) shallowBuf[count-1] = bytes;
         }
 
         void appendClassId(long addr, long classId) {
-            if (count > 0 && addrBuf[count-1] == addr) classIdBuf[count-1] = classId;
+            if (count > 0 && lastAddr == addr) classIdBuf[count-1] = classId;
         }
 
         void appendArrayType(long addr, byte type) {
-            if (count > 0 && addrBuf[count-1] == addr) arrayTypeBuf[count-1] = type;
+            if (count > 0 && lastAddr == addr) arrayTypeBuf[count-1] = type;
         }
 
         void appendGCRoot(long addr, byte type) {
@@ -1521,6 +1528,20 @@ public final class HeapGraphBuilder {
                 if (idx >= 0) graph.addClassDumpIndex(idx);
             }
             graph.trimClassDumpIndices();
+        }
+
+        /**
+         * big22: build insertionToSortedIdx[i] = idMap.indexOf(addrBuf[i]) for each insertion slot,
+         * then free addrBuf (long[~763M] = ~6 GB on large heaps) to reduce peak RSS before buildClassList.
+         * insertionToSortedIdx[i]+1 is the 1-based object index (slot 0 = virtual root).
+         * Must be called after idMap.sort() and before buildClassList.
+         */
+        void computeInsertionToSortedIdx() {
+            insertionToSortedIdx = new int[count];
+            for (int i = 0; i < count; i++) {
+                insertionToSortedIdx[i] = idMap.indexOf(addrBuf[i]);
+            }
+            addrBuf = null; // free ~6 GB
         }
 
         void buildClassList(HeapGraph graph, IdMap idMap) {
@@ -1629,7 +1650,8 @@ public final class HeapGraphBuilder {
 
             // Fill shallowSizeDiv8 and classIndex for all objects
             for (int i = 0; i < count; i++) {
-                int objIdx = objectIndex(idMap, addrBuf[i]);
+                int sortedIdx = insertionToSortedIdx[i];
+                int objIdx = sortedIdx >= 0 ? sortedIdx + 1 : -1; // +1 for virtual root offset
                 if (objIdx < 0) continue;
                 long cid = classIdBuf[i];
                 byte atype = arrayTypeBuf[i];
@@ -1660,7 +1682,7 @@ public final class HeapGraphBuilder {
                     }
                 } else {
                     // No class id (should be rare — class-dump self entry)
-                    int cv = matClassSize.getIfAbsent(addrBuf[i], -1);
+                    int cv = matClassSize.getIfAbsent(idMap.addressAtSorted(insertionToSortedIdx[i]), -1);
                     bytes = cv >= 0 ? cv : alignUp(pointerSize + refSize, objectAlign);
                     isClassObject = true;
                 }
@@ -1691,7 +1713,7 @@ public final class HeapGraphBuilder {
                 }
             }
             // Free large A1State scan buffers — no longer needed after class/object metadata is built
-            addrBuf = null; shallowBuf = null; classIdBuf = null; arrayTypeBuf = null;
+            insertionToSortedIdx = null; shallowBuf = null; classIdBuf = null; arrayTypeBuf = null;
         }
 
         void buildTraceFrames(HeapGraph graph) {

@@ -120,6 +120,15 @@ final class IdMap {
         return get(idx);
     }
 
+    /** Returns the heap address at 0-based sorted position sortedIdx (0 = first real address).
+     *  Unlike addressAt(), there is no virtual-root offset: sortedIdx=0 is the smallest address.
+     *  Used by big22 insertionToSortedIdx lookups. */
+    long addressAtSorted(int sortedIdx) {
+        if (!sorted) throw new IllegalStateException("sort() not yet called");
+        if (sortedIdx < 0 || sortedIdx >= size) return 0L;
+        return get(sortedIdx);
+    }
+
     /**
      * Returns the index (0-based) for the given address, or -1 if not found.
      * Must be called after sort(). If freeBucket() has been called, falls back
