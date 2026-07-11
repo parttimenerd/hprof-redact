@@ -847,23 +847,24 @@ public final class HeapGraphBuilder {
         // inboundTargets freed inside encoder. ibCursor donated after encode for fwdCursor reuse.
         CsrBuilderEncoder encoder = new CsrBuilderEncoder(graph, inboundTargets, ibCursor, N, totalInbEdges);
         encoder.encodeVByte();
-        graph.phaseArrays.donate(ibCursor); // fwdCursor (A2c) and rpoOrder (RPO) will reuse this storage
+        graph.phaseArrays.donate(ibCursor); // ibCursor stays in pool through A2c; RPO takes it as rpoOrder
         ibCursor = null;
         Log.debug("  [RSS] A2b after inb encode+free: %,d KB", Log.rssKb());
 
         // --- Sub-pass A.2c: fill fwdTargets only (inboundTargets already freed) ---
-        // Take ibCursor storage from phaseArrays BEFORE allocating fwdTargets (big17 pattern):
-        // phaseArrays is empty during the alloc, no 2 GB pinned by the pool at the peak.
-        int[] fwdCursor = graph.phaseArrays.takeRaw(); // gets ibCursor (int[N]) from phaseArrays slot0
+        // big20: use fwdOffsets directly as the write cursor — no separate fwdCursor int[N] needed.
+        // fwdOffsets[v] starts at the start-offset of row v and is incremented on each edge written.
+        // After fill, fwdOffsets[v] = exclusive end of row v (= start of row v+1).
+        // phaseArrays retains ibCursor (slot0) throughout A2c; RPO takes it as rpoOrder.
+        // This saves 2 GB (no fwdCursor take/alloc) at the fwdTargets allocation peak.
         int[][] fwdTargets = allocChunked(totalFwdSlots);
         Log.debug("  [RSS] A2c after fwdTargets alloc: %,d KB", Log.rssKb());
-        System.arraycopy(fwdOffsets, 0, fwdCursor, 0, N);
 
         final int[][] fwdT = fwdTargets;
-        final int[] fwdC = fwdCursor;
+        final int[] fwdW = fwdOffsets; // write cursor: fwdW[v] = next write position for row v
         try (Parser p = openParser()) {
             scanEdgesWithNames(p, graph, (srcIdx, dstIdx, nameIdx, srcClassIdx) -> {
-                int pos = fwdC[srcIdx]++;
+                int pos = fwdW[srcIdx]++;
                 fwdT[pos >>> HeapGraph.TARGETS_CHUNK_BITS][pos & HeapGraph.TARGETS_CHUNK_MASK] = dstIdx;
             });
         }
@@ -874,7 +875,7 @@ public final class HeapGraphBuilder {
                 if (threadIdx < N) {
                     for (int localIdx : e.getValue()) {
                         if (localIdx >= 0 && localIdx < N) {
-                            int pos = fwdC[threadIdx]++;
+                            int pos = fwdW[threadIdx]++;
                             fwdT[pos >>> HeapGraph.TARGETS_CHUNK_BITS][pos & HeapGraph.TARGETS_CHUNK_MASK] = localIdx;
                         }
                     }
@@ -882,10 +883,12 @@ public final class HeapGraphBuilder {
             }
             graph.syntheticThreadEdges = null;
         }
-        graph.phaseArrays.donate(fwdCursor);
-        fwdCursor = null;
+        // fwdOffsets[v] now holds end-of-row-v positions (= start of row v+1).
+        // RpoDfs reads lo = v==0 ? 0 : fwdOffsets[v-1]; hi = fwdOffsets[v].
+        // phaseArrays.slot0 still holds ibCursor; RPO will take it as rpoOrder.
 
-        // Store compact forward CSR — fwdOffsets[i] is exact start, totalFwdEdges is the N-sentinel
+        // Store end-position forward CSR — fwdOffsets[v] = exclusive end of row v.
+        // totalFwdEdges = fwdOffsets[N-1] = end of last row (= fwdOffsets[N] sentinel in old start-position scheme).
         graph.fwdOffsets    = fwdOffsets;
         graph.totalFwdEdges = totalFwdSlots;
         graph.fwdEnds    = null;

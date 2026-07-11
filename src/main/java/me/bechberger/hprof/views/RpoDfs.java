@@ -28,6 +28,10 @@ import java.util.BitSet;
  * {@code int[N]} (~2 GB) during the DFS traversal. {@code dfsPos[]} is reconstructed from
  * {@code dfsOrder[]} in O(N) after the DFS completes, when {@code fwdTargets} has been freed.
  *
+ * Forward CSR layout (big20): {@code graph.fwdOffsets[v]} = exclusive end of row v (not start).
+ * Row v spans [v==0 ? 0 : fwdOffsets[v-1], fwdOffsets[v]).
+ * This avoids a separate fwdCursor int[N] allocation in A2c — saving 2 GB at the A2c peak.
+ *
  * Note: rpoPos[] is NOT produced here. Reachability is determined via dfsPos[v] >= 0.
  */
 final class RpoDfs {
@@ -37,16 +41,17 @@ final class RpoDfs {
     static void compute(HeapGraph graph) {
         int N = graph.N;
         int[] fwdOffsets    = graph.fwdOffsets;
-        int   totalFwdEdges = graph.totalFwdEdges; // sentinel: end of last node's edges
+        // graph.totalFwdEdges is no longer needed in RpoDfs — end-position fwdOffsets[N-1] is the sentinel.
         int[][] fwdTargets  = graph.fwdTargets;
 
-        int[] rpoOrder = graph.phaseArrays.takeRaw(); // donated by A2 (ibCursor/fwdCursor); avoids fresh int[N]
+        int[] rpoOrder = graph.phaseArrays.takeRaw(); // donated by A2b (ibCursor); A2c no longer consumes the slot (big20)
 
         // Use a BitSet for visited tracking during DFS (~64 MB for 514M nodes) instead of
         // int[N] (~2 GB). dfsPos[N] is reconstructed after freeFwdCsr() drops fwdTargets.
         BitSet visited = new BitSet(N);
         int[] dfsOrder  = new int[N];
-        // phaseArrays slot1 is empty after big18 (inboundOffsets copyOf eliminated); dfsParent = fresh int[N].
+        // phaseArrays is empty after rpoOrder take (ibCursor was the only slot; big20 eliminated fwdCursor).
+        // dfsParent = fresh int[N].
         int[] dfsParent = graph.phaseArrays.takeRaw();
         Arrays.fill(dfsParent, -1);
 
@@ -74,8 +79,8 @@ final class RpoDfs {
         if (fwdTargets != null && fwdTargets.length > 1) {
             chunkRefs = new int[fwdTargets.length];
             for (int v = 1; v < N; v++) { // skip VIRTUAL_ROOT (its edges are gcRootIds)
-                int lo = fwdOffsets[v];
-                int hi = fwdEnd(v, fwdOffsets, totalFwdEdges);
+                int lo = fwdOffsets[v - 1]; // end-position semantics: start of row v = end of row v-1
+                int hi = fwdOffsets[v];                    // end-position of row v
                 if (lo >= hi) continue;
                 int loChunk = lo  >>> HeapGraph.TARGETS_CHUNK_BITS;
                 int hiChunk = (hi - 1) >>> HeapGraph.TARGETS_CHUNK_BITS;
@@ -90,9 +95,9 @@ final class RpoDfs {
             int cursor = cursorStack[top];
 
             boolean pushed = false;
-            int childCount = childCount(node, graph, fwdOffsets, totalFwdEdges);
+            int childCount = childCount(node, graph, fwdOffsets);
             while (cursor < childCount) {
-                int child = getChild(node, cursor, graph, fwdOffsets, fwdTargets, totalFwdEdges);
+                int child = getChild(node, cursor, graph, fwdOffsets, fwdTargets);
                 cursor++;
                 if (child < 0 || child >= N) continue;
                 if (!visited.get(child)) { // not yet visited
@@ -118,8 +123,8 @@ final class RpoDfs {
                 // Decrement chunk refcounts for the popped node's edge range.
                 // Free any chunk whose refcount just hit zero.
                 if (chunkRefs != null && node != HeapGraph.VIRTUAL_ROOT) {
-                    int lo = fwdOffsets[node];
-                    int hi = fwdEnd(node, fwdOffsets, totalFwdEdges);
+                    int lo = fwdOffsets[node - 1]; // start of row node = end of row node-1
+                    int hi = fwdOffsets[node];     // end of row node
                     if (lo < hi) {
                         int loChunk = lo  >>> HeapGraph.TARGETS_CHUNK_BITS;
                         int hiChunk = (hi - 1) >>> HeapGraph.TARGETS_CHUNK_BITS;
@@ -160,27 +165,32 @@ final class RpoDfs {
         graph.dfsParent = dfsParent;
     }
 
-    /** Returns the end index of node's forward edges; handles the last-node sentinel. */
-    private static int fwdEnd(int node, int[] fwdOffsets, int totalFwdEdges) {
-        int next = node + 1;
-        return next < fwdOffsets.length ? fwdOffsets[next] : totalFwdEdges;
+    /** Returns the end index (exclusive) of node's forward edges using end-position fwdOffsets.
+     *  fwdOffsets[node] = exclusive end of row node. Never called for VIRTUAL_ROOT. */
+    private static int fwdEnd(int node, int[] fwdOffsets) {
+        return fwdOffsets[node]; // fwdOffsets[v] IS the end-position of row v (big20)
     }
 
-    private static int childCount(int node, HeapGraph graph, int[] fwdOffsets, int totalFwdEdges) {
+    /** Returns the start index (inclusive) of node's forward edges using end-position fwdOffsets. */
+    private static int fwdStart(int node, int[] fwdOffsets) {
+        return node == 0 ? 0 : fwdOffsets[node - 1]; // start of row v = end of row v-1
+    }
+
+    private static int childCount(int node, HeapGraph graph, int[] fwdOffsets) {
         if (node == HeapGraph.VIRTUAL_ROOT) return graph.gcRootCount;
         if (fwdOffsets == null || node >= fwdOffsets.length) return 0;
-        return fwdEnd(node, fwdOffsets, totalFwdEdges) - fwdOffsets[node];
+        return fwdEnd(node, fwdOffsets) - fwdStart(node, fwdOffsets);
     }
 
     private static int getChild(int node, int cursor, HeapGraph graph,
-                                 int[] fwdOffsets, int[][] fwdTargets, int totalFwdEdges) {
+                                 int[] fwdOffsets, int[][] fwdTargets) {
         if (node == HeapGraph.VIRTUAL_ROOT) {
             return cursor < graph.gcRootCount ? graph.gcRootIds[cursor] : -1;
         }
         if (fwdOffsets == null || fwdTargets == null) return -1;
-        int start = fwdOffsets[node];
+        int start = fwdStart(node, fwdOffsets);
         int idx   = start + cursor;
-        if (idx < fwdEnd(node, fwdOffsets, totalFwdEdges)) {
+        if (idx < fwdEnd(node, fwdOffsets)) {
             int[] chunk = fwdTargets[idx >>> HeapGraph.TARGETS_CHUNK_BITS];
             return chunk != null ? chunk[idx & HeapGraph.TARGETS_CHUNK_MASK] : -1;
         }
