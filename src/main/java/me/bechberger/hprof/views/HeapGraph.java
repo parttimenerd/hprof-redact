@@ -144,6 +144,18 @@ public final class HeapGraph {
      *  Nulled after forward CSR is built. */
     Map<Integer, int[]> syntheticThreadEdges;  // null after edge CSR is built
 
+    // ---- Transient metadata for A2a inline fill (big24) — freed after A2a ----
+    /** classId → MAT-parity per-instance shallow size. Null after A2a. */
+    LongIntHashMap matInstanceSize;
+    /** classId → MAT-parity per-class-object shallow size. Null after A2a. */
+    LongIntHashMap matClassSize;
+    /** classList index of java.lang.Class (-1 if not found). Used to attribute class-objects. */
+    int javaLangClassIdx = -1;
+    /** arrayClassId → classList index for object-array classes. Null after A2a. */
+    LongIntHashMap objArrayClassIdx;
+    /** primArrayClassIdx[typeCode] = classList index + 1 (0=unset) for primitive array classes. Null after A2a. */
+    int[] primArrayClassIdx;
+
     HeapGraph(Path sourcePath, int idSize, long fileSize, String hprofFormat, IdMap idMap) {
         this.sourcePath = sourcePath;
         this.idSize = idSize;

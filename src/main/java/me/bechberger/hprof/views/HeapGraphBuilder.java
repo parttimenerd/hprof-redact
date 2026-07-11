@@ -308,15 +308,12 @@ public final class HeapGraphBuilder {
     // =========================================================
 
     private HeapGraph phaseA1(IdMap idMap) throws IOException {
-        // Estimate N and E from file size (~48 bytes/object, ~2 edges/object)
-        int nEstimated = Math.max(64, (int) Math.min(fileSize / 48, Integer.MAX_VALUE / 2L));
-
         try (Parser p = openParser()) {
             HeapGraph graph = new HeapGraph(path, p.idSize(), fileSize, p.hprofFormat(), idMap);
 
-            // Per-object metadata arrays — allocate at estimated size, grow if needed
-            // We use a temporary builder object to accumulate before we know final N.
-            A1State state = new A1State(nEstimated, idMap);
+            // A1 collects addresses, class metadata, and GC roots only.
+            // Shallow sizes and class indices are filled inline in A2a (big24).
+            A1State state = new A1State(idMap);
 
             // Map from classId (long) → class serial number (for classIndex lookup later)
             LongIntHashMap classIdToSerial = new LongIntHashMap();
@@ -382,8 +379,6 @@ public final class HeapGraphBuilder {
 
             // --- Finalise IdMap ---
             idMap.sort();
-            // big22: build insertion→sorted-index mapping and free addrBuf (~6 GB) before buildClassList
-            state.computeInsertionToSortedIdx();
             int N = 1 + idMap.size(); // slot 0 = virtual root
             graph.N = N;
             graph.phaseArrays = new HeapGraph.PhaseArrays(N);
@@ -394,9 +389,10 @@ public final class HeapGraphBuilder {
                 graph.refSize = 4;
             }
 
-            // --- Allocate per-object arrays ---
-            graph.shallowSizeDiv8 = state.flushShallowSizes(N);
-            graph.classIndex = state.flushClassIndex(N);
+            // --- Allocate per-object arrays (big24: filled by A2a inline, not from A1 parallel arrays) ---
+            graph.shallowSizeDiv8 = new byte[N];
+            graph.classIndex = new int[N];
+            java.util.Arrays.fill(graph.classIndex, -1);
 
             // Resolve GC roots to indices
             state.flushGCRoots(graph, idMap);
@@ -616,14 +612,7 @@ public final class HeapGraphBuilder {
                     long dataLen = p.readU4(); p.skipFully(dataLen);
                     remaining -= ids + 4 + ids + 4 + (int) dataLen;
                     state.appendAddress(objId);
-                    // shallowSize is the instance data length + object header (12 or 16 bytes).
-                    // We defer computation to flush time (buildClassList) where we know refSize
-                    // (may be 4 with compressed OOPS). MAT's formula:
-                    //   alignUp(fieldBytes(all inherited) + pointerSize + refSize, objectAlign)
-                    // where fieldBytes = HPROF instsize (from CLASS_DUMP). Store 0 as sentinel.
-                    int shallowBytes = 0;
-                    state.appendShallowSize(objId, shallowBytes);
-                    state.appendClassId(objId, classId);
+                    // shallowSize and classIndex filled inline during A2a (big24)
                 }
                 case HPROF_GC_OBJ_ARRAY_DUMP -> {
                     long objId = p.readId(); p.readU4(); int numElem = (int) p.readU4();
@@ -645,9 +634,7 @@ public final class HeapGraphBuilder {
                     state.appendAddress(objId);
                     // Store numElem in shallowBuf slot for arrays; final byte size computed in flush
                     // once compressed-OOPS is known.
-                    state.appendShallowSize(objId, numElem);
-                    state.appendClassId(objId, elemClassId); // element class (used to synthesize array class)
-                    state.appendArrayType(objId, (byte) -1); // mark as object array
+                    // shallowSize and classIndex filled inline during A2a (big24)
                 }
                 case HPROF_GC_PRIM_ARRAY_DUMP -> {
                     long objId = p.readId(); p.readU4(); int numElem = (int) p.readU4();
@@ -660,9 +647,7 @@ public final class HeapGraphBuilder {
                     p.skipFully(dataBytes);
                     remaining -= ids + 4 + 4 + 1 + (int) dataBytes;
                     state.appendAddress(objId);
-                    // Store numElem; final byte size computed in flush.
-                    state.appendShallowSize(objId, numElem);
-                    state.appendArrayType(objId, (byte) elemType);
+                    // shallowSize and classIndex filled inline during A2a (big24)
                 }
                 default -> throw new IOException("Unknown heap sub-record tag: 0x" + Integer.toHexString(subTag)
                         + " at remaining=" + remaining);
@@ -745,8 +730,7 @@ public final class HeapGraphBuilder {
         state.classOwnPrimitiveFieldBytes.put(classId, ownPrimitiveFieldBytes);
         state.classStaticObjectFieldCount.put(classId, staticObjectFieldCount);
         state.classStaticPrimitiveFieldBytes.put(classId, staticPrimitiveFieldBytes);
-        // Placeholder — real class-object shallow size computed at flush (needs refSize)
-        state.appendShallowSize(classId, 0);
+        // shallow size for class-objects filled inline in A2a (big24)
         return consumed;
     }
 
@@ -785,6 +769,11 @@ public final class HeapGraphBuilder {
                 }
             }
         }
+        // big24: free transient mat-size maps — no longer needed after A2a inline fill completes
+        graph.matInstanceSize = null;
+        graph.matClassSize = null;
+        graph.objArrayClassIdx = null;
+        graph.primArrayClassIdx = null;
 
         // Prefix-sum outDegree in-place → becomes fwdOffsets[0..N-1].
         // Use outDegree directly as fwdOffsets (int[N]), saving the 2 GB Arrays.copyOf(N+1)
@@ -970,6 +959,11 @@ public final class HeapGraphBuilder {
                     if (dataLen > instanceDataBuf.length) instanceDataBuf = new byte[dataLen];
                     p.readBytesInto(instanceDataBuf, dataLen); remaining -= dataLen;
                     if (srcIdx >= 0 && srcIdx < N) {
+                        // big24: fill shallow size and classIndex inline
+                        if (classIdx >= 0) graph.classIndex[srcIdx] = classIdx;
+                        int bytes = graph.matInstanceSize.getIfAbsent(classId, -1);
+                        if (bytes < 0) bytes = alignUp(graph.pointerSize + graph.refSize, graph.objectAlign);
+                        setShallow(graph, srcIdx, bytes);
                         // class-object edge (always emitted)
                         int classObjIdx = objectIndex(idMap, classId);
                         if (classObjIdx >= 0 && classObjIdx < N) {
@@ -998,6 +992,21 @@ public final class HeapGraphBuilder {
                     long elemClassId = p.readId();
                     remaining -= ids + 4 + 4 + ids;
                     int srcIdx = objectIndex(idMap, objId);
+                    // big24: fill shallow size and classIndex inline (lazy array class synthesis)
+                    if (srcIdx >= 0 && srcIdx < N) {
+                        int bytes = alignUp(graph.pointerSize + graph.refSize + 4 + numElem * graph.refSize, graph.objectAlign);
+                        setShallow(graph, srcIdx, bytes);
+                        int arrayClassIdx = graph.objArrayClassIdx.getIfAbsent(elemClassId, -1);
+                        if (arrayClassIdx < 0) {
+                            arrayClassIdx = graph.classIdToIndex.getIfAbsent(elemClassId, -1);
+                            if (arrayClassIdx < 0) {
+                                arrayClassIdx = graph.classList.size();
+                                graph.classList.add(new ArrayClassRecord("[Ljava/lang/Object;"));
+                            }
+                            graph.objArrayClassIdx.put(elemClassId, arrayClassIdx);
+                        }
+                        graph.classIndex[srcIdx] = arrayClassIdx;
+                    }
                     // class-object edge (always emitted)
                     if (srcIdx >= 0 && srcIdx < N && elemClassId != 0) {
                         int classObjIdx = objectIndex(idMap, elemClassId);
@@ -1021,10 +1030,35 @@ public final class HeapGraphBuilder {
                 case HPROF_GC_PRIM_ARRAY_DUMP -> {
                     long objId = p.readId(); p.readU4(); int numElem = (int) p.readU4();
                     int elemType = p.readU1();
-                    long dataBytes = (long) numElem * primTypeSize(elemType);
+                    int elemSize = primTypeSize(elemType);
+                    long dataBytes = (long) numElem * elemSize;
                     p.skipFully(dataBytes);
                     remaining -= ids + 4 + 4 + 1 + (int) dataBytes;
-                    // Primitive arrays have no object-ref edges
+                    // big24: fill shallow size and classIndex inline (lazy primitive array class synthesis)
+                    int srcIdx = objectIndex(idMap, objId);
+                    if (srcIdx >= 0 && srcIdx < N) {
+                        int bytes = alignUp(alignUp(graph.pointerSize + graph.refSize + 4, graph.refSize) + numElem * elemSize, graph.objectAlign);
+                        setShallow(graph, srcIdx, bytes);
+                        int[] pac = graph.primArrayClassIdx;
+                        int cidx = (elemType < pac.length) ? pac[elemType] - 1 : -1;
+                        if (cidx < 0 && elemType < pac.length) {
+                            String arrayName = switch (elemType) {
+                                case HPROF_TYPE_BOOLEAN -> "boolean[]";
+                                case HPROF_TYPE_CHAR    -> "char[]";
+                                case HPROF_TYPE_FLOAT   -> "float[]";
+                                case HPROF_TYPE_DOUBLE  -> "double[]";
+                                case HPROF_TYPE_BYTE    -> "byte[]";
+                                case HPROF_TYPE_SHORT   -> "short[]";
+                                case HPROF_TYPE_INT     -> "int[]";
+                                case HPROF_TYPE_LONG    -> "long[]";
+                                default                 -> "array[" + elemType + "]";
+                            };
+                            cidx = graph.classList.size();
+                            graph.classList.add(new ArrayClassRecord(arrayName));
+                            pac[elemType] = cidx + 1;
+                        }
+                        if (cidx >= 0) graph.classIndex[srcIdx] = cidx;
+                    }
                 }
                 default -> throw new IOException("Unknown heap sub-record tag: 0x" + Integer.toHexString(subTag));
             }
@@ -1043,6 +1077,14 @@ public final class HeapGraphBuilder {
 
         int srcIdx = objectIndex(idMap, classId);
         int N = graph.N;
+
+        // big24: fill shallow size and classIndex for class-objects inline
+        if (srcIdx >= 0 && srcIdx < N) {
+            int bytes = graph.matClassSize.getIfAbsent(classId, -1);
+            if (bytes < 0) bytes = alignUp(graph.pointerSize + graph.refSize, graph.objectAlign);
+            setShallow(graph, srcIdx, bytes);
+            if (graph.javaLangClassIdx >= 0) graph.classIndex[srcIdx] = graph.javaLangClassIdx;
+        }
 
         // Emit classObj→superClass and classObj→classLoader
         if (srcIdx >= 0 && srcIdx < N) {
@@ -1313,6 +1355,17 @@ public final class HeapGraphBuilder {
         return idx >= 0 ? idx + 1 : -1; // +1 for virtual root offset
     }
 
+    private static void setShallow(HeapGraph graph, int idx, int bytes) {
+        if (bytes <= 0) return;
+        int div8 = bytes / 8;
+        if (div8 > 0 && div8 <= 255) {
+            graph.shallowSizeDiv8[idx] = (byte) div8;
+        } else {
+            if (graph.overflowSizes == null) graph.overflowSizes = new HeapGraph.LongLongMap(64);
+            graph.overflowSizes.put(idx, bytes);
+        }
+    }
+
     private static long readIdFromBytes(byte[] data, int offset, int idSize) {
         if (idSize == 4) {
             return Integer.toUnsignedLong(
@@ -1394,18 +1447,6 @@ public final class HeapGraphBuilder {
 
     private static final class A1State {
         private final IdMap idMap;
-        // Dynamic address + metadata buffers (parallel arrays, grown together)
-        private long[] addrBuf;
-        private int[] shallowBuf; // shallow size in bytes
-        private long[] classIdBuf; // classId of each object
-        private byte[] arrayTypeBuf; // 0=not array, -1=obj array, >0=prim array elem type
-        private int count;
-        // big22: track last-appended address so appendShallow/ClassId/ArrayType don't need addrBuf[count-1]
-        private long lastAddr = -1L;
-        // big22: insertion-order → sorted-index mapping; built after idMap.sort(), frees addrBuf ~4 GB
-        private int[] insertionToSortedIdx;
-        // big23: compressed classId mapping; int sortedIdx instead of long heap address, frees classIdBuf ~4 GB
-        private int[] classIdxBuf;
 
         final IntLongHashMap classSerialToId = new IntLongHashMap();
         final LongLongHashMap classIdToNameId = new LongLongHashMap();
@@ -1423,10 +1464,6 @@ public final class HeapGraphBuilder {
         final LongIntHashMap classSerialByClassId = new LongIntHashMap();
         final LongObjectHashMap<long[]> classObjFields = new LongObjectHashMap<>(); // classId → [nameId0,off0, nameId1,off1, ...]
         final List<Long> classDumpIds = new ArrayList<>();   // all classId values from CLASS_DUMP records
-
-        // Synthesized array class maps (built in buildClassList second pass)
-        final LongIntHashMap objArrayElemToClassIdx = new LongIntHashMap(); // elemClassId → synthetic class index
-        int[] primArrayClassIdx = new int[12]; // indexed by HPROF type code (0..11), 0=unset
 
         // GC roots (parallel arrays)
         private long[] gcRootAddrs;
@@ -1446,49 +1483,23 @@ public final class HeapGraphBuilder {
         final IntObjectHashMap<long[]> traces = new IntObjectHashMap<>(); // traceSerial → frameIds
         final IntLongHashMap threadSerialToObjId = new IntLongHashMap();
 
-        A1State(int est, IdMap idMap) {
+        A1State(IdMap idMap) {
             this.idMap = idMap;
-            addrBuf   = new long[est];
-            shallowBuf = new int[est];
-            classIdBuf = new long[est];
-            arrayTypeBuf = new byte[est];
-            count = 0;
             gcRootAddrs = new long[1024];
             gcRootTypes = new byte[1024];
             gcRootCount = 0;
         }
 
         void appendAddress(long addr) {
-            if (count == addrBuf.length) {
-                addrBuf   = Arrays.copyOf(addrBuf, count * 2);
-                shallowBuf = Arrays.copyOf(shallowBuf, count * 2);
-                classIdBuf = Arrays.copyOf(classIdBuf, count * 2);
-                arrayTypeBuf = Arrays.copyOf(arrayTypeBuf, count * 2);
-            }
-            addrBuf[count++] = addr;
-            lastAddr = addr;
             idMap.append(addr);
         }
 
         /** Register an address in IdMap only (no metadata entry). Used for GC-root locals
          *  that are already in the dump as INSTANCE/ARRAY records — we need them in IdMap
-         *  for edge resolution but must not add a metadata-less addrBuf entry that could
+         *  for edge resolution but must not add a metadata-less entry that could
          *  corrupt shallow sizes computed from the real dump record. */
         void appendAddressToIdMapOnly(long addr) {
             idMap.append(addr);
-        }
-
-        void appendShallowSize(long addr, int bytes) {
-            // find the entry we just appended (it's always the last one)
-            if (count > 0 && lastAddr == addr) shallowBuf[count-1] = bytes;
-        }
-
-        void appendClassId(long addr, long classId) {
-            if (count > 0 && lastAddr == addr) classIdBuf[count-1] = classId;
-        }
-
-        void appendArrayType(long addr, byte type) {
-            if (count > 0 && lastAddr == addr) arrayTypeBuf[count-1] = type;
         }
 
         void appendGCRoot(long addr, byte type) {
@@ -1499,21 +1510,6 @@ public final class HeapGraphBuilder {
             gcRootAddrs[gcRootCount] = addr;
             gcRootTypes[gcRootCount] = type;
             gcRootCount++;
-        }
-
-        /** Flush shallow sizes to graph.shallowSizeDiv8 after idMap is sorted. */
-        byte[] flushShallowSizes(int N) {
-            byte[] div8 = new byte[N];
-            // index 0 = virtual root, size 0
-            // For now, return empty; shallowSizes must be set by address→index lookup
-            // This is done properly in buildClassList + flushByAddress
-            return div8;
-        }
-
-        int[] flushClassIndex(int N) {
-            int[] arr = new int[N];
-            java.util.Arrays.fill(arr, -1); // -1 = class object / unresolved
-            return arr;
         }
 
         void flushGCRoots(HeapGraph graph, IdMap idMap) {
@@ -1530,25 +1526,6 @@ public final class HeapGraphBuilder {
                 if (idx >= 0) graph.addClassDumpIndex(idx);
             }
             graph.trimClassDumpIndices();
-        }
-
-        /**
-         * big22: build insertionToSortedIdx[i] = idMap.indexOf(addrBuf[i]) for each insertion slot,
-         * then free addrBuf (long[~763M] = ~6 GB on large heaps) to reduce peak RSS before buildClassList.
-         * insertionToSortedIdx[i]+1 is the 1-based object index (slot 0 = virtual root).
-         * big23: compress classIdBuf (long[~763M] = ~6 GB) into classIdxBuf (int[~514M] = ~2 GB)
-         * by replacing each class heap-address with its idMap sorted index (-1 if not in idMap).
-         * Must be called after idMap.sort() and before buildClassList.
-         */
-        void computeInsertionToSortedIdx() {
-            insertionToSortedIdx = new int[count];
-            classIdxBuf = new int[count];
-            for (int i = 0; i < count; i++) {
-                insertionToSortedIdx[i] = idMap.indexOf(addrBuf[i]);
-                classIdxBuf[i] = classIdBuf[i] != 0 ? idMap.indexOf(classIdBuf[i]) : -1;
-            }
-            addrBuf = null;    // free ~6 GB (big22)
-            classIdBuf = null; // free ~6 GB (big23)
         }
 
         void buildClassList(HeapGraph graph, IdMap idMap) {
@@ -1578,150 +1555,35 @@ public final class HeapGraphBuilder {
                 graph.classSerialToIndex.put(serial, classIdx);
             });
 
-            // Second pass: synthesize array class records for obj arrays and prim arrays
-            for (int i = 0; i < count; i++) {
-                byte atype = arrayTypeBuf[i];
-                if (atype == 0) continue; // not an array
-                if (atype == (byte) -1) {
-                    // classIdxBuf[i] is the sorted index of the ARRAY class (per HPROF spec,
-                    // HPROF_GC_OBJ_ARRAY_DUMP's fourth field is "array class object ID",
-                    // not the element class). That class is typically already registered
-                    // via LOAD_CLASS + CLASS_DUMP with a name like "[Ljava/lang/Object;".
-                    long arrayClassId = idMap.addressAtSorted(classIdxBuf[i]);
-                    if (!objArrayElemToClassIdx.containsKey(arrayClassId)) {
-                        int existingIdx = graph.classIdToIndex.getIfAbsent(arrayClassId, -1);
-                        if (existingIdx >= 0) {
-                            objArrayElemToClassIdx.put(arrayClassId, existingIdx);
-                        } else {
-                            // Fallback: array class not registered (rare). Synthesize a placeholder.
-                            String arrayName = "[Ljava/lang/Object;";
-                            int newClassIdx = graph.classList.size();
-                            graph.classList.add(new ArrayClassRecord(arrayName));
-                            objArrayElemToClassIdx.put(arrayClassId, newClassIdx);
-                        }
-                    }
-                } else {
-                    // Primitive array: atype = HPROF type code
-                    int typeCode = atype & 0xFF;
-                    if (typeCode < primArrayClassIdx.length && primArrayClassIdx[typeCode] == 0) {
-                        String arrayName = switch (typeCode) {
-                            case HPROF_TYPE_BOOLEAN -> "boolean[]";
-                            case HPROF_TYPE_CHAR    -> "char[]";
-                            case HPROF_TYPE_FLOAT   -> "float[]";
-                            case HPROF_TYPE_DOUBLE  -> "double[]";
-                            case HPROF_TYPE_BYTE    -> "byte[]";
-                            case HPROF_TYPE_SHORT   -> "short[]";
-                            case HPROF_TYPE_INT     -> "int[]";
-                            case HPROF_TYPE_LONG    -> "long[]";
-                            default                 -> "array[" + typeCode + "]";
-                        };
-                        int newClassIdx = graph.classList.size();
-                        graph.classList.add(new ArrayClassRecord(arrayName));
-                        primArrayClassIdx[typeCode] = newClassIdx + 1; // +1 so 0 means unset
-                    }
-                }
-            }
-
-            // Precompute MAT-parity per-instance size for every class using calculateInstanceSize:
-            //   alignUp(calculateSizeRecursive(clazz), objectAlign=8)
-            //   calculateSizeRecursive(c) =
-            //     (c has no super) ? pointerSize + refSize
-            //                      : alignUp(ownFieldsSizeMAT(c) + calculateSizeRecursive(super), refSize)
-            //   ownFieldsSizeMAT(c) = ownObjectFieldCount(c)*refSize + ownPrimitiveFieldBytes(c)
+            // Precompute MAT-parity per-instance size for every class using calculateInstanceSize.
+            // Stored in graph.matInstanceSize/matClassSize for use by A2a inline fill (big24).
             final int pointerSize = graph.pointerSize;
             final int refSize = graph.refSize;
             final int objectAlign = graph.objectAlign;
-            final LongIntHashMap matInstanceSize = new LongIntHashMap();
+            graph.matInstanceSize = new LongIntHashMap();
             classSuperIds.forEachKey(classId ->
-                    computeMatInstanceSize(classId, matInstanceSize,
+                    computeMatInstanceSize(classId, graph.matInstanceSize,
                             classSuperIds, classOwnObjectFieldCount, classOwnPrimitiveFieldBytes,
                             pointerSize, refSize, objectAlign));
-            // Also compute for class-objects themselves: alignUp(staticFieldBytesMAT, objectAlign)
-            //   staticFieldBytesMAT = staticObjectFieldCount * refSize + staticPrimitiveFieldBytes
-            final LongIntHashMap matClassSize = new LongIntHashMap();
+            graph.matClassSize = new LongIntHashMap();
             classSuperIds.forEachKey(classId -> {
                 int sfObj = classStaticObjectFieldCount.getIfAbsent(classId, 0);
                 int sfPrim = classStaticPrimitiveFieldBytes.getIfAbsent(classId, 0);
                 int sfBytes = sfObj * refSize + sfPrim;
-                matClassSize.put(classId, alignUp(sfBytes, objectAlign));
+                graph.matClassSize.put(classId, alignUp(sfBytes, objectAlign));
             });
 
             // Look up java.lang.Class classIdx — for attributing class-object shallow to it (MAT parity).
-            int javaLangClassIdx = -1;
             for (int ci = 0; ci < graph.classList.size(); ci++) {
                 if ("java/lang/Class".equals(graph.classList.get(ci).name())) {
-                    javaLangClassIdx = ci;
+                    graph.javaLangClassIdx = ci;
                     break;
                 }
             }
 
-            // Fill shallowSizeDiv8 and classIndex for all objects
-            for (int i = 0; i < count; i++) {
-                int sortedIdx = insertionToSortedIdx[i];
-                int objIdx = sortedIdx >= 0 ? sortedIdx + 1 : -1; // +1 for virtual root offset
-                if (objIdx < 0) continue;
-                int cidSorted = classIdxBuf[i]; // big23: sorted index of classId (-1 if none)
-                long cid = cidSorted >= 0 ? idMap.addressAtSorted(cidSorted) : 0L;
-                byte atype = arrayTypeBuf[i];
-                int rawShallow = shallowBuf[i]; // for arrays: numElem; for instances: 0 (unused); for class objs: 0
-                int bytes;
-                boolean isClassObject = false;
-                if (atype == (byte) -1) {
-                    // Object array: MAT formula
-                    //   alignUp(pointerSize + refSize + 4 + numElem * refSize, objectAlign)
-                    bytes = alignUp(pointerSize + refSize + 4 + rawShallow * refSize, objectAlign);
-                } else if (atype != 0) {
-                    // Primitive array: MAT formula
-                    //   alignUp(alignUp(pointerSize + refSize + 4, refSize) + numElem * elemSize, objectAlign)
-                    int elemSize = primTypeSize(atype & 0xFF);
-                    bytes = alignUp(alignUp(pointerSize + refSize + 4, refSize) + rawShallow * elemSize, objectAlign);
-                } else if (cid != 0) {
-                    // Non-array: either an instance object (has class registered in matInstanceSize)
-                    // or a class-object (registered in matClassSize).
-                    // A class-object appears in classDumpIds; its classId points to itself.
-                    int v = matInstanceSize.getIfAbsent(cid, -1);
-                    if (v >= 0) {
-                        bytes = v;
-                    } else {
-                        // Class object: cid IS the class's own id → use matClassSize
-                        int cv = matClassSize.getIfAbsent(cid, -1);
-                        bytes = cv >= 0 ? cv : alignUp(pointerSize + refSize, objectAlign);
-                        isClassObject = true;
-                    }
-                } else {
-                    // No class id (should be rare — class-dump self entry)
-                    int cv = matClassSize.getIfAbsent(idMap.addressAtSorted(insertionToSortedIdx[i]), -1);
-                    bytes = cv >= 0 ? cv : alignUp(pointerSize + refSize, objectAlign);
-                    isClassObject = true;
-                }
-                if (bytes > 0) {
-                    int div8 = bytes / 8;
-                    if (div8 > 0 && div8 <= 255) {
-                        graph.shallowSizeDiv8[objIdx] = (byte) div8;
-                    } else {
-                        if (graph.overflowSizes == null) graph.overflowSizes = new HeapGraph.LongLongMap(64);
-                        graph.overflowSizes.put(objIdx, bytes);
-                    }
-                }
-                // Class index: use synthesized array class for arrays;
-                // MAT parity: class-objects are attributed to java.lang.Class, not their own class.
-                int cidx2;
-                if (atype == (byte) -1) {
-                    cidx2 = objArrayElemToClassIdx.getIfAbsent(cid, -1);
-                } else if (atype != 0) {
-                    int typeCode = atype & 0xFF;
-                    cidx2 = (typeCode < primArrayClassIdx.length) ? primArrayClassIdx[typeCode] - 1 : -1;
-                } else if (isClassObject) {
-                    cidx2 = javaLangClassIdx; // attribute class-dump objects to java.lang.Class
-                } else {
-                    cidx2 = graph.classIdToIndex.getIfAbsent(cid, -1);
-                }
-                if (cidx2 >= 0) {
-                    graph.classIndex[objIdx] = cidx2;
-                }
-            }
-            // Free large A1State scan buffers — no longer needed after class/object metadata is built
-            insertionToSortedIdx = null; shallowBuf = null; classIdxBuf = null; arrayTypeBuf = null;
+            // Initialize array-class synthesis tables for lazy filling in A2a.
+            graph.objArrayClassIdx = new LongIntHashMap();
+            graph.primArrayClassIdx = new int[12];
         }
 
         void buildTraceFrames(HeapGraph graph) {
