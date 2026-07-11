@@ -137,7 +137,9 @@ final class RpoDfs {
         System.arraycopy(rpoOrder, rpoIdx, rpoOrder, 0, postCount);
 
         // Free fwdTargets and fwdOffsets before allocating dfsPos[N] to reduce peak RSS.
-        // Null the local references too so G1 can collect the arrays immediately.
+        // Donate fwdOffsets to phaseArrays first so it can be reused as dfsPos[N] without
+        // any new allocation — avoids the window where both arrays are alive during GC lag.
+        graph.phaseArrays.donate(fwdOffsets);
         graph.freeFwdCsr();
         fwdOffsets = null;
         fwdTargets = null;
@@ -145,7 +147,7 @@ final class RpoDfs {
 
         // Reconstruct dfsPos[N] (node → DFS pre-order position) from dfsOrder[].
         // dfsPos[v] = -1 for unreachable nodes (defaults to -1 from Arrays.fill).
-        int[] dfsPos = new int[N];
+        int[] dfsPos = graph.phaseArrays.takeRaw(); // reuses fwdOffsets backing; falls back to new int[N]
         Arrays.fill(dfsPos, -1);
         for (int d = 0; d < dfsCount; d++) {
             dfsPos[dfsOrder[d]] = d;
