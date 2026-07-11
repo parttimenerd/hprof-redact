@@ -94,10 +94,27 @@ public final class HeapGraph {
      *  MAT-style "top ancestors" for each class. */
     BitSet hasSameClassAncestor;
 
-    /** For each node index v: the classList index of the class that this node IS the class-object
-     *  for, or -1 if v is not a class-object. Built by HeapGraphBuilder after classList is final.
-     *  Used by RetainedSizes to detect "classObject(C) is ancestor of v" in O(N). */
-    int[] classObjClassIdx;
+    /** Sparse reverse mapping: class-object node → classList index.
+     *  Stored as a sorted flat array of (nodeIdx, ci) pairs interleaved:
+     *  [node0, ci0, node1, ci1, ...] sorted by nodeIdx ascending.
+     *  Length = 2 * (number of class-object nodes). Replaces the former int[N]
+     *  dense array (~2 GB for 514M objects) with ~1 MB for 133K classes.
+     *  Lookup: {@link #classObjCiForNode(int)}. */
+    int[] classObjNodeCiPairs;
+
+    /** Returns the classList index for node v if it is a class-object, else -1. */
+    int classObjCiForNode(int v) {
+        int[] pairs = classObjNodeCiPairs;
+        if (pairs == null || pairs.length == 0) return -1;
+        int lo = 0, hi = (pairs.length >> 1) - 1;
+        while (lo <= hi) {
+            int mid = (lo + hi) >>> 1;
+            int key = pairs[mid * 2];
+            if (key == v) return pairs[mid * 2 + 1];
+            if (key < v) lo = mid + 1; else hi = mid - 1;
+        }
+        return -1;
+    }
 
     // ---- Class object indices (populated in Phase A.1, used in RPO/DomTree) ----
     /** All object indices that appear in HPROF_GC_CLASS_DUMP records (1-based).

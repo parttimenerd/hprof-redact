@@ -278,7 +278,7 @@ public final class HeapGraphBuilder {
         System.gc();
         long t1 = System.currentTimeMillis();
         Log.verbose("  [RSS] after A1+GC: %,d KB", Log.rssKb());
-        phaseA2(graph);
+        InboundBuilder inboundBuilder = phaseA2(graph);
         System.gc();
         long t2 = System.currentTimeMillis();
         Log.verbose("  [RSS] after A2+GC: %,d KB", Log.rssKb());
@@ -286,6 +286,13 @@ public final class HeapGraphBuilder {
         System.gc();
         long t3 = System.currentTimeMillis();
         Log.verbose("  [RSS] after RPO+GC: %,d KB", Log.rssKb());
+        // big26: run deferred inbound fill+encode after RPO frees fwdTargets/fwdOffsets (~5.5 GB savings at RPO peak)
+        inboundBuilder.build(graph);
+        inboundBuilder = null;
+        // For compressLevel<=0 (Markdown, no A3), free idMap sorted arrays now — last use was in InboundBuilder.build().
+        if (!keepAddressIndex && compressLevel <= 0) graph.idMap.freeSortedArrays();
+        System.gc();
+        Log.verbose("  [RSS] after A2b (deferred inb)+GC: %,d KB", Log.rssKb());
         DominatorTree.compute(graph);
         if (freePostDom) {
             // Free inbound CSR — only consumed by DominatorTree; freed inside DOM after Phase 1.
@@ -512,19 +519,34 @@ public final class HeapGraphBuilder {
      * classes with no explicit GC root record are unreachable, making their static fields (and
      * transitively referenced objects) also unreachable.
      */
-    /** Builds graph.classObjClassIdx: for each class-object node, records the classList index
-     *  of the class it represents. Used by RetainedSizes to handle MAT-style group-retained. */
+    /** Builds graph.classObjNodeCiPairs: sparse sorted (nodeIdx, ci) pairs for class-object nodes.
+     *  Replaces the former dense int[N] classObjClassIdx (~2 GB for 514M objects) with ~1 MB. */
     private static void buildClassObjClassIdx(HeapGraph graph) {
         int N = graph.N;
-        int[] result = new int[N];
-        java.util.Arrays.fill(result, -1);
         int classCount = graph.classList.size();
+        // Collect (nodeIdx, ci) pairs for valid class-object nodes, then sort by nodeIdx.
+        int count = 0;
+        int[] tmp = new int[classCount * 2];
         for (int ci = 0; ci < classCount; ci++) {
             int nodeIdx = graph.classNodeIdx != null ? graph.classNodeIdx[ci] : -1;
             if (nodeIdx <= 0 || nodeIdx >= N) continue;
-            result[nodeIdx] = ci;
+            tmp[count * 2]     = nodeIdx;
+            tmp[count * 2 + 1] = ci;
+            count++;
         }
-        graph.classObjClassIdx = result;
+        // Sort by nodeIdx using a simple index sort via long-pack trick.
+        int[] pairs = java.util.Arrays.copyOf(tmp, count * 2);
+        // Pack (nodeIdx << 32 | ci) into longs, sort, unpack.
+        long[] packed = new long[count];
+        for (int i = 0; i < count; i++) {
+            packed[i] = ((long) pairs[i * 2] << 32) | (pairs[i * 2 + 1] & 0xFFFFFFFFL);
+        }
+        java.util.Arrays.sort(packed);
+        for (int i = 0; i < count; i++) {
+            pairs[i * 2]     = (int) (packed[i] >>> 32);
+            pairs[i * 2 + 1] = (int) packed[i];
+        }
+        graph.classObjNodeCiPairs = pairs;
     }
 
     private static void addSystemClassRootsIfMissing(HeapGraph graph, IdMap idMap) {
@@ -755,7 +777,7 @@ public final class HeapGraphBuilder {
     // Phase A.2: edge resolution + forward CSR + inDegree
     // =========================================================
 
-    private void phaseA2(HeapGraph graph) throws IOException {
+    private InboundBuilder phaseA2(HeapGraph graph) throws IOException {
         int N = graph.N;
         int ids = graph.idSize;
         IdMap idMap = graph.idMap;
@@ -825,55 +847,17 @@ public final class HeapGraphBuilder {
         }
         // ibCursor: inDegree itself (already holds start-positions); incremented during fill to end-positions.
         // No copyOf needed — after fill the encoder reads ibCursor[v]=end(v) via shifted access.
+        // Keep ibCursor for the deferred inbound build (phaseA2b, run after RPO).
         int[] ibCursor = inDegree;
         inDegree = null;
 
-        // --- Sub-pass A.2b: fill inboundTargets only, then VByte-encode and free it ---
-        // Chunked int[][] avoids a single contiguous allocation that can OOM for large heaps.
-        // Each chunk = TARGETS_CHUNK_SIZE ints (256 MB); up to ~25 chunks for 1.67B edges.
-        int[][] inboundTargets = allocChunked(totalInbEdges);
-        int[][] excludePairs = graph.excludePairs;
-        final int[][] ibT = inboundTargets;
-        final int[] ibC = ibCursor;
-        try (Parser p = openParser()) {
-            scanEdgesWithNames(p, graph, (srcIdx, dstIdx, nameIdx, srcClassIdx) -> {
-                boolean excluded = isExcluded(excludePairs, srcClassIdx, nameIdx);
-                int pos = ibC[dstIdx]++;
-                ibT[pos >>> HeapGraph.TARGETS_CHUNK_BITS][pos & HeapGraph.TARGETS_CHUNK_MASK]
-                    = excluded ? (srcIdx | Integer.MIN_VALUE) : srcIdx;
-            });
-        }
-        // Fill synthetic thread→local inbound edges
-        if (graph.syntheticThreadEdges != null) {
-            for (Map.Entry<Integer, int[]> e : graph.syntheticThreadEdges.entrySet()) {
-                int threadIdx = e.getKey();
-                if (threadIdx < N) {
-                    for (int localIdx : e.getValue()) {
-                        if (localIdx >= 0 && localIdx < N) {
-                            int pos = ibC[localIdx]++;
-                            ibT[pos >>> HeapGraph.TARGETS_CHUNK_BITS][pos & HeapGraph.TARGETS_CHUNK_MASK]
-                                = threadIdx; // not excluded
-                        }
-                    }
-                }
-            }
-        }
-        Log.debug("  [RSS] A2b after inb fill: %,d KB", Log.rssKb());
+        // Save syntheticThreadEdges before A2c nulls it — needed for deferred inbound build too.
+        Map<Integer, int[]> savedSyntheticEdges = graph.syntheticThreadEdges;
 
-        // VByte-encode inbound CSR using ibCursor end-positions (ibCursor[v] = end of row v).
-        // inboundTargets freed inside encoder. ibCursor donated after encode for fwdCursor reuse.
-        CsrBuilderEncoder encoder = new CsrBuilderEncoder(graph, inboundTargets, ibCursor, N, totalInbEdges);
-        encoder.encodeVByte();
-        graph.phaseArrays.donate(ibCursor); // ibCursor stays in pool through A2c; RPO takes it as rpoOrder
-        ibCursor = null;
-        Log.debug("  [RSS] A2b after inb encode+free: %,d KB", Log.rssKb());
-
-        // --- Sub-pass A.2c: fill fwdTargets only (inboundTargets already freed) ---
+        // --- Sub-pass A.2c: fill fwdTargets only (inbound deferred until after RPO) ---
         // big20: use fwdOffsets directly as the write cursor — no separate fwdCursor int[N] needed.
         // fwdOffsets[v] starts at the start-offset of row v and is incremented on each edge written.
         // After fill, fwdOffsets[v] = exclusive end of row v (= start of row v+1).
-        // phaseArrays retains ibCursor (slot0) throughout A2c; RPO takes it as rpoOrder.
-        // This saves 2 GB (no fwdCursor take/alloc) at the fwdTargets allocation peak.
         int[][] fwdTargets = allocChunked(totalFwdSlots);
         Log.debug("  [RSS] A2c after fwdTargets alloc: %,d KB", Log.rssKb());
 
@@ -902,7 +886,6 @@ public final class HeapGraphBuilder {
         }
         // fwdOffsets[v] now holds end-of-row-v positions (= start of row v+1).
         // RpoDfs reads lo = v==0 ? 0 : fwdOffsets[v-1]; hi = fwdOffsets[v].
-        // phaseArrays.slot0 still holds ibCursor; RPO will take it as rpoOrder.
 
         // Store end-position forward CSR — fwdOffsets[v] = exclusive end of row v.
         // totalFwdEdges = fwdOffsets[N-1] = end of last row (= fwdOffsets[N] sentinel in old start-position scheme).
@@ -911,13 +894,7 @@ public final class HeapGraphBuilder {
         graph.fwdEnds    = null;
         graph.fwdTargets = fwdTargets;
 
-        // Free per-class field layout arrays — only needed during A2 edge scanning
-        for (ClassRecord cr : graph.classList) {
-            if (cr instanceof ClassRecord.Full f) {
-                f.freeFieldArrays();
-            }
-        }
-        graph.excludedEdge = null; // built during VByte encoding, never read after A2 completes
+        graph.excludedEdge = null; // set during VByte encoding; deferred build will set it anew
 
         // Precompute class-object node indices so idMap.bucket can be freed.
         int[] classNodeIdx = new int[graph.classList.size()];
@@ -931,10 +908,69 @@ public final class HeapGraphBuilder {
         graph.classNodeIdx = classNodeIdx;
         if (keepAddressIndex) {
             graph.idMap.freeBucket(); // HTML mode: keep intBuf/buf for address display
-        } else if (compressLevel <= 0) {
-            graph.idMap.freeSortedArrays(); // Markdown mode, no A3: free ~2 GB now
         }
-        // When compressLevel > 0, freeSortedArrays() is deferred to after phaseA3 in buildInternal.
+        // freeSortedArrays() deferred: for compressLevel<=0 it now runs after InboundBuilder.build()
+        // (which still needs idMap for scanEdgesWithNames); for compressLevel>0 after phaseA3.
+
+        // Return deferred inbound builder — will run after RPO frees fwdTargets/fwdOffsets.
+        return new InboundBuilder(N, ibCursor, totalInbEdges, graph.excludePairs, savedSyntheticEdges);
+    }
+
+    /** Deferred inbound CSR fill + VByte encode. Constructed in phaseA2, executed after RPO. */
+    private class InboundBuilder {
+        private final int N;
+        private int[] ibCursor;       // prefix-summed in-degree start positions (int[N])
+        private final int totalInbEdges;
+        private final int[][] excludePairs;
+        private final Map<Integer, int[]> syntheticEdges;
+
+        InboundBuilder(int N, int[] ibCursor, int totalInbEdges, int[][] excludePairs,
+                       Map<Integer, int[]> syntheticEdges) {
+            this.N = N;
+            this.ibCursor = ibCursor;
+            this.totalInbEdges = totalInbEdges;
+            this.excludePairs = excludePairs;
+            this.syntheticEdges = syntheticEdges;
+        }
+
+        void build(HeapGraph graph) throws IOException {
+            int[][] inboundTargets = allocChunked(totalInbEdges);
+            final int[][] ibT = inboundTargets;
+            final int[] ibC = ibCursor;
+            try (Parser p = openParser()) {
+                scanEdgesWithNames(p, graph, (srcIdx, dstIdx, nameIdx, srcClassIdx) -> {
+                    boolean excluded = isExcluded(excludePairs, srcClassIdx, nameIdx);
+                    int pos = ibC[dstIdx]++;
+                    ibT[pos >>> HeapGraph.TARGETS_CHUNK_BITS][pos & HeapGraph.TARGETS_CHUNK_MASK]
+                        = excluded ? (srcIdx | Integer.MIN_VALUE) : srcIdx;
+                });
+            }
+            if (syntheticEdges != null) {
+                for (Map.Entry<Integer, int[]> e : syntheticEdges.entrySet()) {
+                    int threadIdx = e.getKey();
+                    if (threadIdx < N) {
+                        for (int localIdx : e.getValue()) {
+                            if (localIdx >= 0 && localIdx < N) {
+                                int pos = ibC[localIdx]++;
+                                ibT[pos >>> HeapGraph.TARGETS_CHUNK_BITS][pos & HeapGraph.TARGETS_CHUNK_MASK]
+                                    = threadIdx;
+                            }
+                        }
+                    }
+                }
+            }
+            Log.debug("  [RSS] A2b after inb fill: %,d KB", Log.rssKb());
+            CsrBuilderEncoder encoder = new CsrBuilderEncoder(graph, inboundTargets, ibCursor, N, totalInbEdges);
+            encoder.encodeVByte();
+            // Free per-class field layout arrays — only needed during A2 edge scanning (fwd + inbound)
+            for (ClassRecord cr : graph.classList) {
+                if (cr instanceof ClassRecord.Full f) f.freeFieldArrays();
+            }
+            // Donate ibCursor for reuse (e.g. as retainedSize[] backing in RetainedSizes).
+            if (graph.phaseArrays != null) graph.phaseArrays.donate(ibCursor);
+            ibCursor = null;
+            Log.debug("  [RSS] A2b after inb encode+free: %,d KB", Log.rssKb());
+        }
     }
 
     /**

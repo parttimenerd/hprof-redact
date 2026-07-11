@@ -505,11 +505,9 @@ final class HtmlReportData {
     static String className(HeapGraph graph, int idx) {
         if (idx <= 0 || idx >= graph.N) return "(unknown)";
         // If this node IS a class object, show the class it represents (MAT parity)
-        if (graph.classObjClassIdx != null && idx < graph.classObjClassIdx.length) {
-            int representedCi = graph.classObjClassIdx[idx];
-            if (representedCi >= 0 && representedCi < graph.classList.size()) {
-                return ClassNames.pretty(graph.classList.get(representedCi).name());
-            }
+        int representedCi = graph.classObjCiForNode(idx);
+        if (representedCi >= 0 && representedCi < graph.classList.size()) {
+            return ClassNames.pretty(graph.classList.get(representedCi).name());
         }
         int ci = graph.classIndex[idx];
         if (ci < 0 || ci >= graph.classList.size()) return "(class object)";

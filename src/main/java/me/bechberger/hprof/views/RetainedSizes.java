@@ -46,7 +46,6 @@ final class RetainedSizes {
         // Two-pass construction: count degrees, then fill targets.
         BitSet hasSameClassAncestor = new BitSet(N);
         int[] classIndex = graph.classIndex;
-        int[] classObjClassIdx = graph.classObjClassIdx;
 
         int[] childDeg = graph.phaseArrays != null ? graph.phaseArrays.take() : new int[N];
         for (int u = 1; u < N; u++) {
@@ -111,8 +110,7 @@ final class RetainedSizes {
                     savedDepth = classToLastDepth[cls];
                     classToLastDepth[cls] = sp;
                 }
-                int ci = (classObjClassIdx != null && child < classObjClassIdx.length)
-                        ? classObjClassIdx[child] : -1;
+                int ci = graph.classObjCiForNode(child);
                 if (ci >= 0 && ci < classCount) {
                     savedObjDepth = classObjDepth[ci];
                     classObjDepth[ci] = sp;
@@ -135,8 +133,7 @@ final class RetainedSizes {
                 if (cls >= 0 && cls < classCount) {
                     classToLastDepth[cls] = stackSavedDepth[top];
                 }
-                int ci = (classObjClassIdx != null && v < classObjClassIdx.length && v != HeapGraph.VIRTUAL_ROOT)
-                        ? classObjClassIdx[v] : -1;
+                int ci = (v != HeapGraph.VIRTUAL_ROOT) ? graph.classObjCiForNode(v) : -1;
                 if (ci >= 0 && ci < classCount) {
                     classObjDepth[ci] = stackSavedObjDepth[top];
                 }
