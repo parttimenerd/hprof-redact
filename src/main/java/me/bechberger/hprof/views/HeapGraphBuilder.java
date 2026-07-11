@@ -1404,6 +1404,8 @@ public final class HeapGraphBuilder {
         private long lastAddr = -1L;
         // big22: insertion-order → sorted-index mapping; built after idMap.sort(), frees addrBuf ~4 GB
         private int[] insertionToSortedIdx;
+        // big23: compressed classId mapping; int sortedIdx instead of long heap address, frees classIdBuf ~4 GB
+        private int[] classIdxBuf;
 
         final IntLongHashMap classSerialToId = new IntLongHashMap();
         final LongLongHashMap classIdToNameId = new LongLongHashMap();
@@ -1534,14 +1536,19 @@ public final class HeapGraphBuilder {
          * big22: build insertionToSortedIdx[i] = idMap.indexOf(addrBuf[i]) for each insertion slot,
          * then free addrBuf (long[~763M] = ~6 GB on large heaps) to reduce peak RSS before buildClassList.
          * insertionToSortedIdx[i]+1 is the 1-based object index (slot 0 = virtual root).
+         * big23: compress classIdBuf (long[~763M] = ~6 GB) into classIdxBuf (int[~514M] = ~2 GB)
+         * by replacing each class heap-address with its idMap sorted index (-1 if not in idMap).
          * Must be called after idMap.sort() and before buildClassList.
          */
         void computeInsertionToSortedIdx() {
             insertionToSortedIdx = new int[count];
+            classIdxBuf = new int[count];
             for (int i = 0; i < count; i++) {
                 insertionToSortedIdx[i] = idMap.indexOf(addrBuf[i]);
+                classIdxBuf[i] = classIdBuf[i] != 0 ? idMap.indexOf(classIdBuf[i]) : -1;
             }
-            addrBuf = null; // free ~6 GB
+            addrBuf = null;    // free ~6 GB (big22)
+            classIdBuf = null; // free ~6 GB (big23)
         }
 
         void buildClassList(HeapGraph graph, IdMap idMap) {
@@ -1576,11 +1583,11 @@ public final class HeapGraphBuilder {
                 byte atype = arrayTypeBuf[i];
                 if (atype == 0) continue; // not an array
                 if (atype == (byte) -1) {
-                    // Object array: classIdBuf[i] is the ARRAY class ID (per HPROF spec,
+                    // classIdxBuf[i] is the sorted index of the ARRAY class (per HPROF spec,
                     // HPROF_GC_OBJ_ARRAY_DUMP's fourth field is "array class object ID",
                     // not the element class). That class is typically already registered
                     // via LOAD_CLASS + CLASS_DUMP with a name like "[Ljava/lang/Object;".
-                    long arrayClassId = classIdBuf[i];
+                    long arrayClassId = idMap.addressAtSorted(classIdxBuf[i]);
                     if (!objArrayElemToClassIdx.containsKey(arrayClassId)) {
                         int existingIdx = graph.classIdToIndex.getIfAbsent(arrayClassId, -1);
                         if (existingIdx >= 0) {
@@ -1653,7 +1660,8 @@ public final class HeapGraphBuilder {
                 int sortedIdx = insertionToSortedIdx[i];
                 int objIdx = sortedIdx >= 0 ? sortedIdx + 1 : -1; // +1 for virtual root offset
                 if (objIdx < 0) continue;
-                long cid = classIdBuf[i];
+                int cidSorted = classIdxBuf[i]; // big23: sorted index of classId (-1 if none)
+                long cid = cidSorted >= 0 ? idMap.addressAtSorted(cidSorted) : 0L;
                 byte atype = arrayTypeBuf[i];
                 int rawShallow = shallowBuf[i]; // for arrays: numElem; for instances: 0 (unused); for class objs: 0
                 int bytes;
@@ -1713,7 +1721,7 @@ public final class HeapGraphBuilder {
                 }
             }
             // Free large A1State scan buffers — no longer needed after class/object metadata is built
-            insertionToSortedIdx = null; shallowBuf = null; classIdBuf = null; arrayTypeBuf = null;
+            insertionToSortedIdx = null; shallowBuf = null; classIdxBuf = null; arrayTypeBuf = null;
         }
 
         void buildTraceFrames(HeapGraph graph) {
