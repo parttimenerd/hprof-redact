@@ -90,4 +90,29 @@ class HtmlReportDataTest {
         assertTrue(s.topConsumers().stream()
                 .anyMatch(tc -> tc.className().contains("Child")));
     }
+
+    /**
+     * Verify that primitive arrays appear in the class histogram when A3 mini-scan runs.
+     * Regression test for big25 A3: prim arrays' classIndex must be refilled, not left at 0.
+     */
+    @Test
+    void primArrayInHistogram() throws Exception {
+        Path hprof = new HprofTestBuilder(4)
+                .addUtf8(1L, "com/example/Holder")
+                .addLoadClass(1, 0x10L, 1L)
+                .addClass(0x10L, 0L, 0L, 16)
+                .addInstanceObject(0x100L, 0x10L)
+                .addIntArray(0x200L, 1, 2, 3)         // int[] of 3 elements
+                .addGCRoot(0x100L, HPROF_GC_ROOT_STICKY_CLASS)
+                .addGCRoot(0x200L, HPROF_GC_ROOT_STICKY_CLASS)
+                .buildToPath();
+        // Default compressLevel=1 triggers A3 mini-scan
+        HeapGraph graph = new HeapGraphBuilder(hprof).keepAddressIndex(true).build();
+
+        HtmlReportData.ReportData data = HtmlReportData.compute(graph);
+
+        boolean foundIntArray = data.histogram().stream()
+                .anyMatch(e -> e.className().equals("int[]") && e.instanceCount() == 1);
+        assertTrue(foundIntArray, "int[] must appear in histogram after A3 refill (instances=1)");
+    }
 }

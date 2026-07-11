@@ -404,10 +404,18 @@ def parse_our_report(md: str, stem: str) -> OurReport:
 
 # ── run our tool ──────────────────────────────────────────────────────────────
 
+def _timeout_for(hprof: Path) -> int:
+    """Scale timeout by file size: 1200s for >2 GB, 600s otherwise."""
+    try:
+        return 1200 if os.path.getsize(hprof) > 2 * 1024 ** 3 else 600
+    except OSError:
+        return 600
+
+
 def run_our_tool(jar: Path, hprof: Path, out_md: Path) -> bool:
     result = subprocess.run(
-        ['java', '-jar', str(jar), 'views', str(hprof), str(out_md)],
-        capture_output=True, text=True, timeout=600
+        ['java', '-Xss4m', '-jar', str(jar), 'views', str(hprof), str(out_md)],
+        capture_output=True, text=True, timeout=_timeout_for(hprof)
     )
     return result.returncode == 0
 
@@ -571,7 +579,10 @@ def run_benchmark(args) -> None:
         name = _display_name(hprof)
 
         # Our tool
-        ours = measure_run(['java', '-jar', str(jar), 'views', str(hprof), '/dev/null'])
+        ours = measure_run(
+            ['java', '-Xss4m', '-jar', str(jar), 'views', str(hprof), '/dev/null'],
+            timeout=_timeout_for(hprof),
+        )
 
         # Object count from cached ours.md (generated during parity check)
         md_path = dumps_dir / f"{hprof.stem}_ours.md"

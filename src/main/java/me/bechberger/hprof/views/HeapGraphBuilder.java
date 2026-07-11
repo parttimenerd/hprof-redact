@@ -944,9 +944,31 @@ public final class HeapGraphBuilder {
      */
     private void phaseA3(HeapGraph graph) throws IOException {
         graph.classIndex      = new int[graph.N];
+        Arrays.fill(graph.classIndex, -1);          // match A1 initialization (not 0 = virtual root)
         graph.shallowSizeDiv8 = new byte[graph.N];
         int ids   = graph.idSize;
         IdMap idMap = graph.idMap;
+
+        // Rebuild prim-type → classIdx mapping from classList (ArrayClassRecord entries added in A2a).
+        int[] a3PrimTypeToCIdx = new int[12]; // 0 = unset (uses -1 + 1 convention, same as primArrayClassIdx in A2a)
+        for (int ci = 0; ci < graph.classList.size(); ci++) {
+            ClassRecord cr = graph.classList.get(ci);
+            if (cr instanceof ArrayClassRecord) {
+                int code = switch (cr.name()) {
+                    case "boolean[]" -> HPROF_TYPE_BOOLEAN;
+                    case "char[]"    -> HPROF_TYPE_CHAR;
+                    case "float[]"   -> HPROF_TYPE_FLOAT;
+                    case "double[]"  -> HPROF_TYPE_DOUBLE;
+                    case "byte[]"    -> HPROF_TYPE_BYTE;
+                    case "short[]"   -> HPROF_TYPE_SHORT;
+                    case "int[]"     -> HPROF_TYPE_INT;
+                    case "long[]"    -> HPROF_TYPE_LONG;
+                    default          -> -1;
+                };
+                if (code >= 0 && code < a3PrimTypeToCIdx.length) a3PrimTypeToCIdx[code] = ci + 1;
+            }
+        }
+
         try (Parser p = openParser()) {
             while (true) {
                 int tag = p.readTag();
@@ -957,12 +979,12 @@ public final class HeapGraphBuilder {
                     p.skipFully(len);
                     continue;
                 }
-                fillSegmentA3(p, (int) len, ids, idMap, graph);
+                fillSegmentA3(p, (int) len, ids, idMap, graph, a3PrimTypeToCIdx);
             }
         }
     }
 
-    private void fillSegmentA3(Parser p, int segLen, int ids, IdMap idMap, HeapGraph graph) throws IOException {
+    private void fillSegmentA3(Parser p, int segLen, int ids, IdMap idMap, HeapGraph graph, int[] a3PrimTypeToCIdx) throws IOException {
         int remaining = segLen;
         int N = graph.N;
         while (remaining > 0) {
@@ -1021,7 +1043,8 @@ public final class HeapGraphBuilder {
                     if (srcIdx >= 0 && srcIdx < N) {
                         int bytes = alignUp(alignUp(graph.pointerSize + graph.refSize + 4, graph.refSize) + numElem * elemSize, graph.objectAlign);
                         setShallow(graph, srcIdx, bytes);
-                        // classIndex for primitive arrays: left as 0 (acceptable; prim arrays don't affect class grouping)
+                        int cidx = (elemType < a3PrimTypeToCIdx.length) ? a3PrimTypeToCIdx[elemType] - 1 : -1;
+                        if (cidx >= 0) graph.classIndex[srcIdx] = cidx;
                     }
                 }
                 default -> throw new IOException("Unknown heap sub-record tag: 0x" + Integer.toHexString(subTag));
