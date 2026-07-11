@@ -40,14 +40,13 @@ final class RpoDfs {
         int   totalFwdEdges = graph.totalFwdEdges; // sentinel: end of last node's edges
         int[][] fwdTargets  = graph.fwdTargets;
 
-        int[] rpoOrder = graph.phaseArrays.takeRaw(); // donated by A2; avoids fresh int[N]
+        int[] rpoOrder = graph.phaseArrays.takeRaw(); // donated by A2 (ibCursor/fwdCursor); avoids fresh int[N]
 
         // Use a BitSet for visited tracking during DFS (~64 MB for 514M nodes) instead of
         // int[N] (~2 GB). dfsPos[N] is reconstructed after freeFwdCsr() drops fwdTargets.
         BitSet visited = new BitSet(N);
         int[] dfsOrder  = new int[N];
-        // Reuse A2 fwdCursor (int[N]) donated via phaseArrays for dfsParent, saving ~2 GB
-        // at the RPO DFS peak — the true overall bottleneck. Falls back to fresh int[N].
+        // phaseArrays slot1 is empty after big18 (inboundOffsets copyOf eliminated); dfsParent = fresh int[N].
         int[] dfsParent = graph.phaseArrays.takeRaw();
         Arrays.fill(dfsParent, -1);
 

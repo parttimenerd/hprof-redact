@@ -797,28 +797,24 @@ public final class HeapGraphBuilder {
         // Previously: donate(outDegree) → ibCursor = take() = outDegree; copy inboundOffsets into ibCursor.
         // Now: ibCursor = inDegree (donated below), which already holds inboundOffsets values.
 
-        // Prefix-sum inDegree in-place → becomes inboundOffsets[0..N-1], then extend to N+1.
+        // Prefix-sum inDegree in-place → inDegree[v] becomes start of row v (inboundOffsets[v]).
+        // After fill, ibCursor[v] will hold the END of row v (= start of row v+1).
+        // This avoids a 2 GB Arrays.copyOf(inDegree, N+1): the encoder uses ibCursor end-positions directly.
         int totalInbEdges = 0;
         for (int i = 0; i < N; i++) {
             int deg = inDegree[i];
             inDegree[i] = totalInbEdges;
             totalInbEdges += deg;
         }
-        int[] inboundOffsets = java.util.Arrays.copyOf(inDegree, N + 1);
-        inboundOffsets[N] = totalInbEdges;
-        graph.phaseArrays.donate(inDegree); // donate before losing reference; take() will zero it
+        // ibCursor: inDegree itself (already holds start-positions); incremented during fill to end-positions.
+        // No copyOf needed — after fill the encoder reads ibCursor[v]=end(v) via shifted access.
+        int[] ibCursor = inDegree;
         inDegree = null;
 
         // --- Sub-pass A.2b: fill inboundTargets only, then VByte-encode and free it ---
         // Chunked int[][] avoids a single contiguous allocation that can OOM for large heaps.
         // Each chunk = TARGETS_CHUNK_SIZE ints (256 MB); up to ~25 chunks for 1.67B edges.
         int[][] inboundTargets = allocChunked(totalInbEdges);
-        // ibCursor: mutable copy of inboundOffsets[0..N-1] used as write cursors during fill.
-        // Take from phaseArrays — gets inDegree storage, which already holds inboundOffsets[0..N-1]
-        // (inDegree was prefix-summed in-place to produce inboundOffsets values). No arraycopy needed.
-        int[] ibCursor = graph.phaseArrays.takeRaw(); // inDegree storage; values == inboundOffsets[0..N-1]
-        // No arraycopy: ibCursor[0..N-1] == inboundOffsets[0..N-1] (inDegree was prefix-summed in-place)
-
         int[][] excludePairs = graph.excludePairs;
         final int[][] ibT = inboundTargets;
         final int[] ibC = ibCursor;
@@ -845,27 +841,21 @@ public final class HeapGraphBuilder {
                 }
             }
         }
-        graph.phaseArrays.donate(ibCursor);
-        ibCursor = null;
         Log.debug("  [RSS] A2b after inb fill: %,d KB", Log.rssKb());
 
-        // VByte-encode inbound CSR; inboundTargets freed inside encoder.
-        // Encoder sets graph.inboundOffsets (long[]) and graph.inboundStream (byte[][]) directly.
-        CsrBuilderEncoder encoder = new CsrBuilderEncoder(graph, inboundTargets, inboundOffsets, N);
+        // VByte-encode inbound CSR using ibCursor end-positions (ibCursor[v] = end of row v).
+        // inboundTargets freed inside encoder. ibCursor donated after encode for fwdCursor reuse.
+        CsrBuilderEncoder encoder = new CsrBuilderEncoder(graph, inboundTargets, ibCursor, N, totalInbEdges);
         encoder.encodeVByte();
-        // inboundTargets freed inside encoder. Do NOT donate inboundOffsets to phaseArrays yet —
-        // delaying until after fwdTargets alloc keeps 2 GB out of the A2c peak (the overall max).
+        graph.phaseArrays.donate(ibCursor); // fwdCursor (A2c) and rpoOrder (RPO) will reuse this storage
+        ibCursor = null;
         Log.debug("  [RSS] A2b after inb encode+free: %,d KB", Log.rssKb());
 
         // --- Sub-pass A.2c: fill fwdTargets only (inboundTargets already freed) ---
-        // Take ibCursor from phaseArrays BEFORE allocating fwdTargets so phaseArrays is empty
-        // during the alloc — saves another 2 GB at A2c peak (big17).
+        // Take ibCursor storage from phaseArrays BEFORE allocating fwdTargets (big17 pattern):
+        // phaseArrays is empty during the alloc, no 2 GB pinned by the pool at the peak.
         int[] fwdCursor = graph.phaseArrays.takeRaw(); // gets ibCursor (int[N]) from phaseArrays slot0
         int[][] fwdTargets = allocChunked(totalFwdSlots);
-        // Now it's safe to donate stale inboundOffsets — fwdTargets peak already passed.
-        // RpoDfs will take it via phaseArrays for dfsParent reuse (big14).
-        graph.phaseArrays.donate(inboundOffsets);
-        inboundOffsets = null;
         Log.debug("  [RSS] A2c after fwdTargets alloc: %,d KB", Log.rssKb());
         System.arraycopy(fwdOffsets, 0, fwdCursor, 0, N);
 
@@ -1716,19 +1706,21 @@ public final class HeapGraphBuilder {
     private static final class CsrBuilderEncoder {
         private final HeapGraph graph;
         private int[][] targets;
-        private final int[] offsets;
+        private final int[] endOffsets; // endOffsets[v] = end of row v (= start of row v+1)
         private final int n;
+        private final int totalEdges;
 
-        CsrBuilderEncoder(HeapGraph graph, int[][] targets, int[] offsets, int n) {
+        CsrBuilderEncoder(HeapGraph graph, int[][] targets, int[] endOffsets, int n, int totalEdges) {
             this.graph = graph;
             this.targets = targets;
-            this.offsets = offsets;
+            this.endOffsets = endOffsets;
             this.n = n;
+            this.totalEdges = totalEdges;
         }
 
         void encodeVByte() {
             // Sort each row by lower-31-bit src value; re-index excludedEdge via sign-bit trick
-            BitSortHelper.sortAndEncode(targets, offsets, n, graph);
+            BitSortHelper.sortAndEncodeEnd(targets, endOffsets, n, totalEdges, graph);
             targets = null; // release
         }
     }
@@ -1738,6 +1730,27 @@ public final class HeapGraphBuilder {
     // =========================================================
 
     static final class BitSortHelper {
+        /**
+         * Sort and VByte-encode inbound CSR using END-position offsets.
+         * endOffsets[v] = exclusive end of row v (= start of row v+1).
+         * Row v spans [v==0 ? 0 : endOffsets[v-1], endOffsets[v]).
+         * totalEdges = endOffsets[n-1] (the total logical edge count).
+         * This API avoids the caller needing an int[N+1] start-position array — the write
+         * cursors after fill are exactly the end-positions needed here.
+         */
+        static void sortAndEncodeEnd(int[][] targets, int[] endOffsets, int n, int totalEdges, HeapGraph graph) {
+            java.util.BitSet newExcluded = new java.util.BitSet(totalEdges);
+
+            // Estimate stream size: VByte deltas average ~1.5 bytes each.
+            long estimatedBytes = Math.max((long) totalEdges + totalEdges / 2L, 16L);
+
+            if (estimatedBytes < VByte.CHUNK_SIZE) {
+                sortAndEncodeSingleEnd(targets, endOffsets, n, totalEdges, newExcluded, (int) estimatedBytes, graph);
+            } else {
+                sortAndEncodeChunkedEnd(targets, endOffsets, n, totalEdges, newExcluded, estimatedBytes, graph);
+            }
+        }
+
         static void sortAndEncode(int[][] targets, int[] offsets, int n, HeapGraph graph) {
             int totalEdges = offsets[n];
             java.util.BitSet newExcluded = new java.util.BitSet(totalEdges);
@@ -1874,6 +1887,126 @@ public final class HeapGraphBuilder {
             byteOffsets[n] = (int) streamPos;
 
             // Trim last chunk and discard trailing empty chunks.
+            int finalChunkIdx = (int) (streamPos >>> VByte.CHUNK_BITS);
+            int finalChunkOff = (int) (streamPos & VByte.CHUNK_MASK);
+            if (finalChunkOff < stream[finalChunkIdx].length) {
+                stream[finalChunkIdx] = Arrays.copyOf(stream[finalChunkIdx], finalChunkOff);
+            }
+            if (finalChunkIdx + 1 < stream.length) {
+                stream = Arrays.copyOf(stream, finalChunkIdx + 1);
+            }
+
+            graph.inboundStream  = stream;
+            graph.inboundOffsets = byteOffsets;
+            graph.excludedEdge   = newExcluded;
+        }
+
+        /** Single-buffer encode using end-positions: endOffsets[v] = exclusive end of row v. */
+        private static void sortAndEncodeSingleEnd(int[][] targets, int[] endOffsets, int n, int totalEdges,
+                java.util.BitSet newExcluded, int estimatedBytes, HeapGraph graph) {
+            byte[] singleBuf = new byte[estimatedBytes];
+            int[] byteOffsets = new int[n + 1];
+            int streamPos = 0;
+            int logicalEdgeIdx = 0;
+            int[] rowBuf = null;
+
+            for (int v = 0; v < n; v++) {
+                int lo = v == 0 ? 0 : endOffsets[v - 1];
+                int hi = endOffsets[v];
+                int rowLen = hi - lo;
+                if (rowLen > 1) {
+                    if (rowBuf == null || rowBuf.length < rowLen) rowBuf = new int[rowLen];
+                    extractRow(targets, lo, rowLen, rowBuf);
+                    sortWithFlags(rowBuf, 0, rowLen);
+                    putRow(targets, lo, rowLen, rowBuf);
+                }
+
+                byteOffsets[v] = streamPos;
+                int prev = 0;
+                for (int i = lo; i < hi; i++) {
+                    int raw = chunkGet(targets, i);
+                    boolean excl = (raw & Integer.MIN_VALUE) != 0;
+                    if (excl) { logicalEdgeIdx++; continue; }
+                    int src = raw & Integer.MAX_VALUE;
+                    int delta = src - prev;
+                    prev = src;
+
+                    if (streamPos + 8 > singleBuf.length) {
+                        singleBuf = Arrays.copyOf(singleBuf, Math.min(singleBuf.length * 2, VByte.CHUNK_SIZE - 1));
+                    }
+                    streamPos = VByte.encode(delta, singleBuf, streamPos);
+                    logicalEdgeIdx++;
+                }
+            }
+            byteOffsets[n] = streamPos;
+
+            if (streamPos < singleBuf.length) singleBuf = Arrays.copyOf(singleBuf, streamPos);
+            graph.inboundStream  = new byte[][] { singleBuf };
+            graph.inboundOffsets = byteOffsets;
+            graph.excludedEdge   = newExcluded;
+        }
+
+        /** Chunked encode using end-positions: endOffsets[v] = exclusive end of row v. */
+        private static void sortAndEncodeChunkedEnd(int[][] targets, int[] endOffsets, int n, int totalEdges,
+                java.util.BitSet newExcluded, long estimatedBytes, HeapGraph graph) {
+            int maxOutChunks = (int) ((estimatedBytes + VByte.CHUNK_SIZE - 1) >>> VByte.CHUNK_BITS) + 2;
+            if (maxOutChunks < 1) maxOutChunks = 1;
+            byte[][] stream = new byte[maxOutChunks][];
+
+            int[] byteOffsets = new int[n + 1];
+            long streamPos = 0;
+            int logicalEdgeIdx = 0;
+            int[] rowBuf = null;
+            int lastFreedSrcChunk = -1;
+
+            for (int v = 0; v < n; v++) {
+                int lo = v == 0 ? 0 : endOffsets[v - 1];
+                int hi = endOffsets[v];
+                int rowLen = hi - lo;
+
+                int currentSrcChunk = lo >>> HeapGraph.TARGETS_CHUNK_BITS;
+                while (lastFreedSrcChunk < currentSrcChunk - 1) {
+                    lastFreedSrcChunk++;
+                    targets[lastFreedSrcChunk] = null;
+                }
+
+                if (rowLen > 1) {
+                    if (rowBuf == null || rowBuf.length < rowLen) rowBuf = new int[rowLen];
+                    extractRow(targets, lo, rowLen, rowBuf);
+                    sortWithFlags(rowBuf, 0, rowLen);
+                    putRow(targets, lo, rowLen, rowBuf);
+                }
+
+                byteOffsets[v] = (int) streamPos;
+                int prev = 0;
+                for (int i = lo; i < hi; i++) {
+                    int raw = chunkGet(targets, i);
+                    boolean excl = (raw & Integer.MIN_VALUE) != 0;
+                    if (excl) { logicalEdgeIdx++; continue; }
+                    int src = raw & Integer.MAX_VALUE;
+                    int delta = src - prev;
+                    prev = src;
+
+                    int chunkIdx = (int) (streamPos >>> VByte.CHUNK_BITS);
+                    int chunkOff = (int) (streamPos & VByte.CHUNK_MASK);
+                    if (stream[chunkIdx] == null) {
+                        stream[chunkIdx] = new byte[VByte.CHUNK_SIZE];
+                    }
+                    if (chunkOff + 8 > VByte.CHUNK_SIZE) {
+                        if (chunkIdx + 1 >= stream.length) {
+                            stream = Arrays.copyOf(stream, stream.length + 2);
+                        }
+                        if (stream[chunkIdx + 1] == null) {
+                            stream[chunkIdx + 1] = new byte[VByte.CHUNK_SIZE];
+                        }
+                    }
+
+                    streamPos = VByte.encode(delta, stream, streamPos);
+                    logicalEdgeIdx++;
+                }
+            }
+            byteOffsets[n] = (int) streamPos;
+
             int finalChunkIdx = (int) (streamPos >>> VByte.CHUNK_BITS);
             int finalChunkOff = (int) (streamPos & VByte.CHUNK_MASK);
             if (finalChunkOff < stream[finalChunkIdx].length) {
