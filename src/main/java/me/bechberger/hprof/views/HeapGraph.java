@@ -261,7 +261,10 @@ public final class HeapGraph {
     }
 
     // ---- Transient forward CSR (built in Phase A.2, freed after RPO DFS) ----
-    int[] fwdOffsets; // fwdOffsets[i+1] - fwdOffsets[i] = exact out-degree (compacted)
+    // fwdOffsets[i] = start index of node i's forward edges in fwdTargets.
+    // Length is N (not N+1); use totalFwdEdges for the end sentinel of the last node.
+    int[] fwdOffsets;
+    int   totalFwdEdges; // = fwdOffsets[N] sentinel; stored separately to avoid int[N+1] allocation
     int[] fwdEnds;    // null after compaction (kept for potential future use)
     // fwdTargets is chunked (int[][]) for large heaps; each chunk = TARGETS_CHUNK_SIZE ints.
     // For heaps with < TARGETS_CHUNK_SIZE total fwd edges, chunk[0] is the only chunk.

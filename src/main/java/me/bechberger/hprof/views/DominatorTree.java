@@ -98,6 +98,7 @@ final class DominatorTree {
         // saving a fresh ~2 GB allocation. Falls back to new int[N] if phaseArrays is empty.
         int[] label    = graph.phaseArrays.takeRaw(); // A2 fwdCursor; overwritten below
         int[] ancestor = new int[reachable]; // union-find parent DFS-position; -1 = forest root
+        Log.debug("  [RSS] DOM after alloc ancestor: %,d KB", Log.rssKb());
 
         Arrays.fill(ancestor, -1);
         for (int d = 0; d < reachable; d++) {

@@ -781,18 +781,21 @@ public final class HeapGraphBuilder {
             }
         }
 
-        // Prefix-sum outDegree in-place → becomes fwdOffsets[0..N-1], then extend to N+1.
-        // Reuses the outDegree array to avoid a separate N+1 allocation.
+        // Prefix-sum outDegree in-place → becomes fwdOffsets[0..N-1].
+        // Use outDegree directly as fwdOffsets (int[N]), saving the 2 GB Arrays.copyOf(N+1)
+        // that was previously needed. totalFwdSlots is stored in graph.totalFwdEdges
+        // as the N-th sentinel, which RpoDfs reads instead of fwdOffsets[N].
         int totalFwdSlots = 0;
         for (int i = 0; i < N; i++) {
             int deg = outDegree[i];
             outDegree[i] = totalFwdSlots;
             totalFwdSlots += deg;
         }
-        int[] fwdOffsets = java.util.Arrays.copyOf(outDegree, N + 1);
-        fwdOffsets[N] = totalFwdSlots;
-        graph.phaseArrays.donate(outDegree); // donate before losing reference; take() will zero it
+        int[] fwdOffsets = outDegree; // int[N]; no copy; sentinel is stored in graph.totalFwdEdges
         outDegree = null;
+        // NOTE: fwdOffsets (= outDegree) is NOT donated to phaseArrays here.
+        // Previously: donate(outDegree) → ibCursor = take() = outDegree; copy inboundOffsets into ibCursor.
+        // Now: ibCursor = inDegree (donated below), which already holds inboundOffsets values.
 
         // Prefix-sum inDegree in-place → becomes inboundOffsets[0..N-1], then extend to N+1.
         int totalInbEdges = 0;
@@ -810,8 +813,11 @@ public final class HeapGraphBuilder {
         // Chunked int[][] avoids a single contiguous allocation that can OOM for large heaps.
         // Each chunk = TARGETS_CHUNK_SIZE ints (256 MB); up to ~25 chunks for 1.67B edges.
         int[][] inboundTargets = allocChunked(totalInbEdges);
-        int[] ibCursor = graph.phaseArrays.takeRaw(); // will be fully overwritten by arraycopy
-        System.arraycopy(inboundOffsets, 0, ibCursor, 0, N);
+        // ibCursor: mutable copy of inboundOffsets[0..N-1] used as write cursors during fill.
+        // Take from phaseArrays — gets inDegree storage, which already holds inboundOffsets[0..N-1]
+        // (inDegree was prefix-summed in-place to produce inboundOffsets values). No arraycopy needed.
+        int[] ibCursor = graph.phaseArrays.takeRaw(); // inDegree storage; values == inboundOffsets[0..N-1]
+        // No arraycopy: ibCursor[0..N-1] == inboundOffsets[0..N-1] (inDegree was prefix-summed in-place)
 
         int[][] excludePairs = graph.excludePairs;
         final int[][] ibT = inboundTargets;
@@ -856,7 +862,7 @@ public final class HeapGraphBuilder {
         // At this point inboundTargets is gone; allocating fwdTargets now avoids the overlap.
         int[][] fwdTargets = allocChunked(totalFwdSlots);
         Log.debug("  [RSS] A2c after fwdTargets alloc: %,d KB", Log.rssKb());
-        int[] fwdCursor = graph.phaseArrays.takeRaw(); // will be fully overwritten by arraycopy
+        int[] fwdCursor = graph.phaseArrays.takeRaw(); // gets inDegree/ibCursor storage (from phaseArrays)
         System.arraycopy(fwdOffsets, 0, fwdCursor, 0, N);
 
         final int[][] fwdT = fwdTargets;
@@ -885,8 +891,9 @@ public final class HeapGraphBuilder {
         graph.phaseArrays.donate(fwdCursor);
         fwdCursor = null;
 
-        // Store compact forward CSR — fwdOffsets[i+1] is exact, no fwdEnds needed
-        graph.fwdOffsets = fwdOffsets;
+        // Store compact forward CSR — fwdOffsets[i] is exact start, totalFwdEdges is the N-sentinel
+        graph.fwdOffsets    = fwdOffsets;
+        graph.totalFwdEdges = totalFwdSlots;
         graph.fwdEnds    = null;
         graph.fwdTargets = fwdTargets;
 
