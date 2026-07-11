@@ -56,6 +56,11 @@ public class ViewsCommand implements Callable<Integer> {
             description = "Parse HPROF stack frames for richer leak suspect analysis (third pass, optional).")
     private boolean stackTraces;
 
+    @Option(names = {"--compress-level"}, defaultValue = "1",
+            description = "Deflate level (0=off, 1=fast/default, 9=max) for per-object array compression during A2/RPO/DOM. "
+                    + "Higher levels save more RAM at the cost of more CPU. Use 9 (--compress-level=9) to minimize peak RSS.")
+    private int compressLevel;
+
     @Override
     public Integer call() throws IOException {
         Log.setLevel(debug ? 2 : (verbose || printPhaseTimes) ? 1 : 0);
@@ -78,6 +83,7 @@ public class ViewsCommand implements Callable<Integer> {
         try {
             graph = new HeapGraphBuilder(inputPath)
                     .keepAddressIndex(htmlMode || stackTraces)
+                    .compressLevel(compressLevel)
                     .build();
         } catch (Exception e) {
             System.err.println("ERROR: failed to parse HPROF: " + e.getMessage());

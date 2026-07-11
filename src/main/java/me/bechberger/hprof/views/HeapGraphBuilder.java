@@ -110,6 +110,8 @@ public final class HeapGraphBuilder {
     private final boolean gzipped;
     private final boolean tarred;   // true for .hprof.tar.gz: gzip-wrap around a POSIX tar archive
     private boolean keepAddressIndex = false; // when true: keep idMap sorted arrays for HTML address display
+    /** Deflate level for per-object array compression (0 = disabled, 1-9 = Deflater levels). Default 1. */
+    private int compressLevel = 1;
     private byte[] instanceDataBuf = new byte[256];
     private byte[] stringReadBuf   = new byte[256]; // reused for UTF-8 string records
 
@@ -124,6 +126,12 @@ public final class HeapGraphBuilder {
     /** When set, idMap sorted arrays are kept past A2 for HTML address display (default: free after A2). */
     public HeapGraphBuilder keepAddressIndex(boolean keep) {
         this.keepAddressIndex = keep;
+        return this;
+    }
+
+    /** Deflate compression level for per-object arrays (0=off, 1=fast/default, 9=max). */
+    public HeapGraphBuilder compressLevel(int level) {
+        this.compressLevel = Math.max(0, Math.min(9, level));
         return this;
     }
 
@@ -292,6 +300,8 @@ public final class HeapGraphBuilder {
         System.gc();
         long t4 = System.currentTimeMillis();
         Log.verbose("  [RSS] after DOM+GC: %,d KB", Log.rssKb());
+        // big25: decompress classIndex+shallowSizeDiv8 (compressed after A2a, idle during A2b/A2c/RPO/DOM)
+        if (graph.classIndexZ != null) graph.expandPerObjectArrays();
         graph.computeUnreachableStats();
         buildClassObjClassIdx(graph);
         RetainedSizes.compute(graph);
@@ -774,6 +784,9 @@ public final class HeapGraphBuilder {
         graph.matClassSize = null;
         graph.objArrayClassIdx = null;
         graph.primArrayClassIdx = null;
+        // big25: compress classIndex+shallowSizeDiv8 now that A2a fill is done; frees ~1.25 GB
+        // during A2b/A2c/RPO/DOM peak. Decompressed before RetainedSizes.
+        if (compressLevel > 0) graph.compressPerObjectArrays(compressLevel);
 
         // Prefix-sum outDegree in-place → becomes fwdOffsets[0..N-1].
         // Use outDegree directly as fwdOffsets (int[N]), saving the 2 GB Arrays.copyOf(N+1)
