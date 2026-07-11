@@ -260,7 +260,10 @@ public final class HeapGraphBuilder {
     }
 
     private HeapGraph buildInternal(boolean freePostDom, boolean retainInboundCsr) throws IOException {
-        IdMap idMap = new IdMap();
+        // Estimate N from file size (~48 bytes/object) for IdMap pre-allocation.
+        // Pre-allocating avoids ~2 GB doubling peak at idMap's last copyOf(537M entries) during A1.
+        int nEstimatedForIdMap = Math.max(64, (int) Math.min(fileSize / 48, Integer.MAX_VALUE / 2L));
+        IdMap idMap = new IdMap(nEstimatedForIdMap);
         long t0 = System.currentTimeMillis();
         HeapGraph graph = phaseA1(idMap);
         graph.retainInboundCsrForTesting = retainInboundCsr;

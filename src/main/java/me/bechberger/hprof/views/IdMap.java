@@ -36,6 +36,13 @@ final class IdMap {
         sorted = false;
     }
 
+    /** Pre-allocate backing array at the given initial capacity to avoid doubling during collection. */
+    IdMap(int initialCapacity) {
+        buf = new long[Math.max(INITIAL_CAPACITY, initialCapacity)];
+        size = 0;
+        sorted = false;
+    }
+
     /** Append an address. Must be called before sort(). */
     void append(long address) {
         if (size == buf.length) {
