@@ -46,7 +46,9 @@ final class RpoDfs {
         // int[N] (~2 GB). dfsPos[N] is reconstructed after freeFwdCsr() drops fwdTargets.
         BitSet visited = new BitSet(N);
         int[] dfsOrder  = new int[N];
-        int[] dfsParent = new int[N];
+        // Reuse A2 fwdCursor (int[N]) donated via phaseArrays for dfsParent, saving ~2 GB
+        // at the RPO DFS peak — the true overall bottleneck. Falls back to fresh int[N].
+        int[] dfsParent = graph.phaseArrays.takeRaw();
         Arrays.fill(dfsParent, -1);
 
         // Explicit DFS stack: parallel arrays for node and cursor

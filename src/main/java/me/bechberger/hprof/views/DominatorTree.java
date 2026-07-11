@@ -75,8 +75,6 @@ final class DominatorTree {
         //   - sdom[] reuses graph.rpoOrder's backing (int[N] ≥ reachable for typical heaps),
         //     saving one fresh int[reachable] allocation. Fallback: fresh allocation if
         //     rpoOrder is null or too small.
-        //   - label[] takes a donated int[N] from phaseArrays (the A2 fwdCursor array, which
-        //     is no longer needed after RPO), saving a fresh ~2 GB allocation. Fallback: fresh.
         //   - RetainedSizes uses children-CSR DFS instead of rpoOrder traversal, so
         //     rpoOrder is not needed after DominatorTree completes.
         // ----------------------------------------------------------------
@@ -94,9 +92,7 @@ final class DominatorTree {
             }
         }
         // label[]: union-find min-sdom representative on path to forest root.
-        // Reuse the A2 fwdCursor array (outDegree storage, int[N]) donated via phaseArrays,
-        // saving a fresh ~2 GB allocation. Falls back to new int[N] if phaseArrays is empty.
-        int[] label    = graph.phaseArrays.takeRaw(); // A2 fwdCursor; overwritten below
+        int[] label    = new int[reachable];
         int[] ancestor = new int[reachable]; // union-find parent DFS-position; -1 = forest root
         Log.debug("  [RSS] DOM after alloc ancestor: %,d KB", Log.rssKb());
 
