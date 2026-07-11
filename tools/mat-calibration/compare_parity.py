@@ -405,9 +405,9 @@ def parse_our_report(md: str, stem: str) -> OurReport:
 # ── run our tool ──────────────────────────────────────────────────────────────
 
 def _timeout_for(hprof: Path) -> int:
-    """Scale timeout by file size: 1200s for >2 GB, 600s otherwise."""
+    """Scale timeout by file size: 1200s for >512 MB, 600s otherwise."""
     try:
-        return 1200 if os.path.getsize(hprof) > 2 * 1024 ** 3 else 600
+        return 1200 if os.path.getsize(hprof) > 512 * 1024 ** 2 else 600
     except OSError:
         return 600
 
