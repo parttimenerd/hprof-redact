@@ -300,8 +300,15 @@ public final class HeapGraphBuilder {
         System.gc();
         long t4 = System.currentTimeMillis();
         Log.verbose("  [RSS] after DOM+GC: %,d KB", Log.rssKb());
-        // big25: decompress classIndex+shallowSizeDiv8 (compressed after A2a, idle during A2b/A2c/RPO/DOM)
-        if (graph.classIndexZ != null) graph.expandPerObjectArrays();
+        // big25: refill classIndex+shallowSizeDiv8 if they were freed after A2a (freed during A2b/A2c/RPO/DOM)
+        if (graph.classIndex == null) {
+            Log.verbose("  Refilling classIndex+shallowSizeDiv8 (A3 mini-scan)...");
+            phaseA3(graph);
+            // Deferred idMap sorted-array free (kept alive for phaseA3.objectIndex calls)
+            if (!keepAddressIndex) graph.idMap.freeSortedArrays();
+            System.gc();
+            Log.verbose("  [RSS] after A3+GC: %,d KB", Log.rssKb());
+        }
         graph.computeUnreachableStats();
         buildClassObjClassIdx(graph);
         RetainedSizes.compute(graph);
@@ -784,9 +791,12 @@ public final class HeapGraphBuilder {
         graph.matClassSize = null;
         graph.objArrayClassIdx = null;
         graph.primArrayClassIdx = null;
-        // big25: compress classIndex+shallowSizeDiv8 now that A2a fill is done; frees ~1.25 GB
-        // during A2b/A2c/RPO/DOM peak. Decompressed before RetainedSizes.
-        if (compressLevel > 0) graph.compressPerObjectArrays(compressLevel);
+        // big25: free classIndex+shallowSizeDiv8 to save ~2.25 GB during A2b/A2c/RPO/DOM peak.
+        // Refilled by phaseA3() after DOM, before RetainedSizes.compute().
+        if (compressLevel > 0) {
+            graph.freePerObjectArrays();
+            System.gc();
+        }
 
         // Prefix-sum outDegree in-place → becomes fwdOffsets[0..N-1].
         // Use outDegree directly as fwdOffsets (int[N]), saving the 2 GB Arrays.copyOf(N+1)
@@ -921,9 +931,141 @@ public final class HeapGraphBuilder {
         graph.classNodeIdx = classNodeIdx;
         if (keepAddressIndex) {
             graph.idMap.freeBucket(); // HTML mode: keep intBuf/buf for address display
-        } else {
-            graph.idMap.freeSortedArrays(); // Markdown mode: free ~2 GB now; no address lookups needed
+        } else if (compressLevel <= 0) {
+            graph.idMap.freeSortedArrays(); // Markdown mode, no A3: free ~2 GB now
         }
+        // When compressLevel > 0, freeSortedArrays() is deferred to after phaseA3 in buildInternal.
+    }
+
+    /**
+     * Phase A.3: mini re-fill of classIndex and shallowSizeDiv8.
+     * Called after DOM when those arrays were freed (big25). Re-reads only HEAP_DUMP segments,
+     * skipping edge data. No edge counts, no reference parsing — just sizes and class attribution.
+     */
+    private void phaseA3(HeapGraph graph) throws IOException {
+        graph.classIndex      = new int[graph.N];
+        graph.shallowSizeDiv8 = new byte[graph.N];
+        int ids   = graph.idSize;
+        IdMap idMap = graph.idMap;
+        try (Parser p = openParser()) {
+            while (true) {
+                int tag = p.readTag();
+                if (tag < 0) break;
+                p.readU4(); // timestamp (unused)
+                long len = p.readU4();
+                if (tag != HPROF_HEAP_DUMP && tag != HPROF_HEAP_DUMP_SEGMENT) {
+                    p.skipFully(len);
+                    continue;
+                }
+                fillSegmentA3(p, (int) len, ids, idMap, graph);
+            }
+        }
+    }
+
+    private void fillSegmentA3(Parser p, int segLen, int ids, IdMap idMap, HeapGraph graph) throws IOException {
+        int remaining = segLen;
+        int N = graph.N;
+        while (remaining > 0) {
+            int subTag = p.readU1(); remaining--;
+            switch (subTag) {
+                case HPROF_GC_ROOT_UNKNOWN, HPROF_GC_ROOT_STICKY_CLASS, HPROF_GC_ROOT_MONITOR_USED -> {
+                    p.skipFully(ids); remaining -= ids;
+                }
+                case HPROF_GC_ROOT_JNI_GLOBAL -> { p.skipFully(ids * 2L); remaining -= ids * 2; }
+                case HPROF_GC_ROOT_JNI_LOCAL, HPROF_GC_ROOT_JAVA_FRAME, HPROF_GC_ROOT_THREAD_OBJ -> {
+                    p.skipFully(ids + 8L); remaining -= ids + 8;
+                }
+                case HPROF_GC_ROOT_NATIVE_STACK, HPROF_GC_ROOT_THREAD_BLOCK -> {
+                    p.skipFully(ids + 4L); remaining -= ids + 4;
+                }
+                case HPROF_GC_CLASS_DUMP -> remaining -= fillClassDumpA3(p, ids, idMap, graph, N);
+                case HPROF_GC_INSTANCE_DUMP -> {
+                    long objId = p.readId(); p.readU4(); long classId = p.readId();
+                    int dataLen = (int) p.readU4();
+                    p.skipFully(dataLen);
+                    remaining -= ids + 4 + ids + 4 + dataLen;
+                    int srcIdx = objectIndex(idMap, objId);
+                    if (srcIdx >= 0 && srcIdx < N) {
+                        int classIdx = graph.classIdToIndex.getIfAbsent(classId, -1);
+                        if (classIdx >= 0) {
+                            graph.classIndex[srcIdx] = classIdx;
+                            ClassRecord cr = graph.classList.get(classIdx);
+                            int bytes = (cr instanceof ClassRecord.Full f && f.matInstanceShallowBytes > 0)
+                                    ? f.matInstanceShallowBytes
+                                    : alignUp(graph.pointerSize + graph.refSize, graph.objectAlign);
+                            setShallow(graph, srcIdx, bytes);
+                        }
+                    }
+                }
+                case HPROF_GC_OBJ_ARRAY_DUMP -> {
+                    long objId = p.readId(); p.readU4(); int numElem = (int) p.readU4();
+                    long elemClassId = p.readId();
+                    p.skipFully((long) numElem * ids);
+                    remaining -= ids + 4 + 4 + ids + numElem * ids;
+                    int srcIdx = objectIndex(idMap, objId);
+                    if (srcIdx >= 0 && srcIdx < N) {
+                        int bytes = alignUp(graph.pointerSize + graph.refSize + 4 + numElem * graph.refSize, graph.objectAlign);
+                        setShallow(graph, srcIdx, bytes);
+                        int arrayClassIdx = graph.classIdToIndex.getIfAbsent(elemClassId, -1);
+                        if (arrayClassIdx >= 0) graph.classIndex[srcIdx] = arrayClassIdx;
+                    }
+                }
+                case HPROF_GC_PRIM_ARRAY_DUMP -> {
+                    long objId = p.readId(); p.readU4(); int numElem = (int) p.readU4();
+                    int elemType = p.readU1();
+                    int elemSize = primTypeSize(elemType);
+                    long dataBytes = (long) numElem * elemSize;
+                    p.skipFully(dataBytes);
+                    remaining -= ids + 4 + 4 + 1 + (int) dataBytes;
+                    int srcIdx = objectIndex(idMap, objId);
+                    if (srcIdx >= 0 && srcIdx < N) {
+                        int bytes = alignUp(alignUp(graph.pointerSize + graph.refSize + 4, graph.refSize) + numElem * elemSize, graph.objectAlign);
+                        setShallow(graph, srcIdx, bytes);
+                        // classIndex for primitive arrays: left as 0 (acceptable; prim arrays don't affect class grouping)
+                    }
+                }
+                default -> throw new IOException("Unknown heap sub-record tag: 0x" + Integer.toHexString(subTag));
+            }
+        }
+    }
+
+    private int fillClassDumpA3(Parser p, int ids, IdMap idMap, HeapGraph graph, int N) throws IOException {
+        int consumed = 0;
+        long classId = p.readId(); consumed += ids;
+        p.readU4(); consumed += 4; // stack serial
+        p.skipFully(ids * 6L); consumed += ids * 6; // super, loader, signers, domain, reserved×2
+        p.readU4(); consumed += 4; // instance size
+
+        int srcIdx = objectIndex(idMap, classId);
+        if (srcIdx >= 0 && srcIdx < N) {
+            int classIdx = graph.classIdToIndex.getIfAbsent(classId, -1);
+            if (classIdx >= 0 && graph.classList.get(classIdx) instanceof ClassRecord.Full f) {
+                // Use matClassShallowBytes directly — setShallow(0) is a no-op, matching A2a behavior.
+                setShallow(graph, srcIdx, f.matClassShallowBytes);
+                if (graph.javaLangClassIdx >= 0) graph.classIndex[srcIdx] = graph.javaLangClassIdx;
+            }
+        }
+
+        // Skip constant pool, static fields, instance fields
+        int cpCount = p.readU2(); consumed += 2;
+        for (int i = 0; i < cpCount; i++) {
+            p.readU2(); consumed += 2;
+            int type = p.readU1(); consumed++;
+            int sz = typeSize(type, ids);
+            p.skipFully(sz); consumed += sz;
+        }
+        int sfCount = p.readU2(); consumed += 2;
+        for (int i = 0; i < sfCount; i++) {
+            p.skipFully(ids); consumed += ids;
+            int type = p.readU1(); consumed++;
+            int sz = typeSize(type, ids);
+            p.skipFully(sz); consumed += sz;
+        }
+        int ifCount = p.readU2(); consumed += 2;
+        for (int i = 0; i < ifCount; i++) {
+            p.skipFully(ids + 1); consumed += ids + 1;
+        }
+        return consumed;
     }
 
     /** Exact out-degree and in-degree count: reads actual ref values from instance data. */
@@ -1569,7 +1711,8 @@ public final class HeapGraphBuilder {
             });
 
             // Precompute MAT-parity per-instance size for every class using calculateInstanceSize.
-            // Stored in graph.matInstanceSize/matClassSize for use by A2a inline fill (big24).
+            // Stored in graph.matInstanceSize/matClassSize for use by A2a inline fill (big24),
+            // and also written into ClassRecord.Full for A3 re-fill after the maps are freed.
             final int pointerSize = graph.pointerSize;
             final int refSize = graph.refSize;
             final int objectAlign = graph.objectAlign;
@@ -1585,6 +1728,13 @@ public final class HeapGraphBuilder {
                 int sfBytes = sfObj * refSize + sfPrim;
                 graph.matClassSize.put(classId, alignUp(sfBytes, objectAlign));
             });
+            // Copy into ClassRecord.Full so A3 can refill without needing the transient maps.
+            for (ClassRecord cr : graph.classList) {
+                if (cr instanceof ClassRecord.Full f) {
+                    f.matInstanceShallowBytes = graph.matInstanceSize.getIfAbsent(f.classId(), 0);
+                    f.matClassShallowBytes    = graph.matClassSize.getIfAbsent(f.classId(), 0);
+                }
+            }
 
             // Look up java.lang.Class classIdx — for attributing class-object shallow to it (MAT parity).
             for (int ci = 0; ci < graph.classList.size(); ci++) {

@@ -44,6 +44,10 @@ public sealed interface ClassRecord permits ClassRecord.Full, ArrayClassRecord {
         private short[] objectFieldNameIds;
         private int[]   objectFieldOffsets;
         private final int ownFieldsSize;
+        /** MAT-parity shallow size for instances of this class. Set once in buildClassList; used in A3. */
+        int matInstanceShallowBytes;
+        /** MAT-parity shallow size for the class-object itself. Set once in buildClassList; used in A3. */
+        int matClassShallowBytes;
 
         Full(long classId, String name, long classLoaderId, long superClassId,
              int instanceSize, int classSerialNumber,

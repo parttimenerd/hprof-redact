@@ -11,9 +11,6 @@ import java.util.BitSet;
 import java.util.HashMap;
 import java.util.List;
 import java.util.Map;
-import java.util.zip.Deflater;
-import java.util.zip.Inflater;
-import java.io.ByteArrayOutputStream;
 import org.eclipse.collections.impl.map.mutable.primitive.LongIntHashMap;
 import org.eclipse.collections.impl.map.mutable.primitive.IntLongHashMap;
 import org.eclipse.collections.impl.map.mutable.primitive.IntIntHashMap;
@@ -61,10 +58,6 @@ public final class HeapGraph {
     byte[]  shallowSizeDiv8;         // 1 byte/obj; value×8 = shallow bytes; 0 = overflowSizes
     LongLongMap overflowSizes;       // objectId(int key) → long shallow size (for objects > 2040 B)
     int[] classIndex;                // index into classList; -1 = class object itself
-    /** Deflate-compressed classIndex (int[N] as big-endian bytes). Non-null only while classIndex==null. */
-    byte[] classIndexZ;
-    /** Deflate-compressed shallowSizeDiv8 (byte[N]). Non-null only while shallowSizeDiv8==null. */
-    byte[] shallowSizeDiv8Z;
     BitSet isGCRoot;
     int[] gcRootIds;                 // dense list of root object indices
     byte[] gcRootTypes;              // GC root type code per actual root
@@ -334,82 +327,14 @@ public final class HeapGraph {
     public void freeAddressIndex() { idMap.freeSortedArrays(); }
 
     /**
-     * Compress classIndex and shallowSizeDiv8 with Deflate at the given level (1=fast, 9=max),
-     * then null the originals. Call after A2a fill. Decompressed on demand via expandPerObjectArrays().
-     * Peak savings: ~1.25 GB at A2b/A2c/RPO/DOM for a 514M-object heap.
+     * Free classIndex and shallowSizeDiv8 to reduce peak RSS during A2b/A2c/RPO/DOM.
+     * These arrays are refilled by HeapGraphBuilder.phaseA3() before RetainedSizes.compute().
+     * Saves ~2.25 GB throughout the ~400s A2b/A2c/RPO/DOM window.
      */
-    void compressPerObjectArrays(int level) {
-        classIndexZ      = deflateInts(classIndex, level);       classIndex      = null;
-        shallowSizeDiv8Z = deflateBytes(shallowSizeDiv8, level); shallowSizeDiv8 = null;
-    }
-
-    /** Decompress classIndex and shallowSizeDiv8. Call before RetainedSizes.compute(). */
-    void expandPerObjectArrays() {
-        classIndex      = inflateInts(classIndexZ, N);    classIndexZ     = null;
-        shallowSizeDiv8 = inflateBytes(shallowSizeDiv8Z, N); shallowSizeDiv8Z = null;
-    }
-
-    private static byte[] deflateBytes(byte[] src, int level) {
-        Deflater d = new Deflater(level);
-        d.setInput(src);
-        d.finish();
-        ByteArrayOutputStream baos = new ByteArrayOutputStream(src.length / 2);
-        byte[] buf = new byte[1 << 16];
-        while (!d.finished()) { int n = d.deflate(buf); baos.write(buf, 0, n); }
-        d.end();
-        return baos.toByteArray();
-    }
-
-    private static byte[] deflateInts(int[] src, int level) {
-        Deflater d = new Deflater(level);
-        // Feed as raw big-endian bytes without boxing
-        byte[] raw = new byte[src.length * 4];
-        for (int i = 0, j = 0; i < src.length; i++) {
-            int v = src[i];
-            raw[j++] = (byte)(v >>> 24);
-            raw[j++] = (byte)(v >>> 16);
-            raw[j++] = (byte)(v >>>  8);
-            raw[j++] = (byte) v;
-        }
-        d.setInput(raw);
-        d.finish();
-        ByteArrayOutputStream baos = new ByteArrayOutputStream(raw.length / 2);
-        byte[] buf = new byte[1 << 16];
-        while (!d.finished()) { int n = d.deflate(buf); baos.write(buf, 0, n); }
-        d.end();
-        return baos.toByteArray();
-    }
-
-    private static byte[] inflateBytes(byte[] src, int n) {
-        try {
-            Inflater inf = new Inflater();
-            inf.setInput(src);
-            byte[] out = new byte[n];
-            inf.inflate(out);
-            inf.end();
-            return out;
-        } catch (java.util.zip.DataFormatException e) {
-            throw new RuntimeException("Failed to decompress shallowSizeDiv8", e);
-        }
-    }
-
-    private static int[] inflateInts(byte[] src, int n) {
-        try {
-            Inflater inf = new Inflater();
-            inf.setInput(src);
-            byte[] raw = new byte[n * 4];
-            inf.inflate(raw);
-            inf.end();
-            int[] out = new int[n];
-            for (int i = 0, j = 0; i < n; i++) {
-                out[i] = ((raw[j] & 0xFF) << 24) | ((raw[j+1] & 0xFF) << 16)
-                        | ((raw[j+2] & 0xFF) << 8) | (raw[j+3] & 0xFF);
-                j += 4;
-            }
-            return out;
-        } catch (java.util.zip.DataFormatException e) {
-            throw new RuntimeException("Failed to decompress classIndex", e);
-        }
+    void freePerObjectArrays() {
+        classIndex      = null;
+        shallowSizeDiv8 = null;
+        overflowSizes   = null; // refilled by setShallow calls in phaseA3
     }
 
     /**
