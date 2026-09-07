@@ -1,0 +1,30 @@
+tag: poc
+maven_coordinates: me.bechberger:hprof-redact
+tagline: Stream-based library to redact sensitive data from HPROF heap dumps without loading the full
+  file into memory — zeroes string contents and primitive values while preserving binary structure.
+  Primarily intended as a library for future CF plugin integration. For standalone redaction use
+  hprof-analyzer's built-in redact subcommand instead.
+tagline_short: Stream-redact strings and primitives from HPROF heap dumps — library for CF plugin integration.
+when_to_use:
+- You are building tooling that needs to redact heap dumps programmatically (library use)
+when_not_to_use:
+- You want to redact a dump interactively — use hprof-analyzer's built-in redact subcommand instead
+- You need guaranteed complete privacy — not security-audited
+related:
+- label: hprof-analyzer
+  url: https://github.com/parttimenerd/hprof-analyzer
+install:
+- label: Maven
+  lang: xml
+  code: |
+    <dependency>
+      <groupId>me.bechberger</groupId>
+      <artifactId>hprof-redact</artifactId>
+      <version>VERSION</version>
+    </dependency>
+usage:
+- label: Basic Usage
+  lang: bash
+  code: |
+    java -jar hprof-redact.jar input.hprof output-redacted.hprof
+note: Early proof-of-concept. Not security-audited — review before using for compliance purposes.
