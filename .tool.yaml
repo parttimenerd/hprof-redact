@@ -1,10 +1,10 @@
 tag: poc
 maven_coordinates: me.bechberger:hprof-redact
-tagline: Stream-based library to redact sensitive data from HPROF heap dumps without loading the full
-  file into memory — zeroes string contents and primitive values while preserving binary structure.
-  Primarily intended as a library for future CF plugin integration. For standalone redaction use
-  hprof-analyzer's built-in redact subcommand instead.
-tagline_short: Stream-redact strings and primitives from HPROF heap dumps — library for CF plugin integration.
+tagline: Deprecated standalone redaction tool — the `hprof-analyzer redact` subcommand now supersedes
+  this for CLI use. The underlying stream-based library (zeroes string contents and primitive values
+  without loading the full file into memory) remains available for programmatic pipeline integration,
+  e.g. CF plugin tooling.
+tagline_short: Deprecated — use `hprof-analyzer redact` instead. Library available for programmatic pipeline use.
 when_to_use:
 - You are building tooling that needs to redact heap dumps programmatically (library use)
 when_not_to_use:
@@ -23,8 +23,39 @@ install:
       <version>VERSION</version>
     </dependency>
 usage:
-- label: Basic Usage
+- label: Standalone redaction (via hprof-analyzer)
   lang: bash
   code: |
-    java -jar hprof-redact.jar input.hprof output-redacted.hprof
-note: Early proof-of-concept. Not security-audited — review before using for compliance purposes.
+    hprof-analyzer redact input.hprof redacted.hprof
+- label: Library use
+  lang: java
+  code: |
+    HprofRedactor.redact(Path.of("input.hprof"), Path.of("redacted.hprof"));
+how_to:
+- title: Redact a heap dump before sharing
+  body: |
+    For standalone use, call `hprof-analyzer redact` — it uses this library internally
+    and is the recommended way to redact without writing code:
+    ```bash
+    hprof-analyzer redact heap.hprof redacted.hprof
+    ```
+    The redacted dump zeroes all string values and primitive field contents while keeping
+    class/field/method names intact. hprof-analyzer detects it automatically and shows
+    a "Redacted dump" banner in the report.
+
+- title: Redact programmatically in a pipeline
+  body: |
+    Add the Maven dependency and call `HprofRedactor.redact()` in a stream pipeline —
+    the library never loads the full dump into memory:
+    ```java
+    import me.bechberger.HprofRedactor;
+    import java.nio.file.Path;
+
+    HprofRedactor.redact(
+        Path.of("heap.hprof"),
+        Path.of("heap-redacted.hprof")
+    );
+    ```
+    Use this when building CF plugin tooling or any pipeline that needs to strip sensitive
+    data before uploading a dump to a remote system.
+note: Deprecated for standalone use — `hprof-analyzer redact` supersedes this. Library is still usable for programmatic pipeline integration. Not security-audited — review before using for compliance purposes.
